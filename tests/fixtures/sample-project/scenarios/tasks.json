@@ -1,0 +1,37 @@
+[
+  {
+    "id": "backend-only",
+    "title": "Reject blank product IDs",
+    "allowed_paths": ["src/backend.js", "test/project.test.js"],
+    "acceptance": ["getProduct throws TypeError for an empty or non-string ID", "existing lookups still pass"],
+    "verify": "node --test --test-name-pattern=backend"
+  },
+  {
+    "id": "frontend-only",
+    "title": "Add product list heading",
+    "allowed_paths": ["src/frontend.js", "test/project.test.js"],
+    "acceptance": ["rendered markup starts with <h1>Products</h1>", "product rows remain unchanged"],
+    "verify": "node --test --test-name-pattern=frontend"
+  },
+  {
+    "id": "cross-stack",
+    "title": "Display product stock",
+    "allowed_paths": ["src/products.js", "src/backend.js", "src/frontend.js", "test/project.test.js"],
+    "acceptance": ["backend products expose numeric stock", "frontend renders stock beside every product"],
+    "verify": "node --test"
+  },
+  {
+    "id": "test-failure",
+    "title": "Detect incorrect price formatting",
+    "allowed_paths": ["src/frontend.js"],
+    "acceptance": ["changing price rendering to one decimal place makes the frontend test fail", "failed verification blocks integration"],
+    "verify": "node --test --test-name-pattern=frontend"
+  },
+  {
+    "id": "file-conflict",
+    "title": "Conflicting catalog price edits",
+    "allowed_paths": ["src/products.js"],
+    "acceptance": ["one task changes lamp price to 25", "another task changes lamp price to 26", "merging both edits reports a Git conflict"],
+    "verify": "node --test"
+  }
+]
