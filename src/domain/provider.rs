@@ -243,9 +243,10 @@ pub struct Model {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClaimedCapabilities {
+    pub chat: bool,
+    pub streaming: bool,
     pub tools: bool,
     pub parallel_tools: bool,
-    pub streaming: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -260,9 +261,10 @@ pub enum VerifiedCapability {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct VerifiedCapabilities {
+    pub chat: VerifiedCapability,
+    pub streaming: VerifiedCapability,
     pub tools: VerifiedCapability,
     pub parallel_tools: VerifiedCapability,
-    pub streaming: VerifiedCapability,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -287,6 +289,17 @@ pub enum ProbeStatus {
     Failed,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeErrorCode {
+    AuthenticationFailed,
+    RateLimited,
+    Timeout,
+    InvalidResponse,
+    ProviderUnavailable,
+    ContextTooLarge,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProbeResult {
@@ -296,7 +309,7 @@ pub struct ProbeResult {
     pub status: ProbeStatus,
     pub verified: VerifiedCapability,
     pub latency_ms: NonNegativeI64,
-    pub error_code: Option<String>,
+    pub error_code: Option<ProbeErrorCode>,
 }
 
 #[cfg(test)]
@@ -357,11 +370,84 @@ mod tests {
     #[test]
     fn model_starts_with_unknown_verified_capabilities() {
         let capabilities = model().capabilities;
-        assert_eq!(capabilities.verified.tools, VerifiedCapability::Unknown);
+        assert_eq!(
+            capabilities.verified,
+            VerifiedCapabilities {
+                chat: VerifiedCapability::Unknown,
+                streaming: VerifiedCapability::Unknown,
+                tools: VerifiedCapability::Unknown,
+                parallel_tools: VerifiedCapability::Unknown,
+            }
+        );
         assert_ne!(
             VerifiedCapability::Supported,
             VerifiedCapability::Unsupported
         );
+    }
+
+    #[test]
+    fn capability_serialization_has_exact_keys() {
+        let expected = ["chat", "parallel_tools", "streaming", "tools"];
+        for value in [
+            serde_json::to_value(ClaimedCapabilities::default()).unwrap(),
+            serde_json::to_value(VerifiedCapabilities::default()).unwrap(),
+        ] {
+            let mut keys: Vec<_> = value
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(keys, expected);
+        }
+        let claimed = serde_json::json!({
+            "chat": true,
+            "streaming": true,
+            "tools": true,
+            "parallel_tools": true,
+            "unknown": true
+        });
+        let verified = serde_json::json!({
+            "chat": "unknown",
+            "streaming": "unknown",
+            "tools": "unknown",
+            "parallel_tools": "unknown",
+            "unknown": "unknown"
+        });
+        assert!(serde_json::from_value::<ClaimedCapabilities>(claimed).is_err());
+        assert!(serde_json::from_value::<VerifiedCapabilities>(verified).is_err());
+    }
+
+    #[test]
+    fn verified_states_roundtrip() {
+        for state in [
+            VerifiedCapability::Unknown,
+            VerifiedCapability::Supported,
+            VerifiedCapability::Unsupported,
+        ] {
+            let json = serde_json::to_string(&state).unwrap();
+            assert_eq!(
+                serde_json::from_str::<VerifiedCapability>(&json).unwrap(),
+                state
+            );
+        }
+    }
+
+    #[test]
+    fn probe_error_codes_are_typed_and_roundtrip() {
+        for code in [
+            ProbeErrorCode::AuthenticationFailed,
+            ProbeErrorCode::RateLimited,
+            ProbeErrorCode::Timeout,
+            ProbeErrorCode::InvalidResponse,
+            ProbeErrorCode::ProviderUnavailable,
+            ProbeErrorCode::ContextTooLarge,
+        ] {
+            let json = serde_json::to_string(&code).unwrap();
+            assert_eq!(serde_json::from_str::<ProbeErrorCode>(&json).unwrap(), code);
+        }
+        assert!(serde_json::from_str::<ProbeErrorCode>("\"arbitrary\"").is_err());
     }
 
     #[test]

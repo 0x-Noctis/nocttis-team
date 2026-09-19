@@ -237,7 +237,10 @@ mod tests {
                 "context_window": 1,
                 "max_output_tokens": 1
             });
-            input.as_object_mut().unwrap().insert(field.into(), serde_json::Value::Null);
+            input
+                .as_object_mut()
+                .unwrap()
+                .insert(field.into(), serde_json::Value::Null);
             assert!(serde_json::from_value::<ModelInput>(input).is_err());
         }
     }
