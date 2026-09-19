@@ -105,7 +105,7 @@ cargo test --test integration -- --test-threads=1
 
 | Milestone | Tujuan | Status | Exit Gate |
 |---|---|---|---|
-| M0 | Baseline dan fondasi repo | `[~]` | lingkungan repeatable, baseline tersimpan |
+| M0 | Baseline dan fondasi repo | `[x]` | lingkungan repeatable, baseline tersimpan |
 | M1 | Provider foundation | `[ ]` | provider dikelola dan seluruh probe lulus |
 | M2 | Single-worker vertical slice | `[ ]` | satu task menghasilkan patch terverifikasi |
 | M3 | Lead Agent dan task DAG | `[ ]` | plan disetujui dan dependency dipatuhi |
@@ -131,7 +131,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
 
 ## Gelombang M0-A — Dapat Dikerjakan Bersamaan
 
-- [ ] **M0-001 — Governance repository** · Lane D
+- [x] **M0-001 — Governance repository** · Lane D
   - Depends On: —
   - Parallel With: M0-002, M0-003
   - Allowed Paths: `.gitignore`, `AGENTS.md`, `README.md`, `docs/development.md`
@@ -145,7 +145,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
     - tidak ada file generated besar yang tracked.
   - Verify: `git status --short --ignored`, ikuti langkah README dari shell bersih.
 
-- [ ] **M0-002 — Repository fixture E2E** · Lane D
+- [x] **M0-002 — Repository fixture E2E** · Lane D
   - Depends On: —
   - Parallel With: M0-001, M0-003
   - Allowed Paths: `tests/fixtures/sample-project/**`
@@ -156,7 +156,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
     - tidak membutuhkan network saat test.
   - Verify: script/command fixture menjalankan seluruh test dengan status lulus sebelum mutasi skenario.
 
-- [ ] **M0-003 — Konfigurasi runtime typed** · Lane A
+- [x] **M0-003 — Konfigurasi runtime typed** · Lane A
   - Depends On: —
   - Parallel With: M0-001, M0-002
   - Allowed Paths: `src/config.rs`, `src/main.rs`, `config/example.toml`, `.env.example`, `Cargo.toml`, `Cargo.lock`
@@ -170,7 +170,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
 
 ## Gelombang M0-B
 
-- [ ] **M0-004 — Baseline single-agent** · Lane D
+- [x] **M0-004 — Baseline single-agent** · Lane D
   - Depends On: M0-002
   - Parallel With: M0-005
   - Allowed Paths: `docs/baseline.md`, `tests/baseline/**`
@@ -178,7 +178,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: catat success rate, input/output token, latency, retry, konflik, test pass rate, intervensi manusia, dan biaya.
   - Verify: tabel baseline memiliki command, model, tanggal, dan artifact mentah yang dirujuk.
 
-- [ ] **M0-005 — Error envelope dan request ID** · Lane A
+- [x] **M0-005 — Error envelope dan request ID** · Lane A
   - Depends On: M0-003
   - Parallel With: M0-004
   - Allowed Paths: `src/api/error.rs`, `src/api/mod.rs`, `src/main.rs`, `tests/api_error.rs`
@@ -191,10 +191,10 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
 
 ### Exit Gate M0
 
-- [ ] Semua task M0 selesai.
-- [ ] Fixture dan baseline dapat diulang.
-- [ ] Config production-safe dan error API konsisten.
-- [ ] Full validation lulus.
+- [x] Semua task M0 selesai.
+- [x] Fixture dan baseline dapat diulang.
+- [x] Config production-safe dan error API konsisten.
+- [x] Full validation lulus.
 
 ---
 
@@ -856,3 +856,4 @@ Tambahkan satu baris saat task selesai atau diblokir.
 | Date | Task | Result | Verification | Notes |
 |---|---|---|---|---|
 | 2026-09-19 | BOOT-001..004 | Foundation complete | `cargo test`, `npm run check`, `npm run build`, DB health | Provider probe masih minimum |
+| 2026-09-19 | M0-001..005 | Milestone M0 complete; integration commit `eba44d1` | `cargo fmt --check`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo test`; `npm run check`; `npm run build`; `docker compose config --quiet` | Semua full validation lulus |
