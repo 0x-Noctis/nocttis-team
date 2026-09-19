@@ -1,7 +1,24 @@
-/.env
-/.idea
-/target
-/data
-/web/.svelte-kit
-/web/build
-/web/node_modules
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+config/local.toml
+
+# Rust
+/target/
+
+# Web
+/web/node_modules/
+/web/.svelte-kit/
+/web/build/
+/web/coverage/
+
+# Runtime data and logs
+/data/
+*.log
+
+# Editors and operating systems
+.idea/
+.vscode/
+*.swp
+.DS_Store
