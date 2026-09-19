@@ -1,0 +1,7 @@
+/.env
+/.idea
+/target
+/data
+/web/.svelte-kit
+/web/build
+/web/node_modules

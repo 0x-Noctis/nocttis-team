@@ -1,0 +1,19 @@
+[scheduler]
+max_parallel_agents = 2
+heartbeat_seconds = 10
+stale_after_seconds = 60
+
+[budgets]
+default_project_tokens = 300000
+default_task_input_tokens = 30000
+default_task_output_tokens = 8000
+reserve_percent = 15
+
+[git]
+worktree_root = "./data/worktrees"
+retention_hours = 24
+
+[artifacts]
+root = "./data/artifacts"
+max_tool_output_bytes = 1048576
+
