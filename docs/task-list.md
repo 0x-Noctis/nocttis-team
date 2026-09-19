@@ -202,7 +202,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
 
 ## Gelombang M1-A — Contract dan Storage
 
-- [ ] **M1-001 — Domain provider dan model** · Lane A
+- [x] **M1-001 — Domain provider dan model** · Lane A
   - Depends On: M0-003, M0-005
   - Parallel With: M1-002, M1-003
   - Allowed Paths: `src/domain/provider.rs`, `src/domain/mod.rs`, `src/api/contracts/provider.rs`
@@ -213,7 +213,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
     - capability membedakan claimed dan verified.
   - Verify: unit test seluruh validasi boundary.
 
-- [ ] **M1-002 — Migration provider registry** · Lane A
+- [x] **M1-002 — Migration provider registry** · Lane A
   - Depends On: M0-003
   - Parallel With: M1-001, M1-003
   - Allowed Paths: `migrations/0002_provider_registry.sql`, `tests/migrations.rs`
@@ -224,7 +224,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
     - remote model name unik per provider.
   - Verify: migration database kosong dan schema constraint tests.
 
-- [ ] **M1-003 — Model gateway contract dan error taxonomy** · Lane B
+- [x] **M1-003 — Model gateway contract dan error taxonomy** · Lane B
   - Depends On: M0-003, M0-005
   - Parallel With: M1-001, M1-002
   - Allowed Paths: `src/model/types.rs`, `src/model/error.rs`, `src/model/mod.rs`, `src/model_gateway.rs`
@@ -247,16 +247,16 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
 
 - [ ] **M1-005 — Chat completion normal** · Lane B
   - Depends On: M1-003
-  - Parallel With: M1-004, M1-006, M1-007
+  - Parallel With: M1-004, M1-007
   - Allowed Paths: `src/model/openai/chat.rs`, `src/model/openai/mod.rs`, `src/model_gateway.rs`, `tests/model_chat.rs`
   - Output: client chat normal dengan timeout dan usage normalization.
   - Acceptance: base URL `/v1` tidak hilang, missing usage ditandai estimated, response invalid ditolak aman.
   - Verify: mock tests untuk 200, 401, 429, 500, timeout, malformed JSON, dan missing usage.
 
 - [ ] **M1-006 — Streaming SSE provider** · Lane B
-  - Depends On: M1-003
-  - Parallel With: M1-004, M1-005, M1-007
-  - Allowed Paths: `src/model/openai/stream.rs`, `tests/model_stream.rs`
+  - Depends On: M1-003, M1-005
+  - Parallel With: M1-004, M1-007
+  - Allowed Paths: `src/model/openai/stream.rs`, `src/model/openai/mod.rs`, `tests/model_stream.rs`
   - Output: parser stream SSE dan agregasi content/usage.
   - Acceptance: menangani chunk terpotong, `[DONE]`, empty delta, disconnect, dan provider error event.
   - Verify: fixture stream terfragmentasi dan disconnect test.
@@ -857,3 +857,4 @@ Tambahkan satu baris saat task selesai atau diblokir.
 |---|---|---|---|---|
 | 2026-09-19 | BOOT-001..004 | Foundation complete | `cargo test`, `npm run check`, `npm run build`, DB health | Provider probe masih minimum |
 | 2026-09-19 | M0-001..005 | Milestone M0 complete; integration commit `eba44d1` | `cargo fmt --check`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo test`; `npm run check`; `npm run build`; `docker compose config --quiet` | Semua full validation lulus |
+| 2026-09-19 | M1-A | Cross-contract provider foundation lulus; test commit `6651bb1` | `cargo test --test provider_contract -- --test-threads=1 --nocapture`; `cargo fmt --check`; `cargo test`; `cargo clippy --all-targets --all-features -- -D warnings`; `git diff --check` | PostgreSQL aktif dari instance sehat; roundtrip domain, capability, probe, ID, dan bigint lossless |
