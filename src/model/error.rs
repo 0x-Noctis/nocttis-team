@@ -6,8 +6,6 @@ use reqwest::StatusCode;
 use serde::Serialize;
 use serde_json::Value;
 
-const MAX_PROVIDER_CODE_CHARS: usize = 64;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelErrorKind {
@@ -22,21 +20,15 @@ pub enum ModelErrorKind {
 #[derive(Debug, Eq, PartialEq)]
 pub struct ModelError {
     kind: ModelErrorKind,
-    provider_code: Option<String>,
 }
 
 impl ModelError {
     pub fn new(kind: ModelErrorKind) -> Self {
-        Self {
-            kind,
-            provider_code: None,
-        }
+        Self { kind }
     }
 
     pub fn from_status(status: StatusCode, provider_body: &str) -> Self {
-        let provider_code = provider_code(provider_body);
-        let kind = if status == StatusCode::BAD_REQUEST
-            && provider_code.as_deref() == Some("context_length_exceeded")
+        let kind = if status == StatusCode::BAD_REQUEST && is_context_length_exceeded(provider_body)
         {
             ModelErrorKind::ContextTooLarge
         } else {
@@ -53,17 +45,11 @@ impl ModelError {
                 _ => ModelErrorKind::InvalidResponse,
             }
         };
-        Self {
-            kind,
-            provider_code,
-        }
+        Self { kind }
     }
 
-    pub fn invalid_response(provider_body: &str) -> Self {
-        Self {
-            kind: ModelErrorKind::InvalidResponse,
-            provider_code: provider_code(provider_body),
-        }
+    pub fn invalid_response(_provider_body: &str) -> Self {
+        Self::new(ModelErrorKind::InvalidResponse)
     }
 
     pub fn kind(&self) -> ModelErrorKind {
@@ -78,19 +64,11 @@ impl ModelError {
                 | ModelErrorKind::ProviderUnavailable
         )
     }
-
-    pub fn provider_code(&self) -> Option<&str> {
-        self.provider_code.as_deref()
-    }
 }
 
 impl fmt::Display for ModelError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}", self.kind)?;
-        if let Some(code) = &self.provider_code {
-            write!(formatter, " ({code})")?;
-        }
-        Ok(())
+        write!(formatter, "{}", self.kind)
     }
 }
 
@@ -109,15 +87,12 @@ impl fmt::Display for ModelErrorKind {
     }
 }
 
-fn provider_code(body: &str) -> Option<String> {
-    let parsed = serde_json::from_str::<Value>(body).ok()?;
-    let code = parsed.get("error")?.get("code")?.as_str()?;
-    (code.len() <= MAX_PROVIDER_CODE_CHARS
-        && !code.is_empty()
-        && code
-            .bytes()
-            .all(|character| character.is_ascii_alphanumeric() || b"_.-".contains(&character)))
-    .then(|| code.to_owned())
+fn is_context_length_exceeded(body: &str) -> bool {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|value| value.get("error")?.get("code")?.as_str().map(str::to_owned))
+        .as_deref()
+        == Some("context_length_exceeded")
 }
 
 #[cfg(test)]
@@ -171,27 +146,19 @@ mod tests {
 
         assert_eq!(error.kind(), ModelErrorKind::ContextTooLarge);
         assert!(!error.retryable());
-        assert_eq!(error.provider_code(), Some("context_length_exceeded"));
+        assert_eq!(error.to_string(), "context_too_large");
     }
 
     #[test]
-    fn keeps_only_safe_provider_code() {
-        let safe = ModelError::from_status(
+    fn arbitrary_provider_code_is_not_stored_or_displayed() {
+        let error = ModelError::from_status(
             StatusCode::BAD_REQUEST,
-            r#"{"error":{"code":"request.invalid-1"}}"#,
+            r#"{"error":{"code":"sk_live_secret"}}"#,
         );
-        let unsafe_code = ModelError::from_status(
-            StatusCode::BAD_REQUEST,
-            r#"{"error":{"code":"key=quoted-secret"}}"#,
-        );
-        let too_long = format!(r#"{{"error":{{"code":"{}"}}}}"#, "x".repeat(65));
 
-        assert_eq!(safe.provider_code(), Some("request.invalid-1"));
-        assert_eq!(unsafe_code.provider_code(), None);
-        assert_eq!(
-            ModelError::from_status(StatusCode::BAD_REQUEST, &too_long).provider_code(),
-            None
-        );
+        assert_eq!(error, ModelError::new(ModelErrorKind::InvalidResponse));
+        assert_eq!(error.to_string(), "invalid_response");
+        assert!(!error.to_string().contains("sk_live_secret"));
     }
 
     #[test]
@@ -207,7 +174,7 @@ mod tests {
         for body in bodies {
             let error = ModelError::from_status(StatusCode::BAD_REQUEST, body);
             let display = error.to_string();
-            assert_eq!(error.provider_code(), None);
+            assert_eq!(error, ModelError::new(ModelErrorKind::InvalidResponse));
             assert_eq!(display, "invalid_response");
             assert!(!display.contains("secret-value"));
             assert!(!display.contains("quoted-api-key"));
