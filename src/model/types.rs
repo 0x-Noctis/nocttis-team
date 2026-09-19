@@ -49,7 +49,7 @@ pub struct ModelResponse {
     pub content: Option<String>,
     pub tool_calls: Vec<ToolCall>,
     pub finish_reason: FinishReason,
-    pub usage: Option<Usage>,
+    pub usage: Usage,
     pub latency_ms: u128,
 }
 
@@ -74,5 +74,7 @@ pub enum FinishReason {
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub cached_tokens: u64,
     pub total_tokens: u64,
+    pub estimated: bool,
 }

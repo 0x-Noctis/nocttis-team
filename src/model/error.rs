@@ -6,8 +6,7 @@ use reqwest::StatusCode;
 use serde::Serialize;
 use serde_json::Value;
 
-const MAX_PROVIDER_BODY_CHARS: usize = 500;
-const REDACTED: &str = "[REDACTED]";
+const MAX_PROVIDER_CODE_CHARS: usize = 64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -23,38 +22,47 @@ pub enum ModelErrorKind {
 #[derive(Debug, Eq, PartialEq)]
 pub struct ModelError {
     kind: ModelErrorKind,
-    provider_body: Option<String>,
+    provider_code: Option<String>,
 }
 
 impl ModelError {
     pub fn new(kind: ModelErrorKind) -> Self {
         Self {
             kind,
-            provider_body: None,
+            provider_code: None,
         }
     }
 
     pub fn from_status(status: StatusCode, provider_body: &str) -> Self {
-        let kind = match status {
-            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
-                ModelErrorKind::AuthenticationFailed
+        let provider_code = provider_code(provider_body);
+        let kind = if status == StatusCode::BAD_REQUEST
+            && provider_code.as_deref() == Some("context_length_exceeded")
+        {
+            ModelErrorKind::ContextTooLarge
+        } else {
+            match status {
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+                    ModelErrorKind::AuthenticationFailed
+                }
+                StatusCode::REQUEST_TIMEOUT | StatusCode::GATEWAY_TIMEOUT => {
+                    ModelErrorKind::Timeout
+                }
+                StatusCode::PAYLOAD_TOO_LARGE => ModelErrorKind::ContextTooLarge,
+                StatusCode::TOO_MANY_REQUESTS => ModelErrorKind::RateLimited,
+                status if status.is_server_error() => ModelErrorKind::ProviderUnavailable,
+                _ => ModelErrorKind::InvalidResponse,
             }
-            StatusCode::REQUEST_TIMEOUT | StatusCode::GATEWAY_TIMEOUT => ModelErrorKind::Timeout,
-            StatusCode::PAYLOAD_TOO_LARGE => ModelErrorKind::ContextTooLarge,
-            StatusCode::TOO_MANY_REQUESTS => ModelErrorKind::RateLimited,
-            status if status.is_server_error() => ModelErrorKind::ProviderUnavailable,
-            _ => ModelErrorKind::InvalidResponse,
         };
         Self {
             kind,
-            provider_body: Some(sanitize_provider_body(provider_body)),
+            provider_code,
         }
     }
 
     pub fn invalid_response(provider_body: &str) -> Self {
         Self {
             kind: ModelErrorKind::InvalidResponse,
-            provider_body: Some(sanitize_provider_body(provider_body)),
+            provider_code: provider_code(provider_body),
         }
     }
 
@@ -71,16 +79,16 @@ impl ModelError {
         )
     }
 
-    pub fn provider_body(&self) -> Option<&str> {
-        self.provider_body.as_deref()
+    pub fn provider_code(&self) -> Option<&str> {
+        self.provider_code.as_deref()
     }
 }
 
 impl fmt::Display for ModelError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{}", self.kind)?;
-        if let Some(body) = &self.provider_body {
-            write!(formatter, ": {body}")?;
+        if let Some(code) = &self.provider_code {
+            write!(formatter, " ({code})")?;
         }
         Ok(())
     }
@@ -101,64 +109,15 @@ impl fmt::Display for ModelErrorKind {
     }
 }
 
-fn sanitize_provider_body(body: &str) -> String {
-    let sanitized = match serde_json::from_str::<Value>(body) {
-        Ok(mut value) => {
-            redact_json(&mut value);
-            value.to_string()
-        }
-        Err(_) => body
-            .lines()
-            .map(|line| {
-                if contains_sensitive_name(line) {
-                    REDACTED.to_owned()
-                } else {
-                    redact_bearer(line)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-    };
-    sanitized.chars().take(MAX_PROVIDER_BODY_CHARS).collect()
-}
-
-fn redact_json(value: &mut Value) {
-    match value {
-        Value::Object(fields) => {
-            for (name, value) in fields {
-                if contains_sensitive_name(name) {
-                    *value = Value::String(REDACTED.to_owned());
-                } else {
-                    redact_json(value);
-                }
-            }
-        }
-        Value::Array(values) => values.iter_mut().for_each(redact_json),
-        Value::String(value) => *value = redact_bearer(value),
-        _ => {}
-    }
-}
-
-fn contains_sensitive_name(value: &str) -> bool {
-    let normalized = value.to_ascii_lowercase().replace(['-', ' '], "_");
-    ["authorization", "api_key", "apikey", "secret", "token"]
-        .iter()
-        .any(|name| normalized.contains(name))
-}
-
-fn redact_bearer(value: &str) -> String {
-    let Some(start) = value.to_ascii_lowercase().find("bearer ") else {
-        return value.to_owned();
-    };
-    let token_start = start + "bearer ".len();
-    let token_end = value[token_start..]
-        .find(char::is_whitespace)
-        .map_or(value.len(), |offset| token_start + offset);
-    format!(
-        "{}Bearer {REDACTED}{}",
-        &value[..start],
-        &value[token_end..]
-    )
+fn provider_code(body: &str) -> Option<String> {
+    let parsed = serde_json::from_str::<Value>(body).ok()?;
+    let code = parsed.get("error")?.get("code")?.as_str()?;
+    (code.len() <= MAX_PROVIDER_CODE_CHARS
+        && !code.is_empty()
+        && code
+            .bytes()
+            .all(|character| character.is_ascii_alphanumeric() || b"_.-".contains(&character)))
+    .then(|| code.to_owned())
 }
 
 #[cfg(test)]
@@ -204,30 +163,57 @@ mod tests {
     }
 
     #[test]
-    fn sanitizes_and_truncates_provider_body() {
-        let secret = "never-print-this";
-        let body = format!(
-            r#"{{"error":"{}","authorization":"Bearer {}","nested":{{"api-key":"{}"}}}}"#,
-            "x".repeat(600),
-            secret,
-            secret,
+    fn maps_context_length_code_on_bad_request() {
+        let error = ModelError::from_status(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":{"code":"context_length_exceeded"}}"#,
         );
-        let error = ModelError::from_status(StatusCode::BAD_REQUEST, &body);
-        let sanitized = error.provider_body().unwrap();
 
-        assert!(sanitized.chars().count() <= MAX_PROVIDER_BODY_CHARS);
-        assert!(!sanitized.contains(secret));
-        assert!(!sanitized.to_ascii_lowercase().contains("bearer "));
-        assert!(sanitized.contains(REDACTED));
+        assert_eq!(error.kind(), ModelErrorKind::ContextTooLarge);
+        assert!(!error.retryable());
+        assert_eq!(error.provider_code(), Some("context_length_exceeded"));
     }
 
     #[test]
-    fn sanitizes_plaintext_authorization_and_bearer_values() {
-        let body = "Authorization: Bearer header-secret\nupstream said Bearer body-secret denied";
-        let sanitized = sanitize_provider_body(body);
+    fn keeps_only_safe_provider_code() {
+        let safe = ModelError::from_status(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":{"code":"request.invalid-1"}}"#,
+        );
+        let unsafe_code = ModelError::from_status(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":{"code":"key=quoted-secret"}}"#,
+        );
+        let too_long = format!(r#"{{"error":{{"code":"{}"}}}}"#, "x".repeat(65));
 
-        assert!(!sanitized.contains("header-secret"));
-        assert!(!sanitized.contains("body-secret"));
-        assert_eq!(sanitized, "[REDACTED]\n[REDACTED]");
+        assert_eq!(safe.provider_code(), Some("request.invalid-1"));
+        assert_eq!(unsafe_code.provider_code(), None);
+        assert_eq!(
+            ModelError::from_status(StatusCode::BAD_REQUEST, &too_long).provider_code(),
+            None
+        );
+    }
+
+    #[test]
+    fn discards_body_and_secrets_from_display() {
+        let bodies = [
+            r#"{"error":"secret-in-error-field"}"#,
+            r#"{"error":{"code":"bad?key=secret-value"},"url":"https://example.test?key=secret-value"}"#,
+            r#"{"message":"api_key=\"quoted-api-key\""}"#,
+            r#"{"message":"Bearerwithout-whitespace"}"#,
+            "non-JSON secret-value",
+        ];
+
+        for body in bodies {
+            let error = ModelError::from_status(StatusCode::BAD_REQUEST, body);
+            let display = error.to_string();
+            assert_eq!(error.provider_code(), None);
+            assert_eq!(display, "invalid_response");
+            assert!(!display.contains("secret-value"));
+            assert!(!display.contains("quoted-api-key"));
+            assert!(!display.contains("secret-in-error-field"));
+            assert!(!display.contains("Bearer"));
+            assert!(!display.contains("https://"));
+        }
     }
 }
