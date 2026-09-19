@@ -22,8 +22,8 @@ impl fmt::Display for ValidationError {
 
 impl std::error::Error for ValidationError {}
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(transparent)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct HttpUrl(String);
 
 impl HttpUrl {
@@ -54,6 +54,20 @@ impl HttpUrl {
     }
 }
 
+impl TryFrom<String> for HttpUrl {
+    type Error = ValidationError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+impl From<HttpUrl> for String {
+    fn from(value: HttpUrl) -> Self {
+        value.0
+    }
+}
+
 impl FromStr for HttpUrl {
     type Err = ValidationError;
 
@@ -62,8 +76,8 @@ impl FromStr for HttpUrl {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(transparent)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct EnvironmentVariable(String);
 
 impl EnvironmentVariable {
@@ -89,6 +103,20 @@ impl EnvironmentVariable {
     }
 }
 
+impl TryFrom<String> for EnvironmentVariable {
+    type Error = ValidationError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+impl From<EnvironmentVariable> for String {
+    fn from(value: EnvironmentVariable) -> Self {
+        value.0
+    }
+}
+
 impl FromStr for EnvironmentVariable {
     type Err = ValidationError;
 
@@ -97,8 +125,8 @@ impl FromStr for EnvironmentVariable {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(transparent)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct NonEmptyString(String);
 
 impl NonEmptyString {
@@ -115,84 +143,189 @@ impl NonEmptyString {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(transparent)]
-pub struct PositiveU64(u64);
+impl TryFrom<String> for NonEmptyString {
+    type Error = ValidationError;
 
-impl PositiveU64 {
-    pub fn new(field: &'static str, value: u64) -> Result<Self, ValidationError> {
-        if value == 0 {
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse("value", value)
+    }
+}
+
+impl From<NonEmptyString> for String {
+    fn from(value: NonEmptyString) -> Self {
+        value.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(try_from = "i64", into = "i64")]
+pub struct PositiveI64(i64);
+
+impl PositiveI64 {
+    pub fn new(field: &'static str, value: i64) -> Result<Self, ValidationError> {
+        if value <= 0 {
             return Err(ValidationError::new(field, "must be positive"));
         }
         Ok(Self(value))
     }
 
-    pub fn get(self) -> u64 {
+    pub fn get(self) -> i64 {
         self.0
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+impl TryFrom<i64> for PositiveI64 {
+    type Error = ValidationError;
+
+    fn try_from(value: i64) -> Result<Self, Self::Error> {
+        Self::new("value", value)
+    }
+}
+
+impl From<PositiveI64> for i64 {
+    fn from(value: PositiveI64) -> Self {
+        value.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(try_from = "i64", into = "i64")]
+pub struct NonNegativeI64(i64);
+
+impl NonNegativeI64 {
+    pub fn new(field: &'static str, value: i64) -> Result<Self, ValidationError> {
+        if value < 0 {
+            return Err(ValidationError::new(field, "must not be negative"));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn get(self) -> i64 {
+        self.0
+    }
+}
+
+impl TryFrom<i64> for NonNegativeI64 {
+    type Error = ValidationError;
+
+    fn try_from(value: i64) -> Result<Self, Self::Error> {
+        Self::new("value", value)
+    }
+}
+
+impl From<NonNegativeI64> for i64 {
+    fn from(value: NonNegativeI64) -> Self {
+        value.0
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Provider {
     pub id: NonEmptyString,
     pub base_url: HttpUrl,
     pub api_key_env: EnvironmentVariable,
-    pub request_timeout_seconds: PositiveU64,
+    pub request_timeout_seconds: PositiveI64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Model {
     pub id: NonEmptyString,
+    pub provider_id: NonEmptyString,
     pub remote_name: NonEmptyString,
     pub class: NonEmptyString,
-    pub context_window: PositiveU64,
-    pub max_output_tokens: PositiveU64,
+    pub context_window: PositiveI64,
+    pub max_output_tokens: PositiveI64,
     pub capabilities: ModelCapabilities,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct Capabilities {
+pub struct ClaimedCapabilities {
     pub tools: bool,
     pub parallel_tools: bool,
     pub streaming: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
-pub struct ModelCapabilities {
-    pub claimed: Capabilities,
-    pub verified: Capabilities,
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerifiedCapability {
+    #[default]
+    Unknown,
+    Supported,
+    Unsupported,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerifiedCapabilities {
+    pub tools: VerifiedCapability,
+    pub parallel_tools: VerifiedCapability,
+    pub streaming: VerifiedCapability,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelCapabilities {
+    pub claimed: ClaimedCapabilities,
+    pub verified: VerifiedCapabilities,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeKind {
+    Chat,
+    Streaming,
+    Tools,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProbeStatus {
     Succeeded,
     Failed,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProbeResult {
+    pub provider_id: NonEmptyString,
+    pub model_id: NonEmptyString,
+    pub kind: ProbeKind,
     pub status: ProbeStatus,
-    pub verified: Capabilities,
-    pub latency_ms: PositiveU64,
-    pub message: Option<String>,
+    pub verified: VerifiedCapability,
+    pub latency_ms: NonNegativeI64,
+    pub error_code: Option<String>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn accepts_valid_boundary_values() {
-        assert!(HttpUrl::parse("https://api.example.com/v1").is_ok());
-        assert!(EnvironmentVariable::parse("PRIMARY_API_KEY").is_ok());
-        assert!(NonEmptyString::parse("remote_name", "vendor/model").is_ok());
-        assert_eq!(PositiveU64::new("context_window", 1).unwrap().get(), 1);
+    fn provider() -> Provider {
+        Provider {
+            id: NonEmptyString::parse("id", "primary").unwrap(),
+            base_url: HttpUrl::parse("https://api.example.com/v1").unwrap(),
+            api_key_env: EnvironmentVariable::parse("PRIMARY_API_KEY").unwrap(),
+            request_timeout_seconds: PositiveI64::new("request_timeout_seconds", 180).unwrap(),
+        }
+    }
+
+    fn model() -> Model {
+        Model {
+            id: NonEmptyString::parse("id", "coding-large").unwrap(),
+            provider_id: NonEmptyString::parse("provider_id", "primary").unwrap(),
+            remote_name: NonEmptyString::parse("remote_name", "vendor/model").unwrap(),
+            class: NonEmptyString::parse("class", "coding").unwrap(),
+            context_window: PositiveI64::new("context_window", 131_072).unwrap(),
+            max_output_tokens: PositiveI64::new("max_output_tokens", 16_384).unwrap(),
+            capabilities: ModelCapabilities::default(),
+        }
     }
 
     #[test]
-    fn rejects_non_http_urls() {
+    fn rejects_invalid_urls_and_environment_names() {
         for value in [
             "",
             "api.example.com",
@@ -202,28 +335,60 @@ mod tests {
         ] {
             assert!(HttpUrl::parse(value).is_err(), "accepted {value}");
         }
-    }
-
-    #[test]
-    fn rejects_secret_values_as_environment_names() {
         for value in ["", "sk-secret", "secret value", "1_API_KEY", "API.KEY"] {
-            assert!(EnvironmentVariable::parse(value).is_err(), "accepted {value}");
+            assert!(
+                EnvironmentVariable::parse(value).is_err(),
+                "accepted {value}"
+            );
         }
     }
 
     #[test]
-    fn rejects_empty_names_and_zero_limits() {
-        assert!(NonEmptyString::parse("remote_name", " \n").is_err());
-        assert!(PositiveU64::new("max_output_tokens", 0).is_err());
+    fn rejects_zero_and_negative_limits() {
+        for value in [0, -1] {
+            assert!(PositiveI64::new("request_timeout_seconds", value).is_err());
+            assert!(PositiveI64::new("context_window", value).is_err());
+            assert!(PositiveI64::new("max_output_tokens", value).is_err());
+        }
+        assert!(NonNegativeI64::new("latency_ms", -1).is_err());
+        assert_eq!(NonNegativeI64::new("latency_ms", 0).unwrap().get(), 0);
     }
 
     #[test]
-    fn claimed_and_verified_capabilities_are_independent() {
-        let capabilities = ModelCapabilities {
-            claimed: Capabilities { tools: true, parallel_tools: true, streaming: true },
-            verified: Capabilities::default(),
+    fn model_starts_with_unknown_verified_capabilities() {
+        let capabilities = model().capabilities;
+        assert_eq!(capabilities.verified.tools, VerifiedCapability::Unknown);
+        assert_ne!(
+            VerifiedCapability::Supported,
+            VerifiedCapability::Unsupported
+        );
+    }
+
+    #[test]
+    fn provider_model_and_probe_serialize_roundtrip() {
+        let provider = provider();
+        let model = model();
+        let probe = ProbeResult {
+            provider_id: NonEmptyString::parse("provider_id", "primary").unwrap(),
+            model_id: NonEmptyString::parse("model_id", "coding-large").unwrap(),
+            kind: ProbeKind::Tools,
+            status: ProbeStatus::Succeeded,
+            verified: VerifiedCapability::Supported,
+            latency_ms: NonNegativeI64::new("latency_ms", 0).unwrap(),
+            error_code: None,
         };
-        assert!(capabilities.claimed.tools);
-        assert!(!capabilities.verified.tools);
+
+        let provider_json = serde_json::to_string(&provider).unwrap();
+        let model_json = serde_json::to_string(&model).unwrap();
+        let probe_json = serde_json::to_string(&probe).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Provider>(&provider_json).unwrap(),
+            provider
+        );
+        assert_eq!(serde_json::from_str::<Model>(&model_json).unwrap(), model);
+        assert_eq!(
+            serde_json::from_str::<ProbeResult>(&probe_json).unwrap(),
+            probe
+        );
     }
 }

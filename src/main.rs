@@ -1,5 +1,6 @@
 pub mod api;
 mod config;
+pub mod domain;
 mod model_gateway;
 
 use std::time::Duration;
