@@ -1,3 +1,11 @@
+[server]
+bind = "127.0.0.1:7410"
+data_dir = "./data"
+
+[database]
+max_connections = 10
+acquire_timeout_seconds = 5
+
 [scheduler]
 max_parallel_agents = 2
 heartbeat_seconds = 10
@@ -17,3 +25,9 @@ retention_hours = 24
 root = "./data/artifacts"
 max_tool_output_bytes = 1048576
 
+[runner]
+network_enabled = false
+
+[provider]
+base_url = "https://api.openai.com/v1"
+model = "gpt-5-mini"

@@ -1,6 +1,7 @@
+mod config;
 mod model_gateway;
 
-use std::{env, net::SocketAddr, time::Duration};
+use std::time::Duration;
 
 use anyhow::Context;
 use axum::{
@@ -14,6 +15,7 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
 
+use crate::config::Config;
 use crate::model_gateway::{OpenAiClient, ProbeResult};
 
 #[derive(Clone)]
@@ -34,11 +36,11 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let database_url = env::var("DATABASE_URL").context("DATABASE_URL is required")?;
+    let (config, secrets) = Config::load()?;
     let database = PgPoolOptions::new()
-        .max_connections(10)
-        .acquire_timeout(Duration::from_secs(5))
-        .connect(&database_url)
+        .max_connections(config.database.max_connections)
+        .acquire_timeout(Duration::from_secs(config.database.acquire_timeout_seconds))
+        .connect(&secrets.database_url)
         .await
         .context("failed to connect to PostgreSQL")?;
     sqlx::migrate!().run(&database).await?;
@@ -59,10 +61,7 @@ async fn main() -> anyhow::Result<()> {
                 .allow_methods([Method::GET, Method::POST]),
         );
 
-    let address: SocketAddr = env::var("BIND_ADDRESS")
-        .unwrap_or_else(|_| "127.0.0.1:7410".into())
-        .parse()
-        .context("invalid BIND_ADDRESS")?;
+    let address = config.server.bind;
     let listener = tokio::net::TcpListener::bind(address).await?;
     info!(%address, "server listening");
     axum::serve(listener, app)
