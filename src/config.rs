@@ -3,7 +3,7 @@ use std::{collections::HashMap, fs, net::SocketAddr, path::PathBuf};
 use anyhow::{Context, bail};
 use serde::Deserialize;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub server: Server,
@@ -61,7 +61,7 @@ pub struct Artifacts {
     pub max_tool_output_bytes: usize,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Runner {
     pub network_enabled: bool,
@@ -177,21 +177,6 @@ fn required_secret(env: &HashMap<String, String>, name: &str) -> anyhow::Result<
         .with_context(|| format!("{name} is required and must come from environment"))
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            server: Server::default(),
-            database: Database::default(),
-            scheduler: Scheduler::default(),
-            budgets: Budgets::default(),
-            git: Git::default(),
-            artifacts: Artifacts::default(),
-            runner: Runner::default(),
-            provider: ProviderBootstrap::default(),
-        }
-    }
-}
-
 impl Default for Server {
     fn default() -> Self {
         Self {
@@ -245,14 +230,6 @@ impl Default for Artifacts {
         Self {
             root: "./data/artifacts".into(),
             max_tool_output_bytes: 1_048_576,
-        }
-    }
-}
-
-impl Default for Runner {
-    fn default() -> Self {
-        Self {
-            network_enabled: false,
         }
     }
 }
