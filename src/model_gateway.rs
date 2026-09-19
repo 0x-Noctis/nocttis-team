@@ -1,8 +1,12 @@
 use std::{env, time::Instant};
 
-use anyhow::{Context, bail};
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
+
+#[path = "model/mod.rs"]
+pub mod model;
+
+use model::{ModelError, Usage};
 
 #[derive(Clone)]
 pub struct OpenAiClient {
@@ -21,17 +25,17 @@ pub struct ProbeResult {
     pub usage: Option<Usage>,
 }
 
-#[derive(Deserialize, Serialize)]
-pub struct Usage {
-    pub prompt_tokens: u64,
-    pub completion_tokens: u64,
-    pub total_tokens: u64,
-}
-
 #[derive(Deserialize)]
 struct ChatResponse {
     choices: Vec<Choice>,
-    usage: Option<Usage>,
+    usage: Option<ProviderUsage>,
+}
+
+#[derive(Deserialize)]
+struct ProviderUsage {
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    total_tokens: u64,
 }
 
 #[derive(Deserialize)]
@@ -57,11 +61,15 @@ impl OpenAiClient {
         })
     }
 
-    pub async fn probe(&self) -> anyhow::Result<ProbeResult> {
+    pub async fn probe(&self) -> Result<ProbeResult, ModelError> {
         let started = Instant::now();
         let response = self
             .http
-            .post(self.base_url.join("chat/completions")?)
+            .post(
+                self.base_url
+                    .join("chat/completions")
+                    .map_err(|_| ModelError::new(model::ModelErrorKind::InvalidResponse))?,
+            )
             .bearer_auth(&self.api_key)
             .json(&serde_json::json!({
                 "model": self.model,
@@ -70,28 +78,42 @@ impl OpenAiClient {
                 "temperature": 0
             }))
             .send()
-            .await?;
+            .await
+            .map_err(|error| {
+                if error.is_timeout() {
+                    ModelError::new(model::ModelErrorKind::Timeout)
+                } else {
+                    ModelError::new(model::ModelErrorKind::ProviderUnavailable)
+                }
+            })?;
         let status = response.status();
-        let body = response.text().await?;
+        let body = response
+            .text()
+            .await
+            .map_err(|_| ModelError::new(model::ModelErrorKind::InvalidResponse))?;
         if !status.is_success() {
-            bail!("provider returned {status}: {}", truncate(&body, 500));
+            return Err(ModelError::from_status(status, &body));
         }
 
-        let parsed: ChatResponse = serde_json::from_str(&body)
-            .with_context(|| format!("invalid provider response: {}", truncate(&body, 500)))?;
+        let parsed: ChatResponse =
+            serde_json::from_str(&body).map_err(|_| ModelError::invalid_response(&body))?;
         let content = parsed
             .choices
             .into_iter()
             .next()
             .and_then(|choice| choice.message.content)
-            .context("provider response has no message content")?;
+            .ok_or_else(|| ModelError::invalid_response(&body))?;
 
         Ok(ProbeResult {
             status: "ok",
             model: self.model.clone(),
             latency_ms: started.elapsed().as_millis(),
             content,
-            usage: parsed.usage,
+            usage: parsed.usage.map(|usage| Usage {
+                input_tokens: usage.prompt_tokens,
+                output_tokens: usage.completion_tokens,
+                total_tokens: usage.total_tokens,
+            }),
         })
     }
 }
@@ -99,10 +121,6 @@ fn normalize_base_url(value: &str) -> anyhow::Result<Url> {
     let mut normalized = value.trim_end_matches('/').to_owned();
     normalized.push('/');
     Ok(Url::parse(&normalized)?)
-}
-
-fn truncate(value: &str, max_chars: usize) -> String {
-    value.chars().take(max_chars).collect()
 }
 
 #[cfg(test)]
