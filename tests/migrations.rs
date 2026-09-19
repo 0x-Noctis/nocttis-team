@@ -2,156 +2,362 @@ use serde_json::json;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-async fn insert_provider(pool: &PgPool) -> Uuid {
-    let provider_id = Uuid::new_v4();
+async fn insert_provider(pool: &PgPool, provider_id: &str, timeout: i64) {
     sqlx::query(
-        "INSERT INTO providers
-         (id, name, base_url, api_key_env, request_timeout_seconds)
-         VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO providers (id, base_url, api_key_env, request_timeout_seconds)
+         VALUES ($1, 'https://api.example.com/v1', 'EXAMPLE_API_KEY', $2)",
     )
     .bind(provider_id)
-    .bind(format!("provider-{provider_id}"))
-    .bind("https://api.example.com/v1")
-    .bind("EXAMPLE_API_KEY")
-    .bind(180_i32)
+    .bind(timeout)
     .execute(pool)
     .await
     .unwrap();
-    provider_id
 }
 
-async fn insert_model(pool: &PgPool, provider_id: Uuid, remote_name: &str) -> Uuid {
-    let model_id = Uuid::new_v4();
+async fn insert_model(
+    pool: &PgPool,
+    provider_id: &str,
+    model_id: &str,
+    remote_name: &str,
+    context_window: i64,
+    max_output_tokens: i64,
+) {
     sqlx::query(
         "INSERT INTO models
-         (id, provider_id, name, remote_name, class, context_window, max_output_tokens,
-          claimed_capabilities, verified_capabilities)
-         VALUES ($1, $2, $3, $4, 'coding', 131072, 16384, $5, $6)",
+         (id, provider_id, remote_name, class, context_window, max_output_tokens)
+         VALUES ($1, $2, $3, 'coding', $4, $5)",
     )
     .bind(model_id)
     .bind(provider_id)
-    .bind(format!("model-{model_id}"))
     .bind(remote_name)
-    .bind(json!({"streaming": true, "tools": true}))
-    .bind(json!({"streaming": true, "tools": false}))
+    .bind(context_window)
+    .bind(max_output_tokens)
     .execute(pool)
     .await
     .unwrap();
-    model_id
+}
+
+fn database_code(error: &sqlx::Error) -> Option<String> {
+    error
+        .as_database_error()
+        .unwrap()
+        .code()
+        .map(|code| code.into_owned())
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn provider_registry_stores_capabilities_without_secret_values(pool: PgPool) {
-    let provider_id = insert_provider(&pool).await;
-    let model_id = insert_model(&pool, provider_id, "vendor/coding-large").await;
+async fn text_ids_and_bigint_values_are_supported(pool: PgPool) {
+    let large = i64::from(i32::MAX) + 1;
+    insert_provider(&pool, "provider/openai-compatible", large).await;
+    insert_model(
+        &pool,
+        "provider/openai-compatible",
+        "model/coding-large",
+        "vendor/coding-large",
+        large,
+        large,
+    )
+    .await;
 
-    let capabilities =
-        sqlx::query("SELECT claimed_capabilities, verified_capabilities FROM models WHERE id = $1")
-            .bind(model_id)
-            .fetch_one(&pool)
+    let row = sqlx::query(
+        "SELECT p.id AS provider_id, m.id AS model_id, p.request_timeout_seconds,
+                m.context_window, m.max_output_tokens
+         FROM providers p JOIN models m ON m.provider_id = p.id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        row.get::<String, _>("provider_id"),
+        "provider/openai-compatible"
+    );
+    assert_eq!(row.get::<String, _>("model_id"), "model/coding-large");
+    assert_eq!(row.get::<i64, _>("request_timeout_seconds"), large);
+    assert_eq!(row.get::<i64, _>("context_window"), large);
+    assert_eq!(row.get::<i64, _>("max_output_tokens"), large);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn non_positive_numeric_values_are_rejected(pool: PgPool) {
+    for timeout in [0_i64, -1] {
+        let error = sqlx::query(
+            "INSERT INTO providers (id, base_url, api_key_env, request_timeout_seconds)
+             VALUES ($1, 'https://api.example.com/v1', 'KEY_ENV', $2)",
+        )
+        .bind(format!("invalid-timeout-{timeout}"))
+        .bind(timeout)
+        .execute(&pool)
+        .await
+        .unwrap_err();
+        assert_eq!(database_code(&error).as_deref(), Some("23514"));
+    }
+
+    insert_provider(&pool, "numeric-provider", 180).await;
+    for (context_window, max_output_tokens) in [(0_i64, 1_i64), (-1, 1), (1, 0), (1, -1)] {
+        let error = sqlx::query(
+            "INSERT INTO models
+             (id, provider_id, remote_name, class, context_window, max_output_tokens)
+             VALUES ($1, 'numeric-provider', $1, 'coding', $2, $3)",
+        )
+        .bind(format!("invalid-{context_window}-{max_output_tokens}"))
+        .bind(context_window)
+        .bind(max_output_tokens)
+        .execute(&pool)
+        .await
+        .unwrap_err();
+        assert_eq!(database_code(&error).as_deref(), Some("23514"));
+    }
+
+    insert_model(
+        &pool,
+        "numeric-provider",
+        "valid-model",
+        "valid-model",
+        1,
+        1,
+    )
+    .await;
+    let error = sqlx::query(
+        "INSERT INTO provider_probes
+         (id, provider_id, model_id, probe_kind, status, latency_ms)
+         VALUES ($1, 'numeric-provider', 'valid-model', 'chat', 'failed', -1)",
+    )
+    .bind(Uuid::new_v4())
+    .execute(&pool)
+    .await
+    .unwrap_err();
+    assert_eq!(database_code(&error).as_deref(), Some("23514"));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn capability_states_are_lossless_and_validated(pool: PgPool) {
+    insert_provider(&pool, "capability-provider", 180).await;
+    insert_model(
+        &pool,
+        "capability-provider",
+        "capability-model",
+        "vendor/capability-model",
+        131072,
+        16384,
+    )
+    .await;
+
+    let defaults = sqlx::query(
+        "SELECT claimed_capabilities, verified_capabilities
+         FROM models WHERE id = 'capability-model'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        defaults.get::<serde_json::Value, _>("claimed_capabilities"),
+        json!({"chat": false, "streaming": false, "tools": false})
+    );
+    assert_eq!(
+        defaults.get::<serde_json::Value, _>("verified_capabilities"),
+        json!({"chat": "unknown", "streaming": "unknown", "tools": "unknown"})
+    );
+
+    sqlx::query(
+        "UPDATE models SET claimed_capabilities = $1, verified_capabilities = $2
+         WHERE id = 'capability-model'",
+    )
+    .bind(json!({"chat": true, "streaming": false, "tools": true}))
+    .bind(json!({
+        "chat": "supported",
+        "streaming": "unsupported",
+        "tools": "unknown"
+    }))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    for (probe_kind, capability_status) in [
+        ("chat", "supported"),
+        ("streaming", "unsupported"),
+        ("tools", "unknown"),
+    ] {
+        sqlx::query(
+            "INSERT INTO provider_probes
+             (id, provider_id, model_id, probe_kind, status, capability_status, latency_ms)
+             VALUES ($1, 'capability-provider', 'capability-model', $2, 'succeeded', $3, 0)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(probe_kind)
+        .bind(capability_status)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let states: Vec<String> = sqlx::query_scalar(
+        "SELECT capability_status FROM provider_probes ORDER BY capability_status",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(states, ["supported", "unknown", "unsupported"]);
+
+    let invalid_claim =
+        sqlx::query("UPDATE models SET claimed_capabilities = $1 WHERE id = 'capability-model'")
+            .bind(json!({"chat": "yes", "streaming": false, "tools": true}))
+            .execute(&pool)
             .await
-            .unwrap();
-    assert_eq!(
-        capabilities.get::<serde_json::Value, _>("claimed_capabilities"),
-        json!({"streaming": true, "tools": true})
-    );
-    assert_eq!(
-        capabilities.get::<serde_json::Value, _>("verified_capabilities"),
-        json!({"streaming": true, "tools": false})
-    );
+            .unwrap_err();
+    assert_eq!(database_code(&invalid_claim).as_deref(), Some("23514"));
 
+    let invalid_verified =
+        sqlx::query("UPDATE models SET verified_capabilities = $1 WHERE id = 'capability-model'")
+            .bind(json!({"chat": "maybe", "streaming": "unknown", "tools": "unknown"}))
+            .execute(&pool)
+            .await
+            .unwrap_err();
+    assert_eq!(database_code(&invalid_verified).as_deref(), Some("23514"));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn remote_name_is_unique_only_within_provider(pool: PgPool) {
+    insert_provider(&pool, "first-provider", 180).await;
+    insert_provider(&pool, "second-provider", 180).await;
+    insert_model(
+        &pool,
+        "first-provider",
+        "first-model",
+        "vendor/shared",
+        8192,
+        1024,
+    )
+    .await;
+
+    let duplicate = sqlx::query(
+        "INSERT INTO models
+         (id, provider_id, remote_name, class, context_window, max_output_tokens)
+         VALUES ('duplicate-model', 'first-provider', 'vendor/shared', 'coding', 8192, 1024)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap_err();
+    assert_eq!(database_code(&duplicate).as_deref(), Some("23505"));
+
+    insert_model(
+        &pool,
+        "second-provider",
+        "second-model",
+        "vendor/shared",
+        8192,
+        1024,
+    )
+    .await;
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn cross_provider_probe_is_rejected(pool: PgPool) {
+    insert_provider(&pool, "model-owner", 180).await;
+    insert_provider(&pool, "probe-owner", 180).await;
+    insert_model(
+        &pool,
+        "model-owner",
+        "owned-model",
+        "vendor/owned",
+        8192,
+        1024,
+    )
+    .await;
+
+    let mismatch = sqlx::query(
+        "INSERT INTO provider_probes
+         (id, provider_id, model_id, probe_kind, status)
+         VALUES ($1, 'probe-owner', 'owned-model', 'chat', 'succeeded')",
+    )
+    .bind(Uuid::new_v4())
+    .execute(&pool)
+    .await
+    .unwrap_err();
+    assert_eq!(database_code(&mismatch).as_deref(), Some("23503"));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn probe_kind_and_status_are_restricted(pool: PgPool) {
+    insert_provider(&pool, "probe-provider", 180).await;
+    insert_model(
+        &pool,
+        "probe-provider",
+        "probe-model",
+        "vendor/probe",
+        8192,
+        1024,
+    )
+    .await;
+
+    for (probe_kind, status) in [("embeddings", "succeeded"), ("chat", "pending")] {
+        let error = sqlx::query(
+            "INSERT INTO provider_probes
+             (id, provider_id, model_id, probe_kind, status)
+             VALUES ($1, 'probe-provider', 'probe-model', $2, $3)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(probe_kind)
+        .bind(status)
+        .execute(&pool)
+        .await
+        .unwrap_err();
+        assert_eq!(database_code(&error).as_deref(), Some("23514"));
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn deleting_provider_cascades_models_and_probes(pool: PgPool) {
+    insert_provider(&pool, "cascade-provider", 180).await;
+    insert_model(
+        &pool,
+        "cascade-provider",
+        "cascade-model",
+        "vendor/cascade",
+        8192,
+        1024,
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO provider_probes
+         (id, provider_id, model_id, probe_kind, status, capability_status, latency_ms, error_code)
+         VALUES ($1, 'cascade-provider', 'cascade-model', 'tools', 'failed',
+                 'unsupported', 25, 'TOOLS_UNSUPPORTED')",
+    )
+    .bind(Uuid::new_v4())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query("DELETE FROM providers WHERE id = 'cascade-provider'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let model_count: i64 = sqlx::query_scalar("SELECT count(*) FROM models")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let probe_count: i64 = sqlx::query_scalar("SELECT count(*) FROM provider_probes")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!((model_count, probe_count), (0, 0));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn registry_has_no_secret_or_provider_body_columns(pool: PgPool) {
     let forbidden_columns: i64 = sqlx::query_scalar(
         "SELECT count(*)
          FROM information_schema.columns
          WHERE table_schema = 'public'
            AND table_name IN ('providers', 'models', 'provider_probes')
-           AND column_name IN ('api_key', 'secret', 'secret_value', 'credential', 'token')",
+           AND column_name IN (
+               'api_key', 'secret', 'secret_value', 'credential', 'token',
+               'provider_message', 'provider_body', 'response_body'
+           )",
     )
     .fetch_one(&pool)
     .await
     .unwrap();
     assert_eq!(forbidden_columns, 0);
-}
-
-#[sqlx::test(migrations = "./migrations")]
-async fn remote_model_name_is_unique_per_provider(pool: PgPool) {
-    let first_provider = insert_provider(&pool).await;
-    let second_provider = insert_provider(&pool).await;
-    insert_model(&pool, first_provider, "vendor/shared-name").await;
-
-    let duplicate = sqlx::query(
-        "INSERT INTO models
-         (id, provider_id, name, remote_name, class, context_window, max_output_tokens)
-         VALUES ($1, $2, 'duplicate', 'vendor/shared-name', 'coding', 8192, 1024)",
-    )
-    .bind(Uuid::new_v4())
-    .bind(first_provider)
-    .execute(&pool)
-    .await
-    .unwrap_err();
-    assert_eq!(
-        duplicate.as_database_error().unwrap().code().as_deref(),
-        Some("23505")
-    );
-
-    insert_model(&pool, second_provider, "vendor/shared-name").await;
-}
-
-#[sqlx::test(migrations = "./migrations")]
-async fn deleting_provider_cascades_models_and_probes(pool: PgPool) {
-    let provider_id = insert_provider(&pool).await;
-    let model_id = insert_model(&pool, provider_id, "vendor/cascade").await;
-    sqlx::query(
-        "INSERT INTO provider_probes
-         (id, provider_id, model_id, probe_type, status, verified_capabilities, latency_ms)
-         VALUES ($1, $2, $3, 'compatibility', 'passed', $4, 25)",
-    )
-    .bind(Uuid::new_v4())
-    .bind(provider_id)
-    .bind(model_id)
-    .bind(json!({"streaming": true}))
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    sqlx::query("DELETE FROM providers WHERE id = $1")
-        .bind(provider_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-
-    let model_count: i64 = sqlx::query_scalar("SELECT count(*) FROM models WHERE provider_id = $1")
-        .bind(provider_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    let probe_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM provider_probes WHERE provider_id = $1")
-            .bind(provider_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!((model_count, probe_count), (0, 0));
-}
-
-#[sqlx::test(migrations = "./migrations")]
-async fn probe_model_must_belong_to_provider(pool: PgPool) {
-    let first_provider = insert_provider(&pool).await;
-    let second_provider = insert_provider(&pool).await;
-    let model_id = insert_model(&pool, first_provider, "vendor/owned-model").await;
-
-    let mismatch = sqlx::query(
-        "INSERT INTO provider_probes (id, provider_id, model_id, probe_type, status)
-         VALUES ($1, $2, $3, 'compatibility', 'passed')",
-    )
-    .bind(Uuid::new_v4())
-    .bind(second_provider)
-    .bind(model_id)
-    .execute(&pool)
-    .await
-    .unwrap_err();
-    assert_eq!(
-        mismatch.as_database_error().unwrap().code().as_deref(),
-        Some("23503")
-    );
 }
