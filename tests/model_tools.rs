@@ -196,3 +196,32 @@ async fn probe_returns_call_without_executing_tool() {
     assert_eq!(call.arguments, json!({"enabled": true}));
     assert!(sent.contains("noctis_capability_probe"));
 }
+
+#[tokio::test]
+async fn probe_rejects_wrong_payloads_as_unsupported() {
+    let cases = [
+        ("wrong_tool", r#"{\"enabled\":true}"#),
+        ("noctis_capability_probe", r#"{\"enabled\":false}"#),
+        ("noctis_capability_probe", "{}"),
+        (
+            "noctis_capability_probe",
+            r#"{\"enabled\":true,\"extra\":true}"#,
+        ),
+    ];
+
+    for (name, arguments) in cases {
+        let body = format!(
+            r#"{{
+                "choices":[{{"message":{{"content":null,"tool_calls":[
+                    {{"id":"probe-call","function":{{"name":"{name}","arguments":"{arguments}"}}}}
+                ]}},"finish_reason":"tool_calls"}}]
+            }}"#
+        );
+        let (base_url, _, handle) = mock_server(&body);
+
+        let result = client(&base_url).probe().await.unwrap();
+        handle.join().unwrap();
+
+        assert_eq!(result, ToolProbeResult::Unsupported, "accepted {arguments}");
+    }
+}

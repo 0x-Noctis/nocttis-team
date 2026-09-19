@@ -129,7 +129,9 @@ impl OpenAiToolsClient {
         Ok(response
             .tool_calls
             .into_iter()
-            .find(|call| call.name == PROBE_TOOL_NAME)
+            .find(|call| {
+                call.name == PROBE_TOOL_NAME && call.arguments == json!({"enabled": true})
+            })
             .map_or(ToolProbeResult::Unsupported, ToolProbeResult::Supported))
     }
 }
