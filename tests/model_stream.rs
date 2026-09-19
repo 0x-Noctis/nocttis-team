@@ -154,6 +154,19 @@ async fn accepts_empty_delta_and_done_with_estimated_usage() {
 }
 
 #[tokio::test]
+async fn ignores_malformed_event_after_done() {
+    let (base_url, handle) = stream_server(vec![
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\ndata: not-json\n\n",
+    ]);
+
+    let response = client(&base_url).complete(&request()).await.unwrap();
+    handle.join().unwrap();
+
+    assert_eq!(response.content.as_deref(), Some("ok"));
+    assert_eq!(response.finish_reason, FinishReason::Stop);
+}
+
+#[tokio::test]
 async fn rejects_disconnect_before_done() {
     let (base_url, handle) = stream_server(vec![
         "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
@@ -177,6 +190,30 @@ async fn rejects_provider_error_event_without_exposing_body() {
     assert_eq!(error.kind(), ModelErrorKind::InvalidResponse);
     assert_eq!(error.to_string(), "invalid_response");
     assert!(!error.to_string().contains("provider-secret"));
+}
+
+#[tokio::test]
+async fn maps_allowlisted_provider_error_codes() {
+    let cases = [
+        ("invalid_api_key", ModelErrorKind::AuthenticationFailed),
+        ("rate_limit_exceeded", ModelErrorKind::RateLimited),
+        ("service_unavailable", ModelErrorKind::ProviderUnavailable),
+    ];
+
+    for (code, expected) in cases {
+        let event = format!(
+            "event: error\ndata: {{\"error\":{{\"code\":\"{code}\",\"message\":\"provider-secret\"}}}}\n\n"
+        );
+        let (base_url, handle) = stream_server(vec![&event]);
+
+        let error = client(&base_url).complete(&request()).await.unwrap_err();
+        handle.join().unwrap();
+
+        assert_eq!(error.kind(), expected);
+        assert_eq!(error.to_string(), expected.to_string());
+        assert!(!error.to_string().contains(code));
+        assert!(!error.to_string().contains("provider-secret"));
+    }
 }
 
 #[tokio::test]

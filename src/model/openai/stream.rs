@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use reqwest::{Client, StatusCode, Url};
+use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 
 use super::super::model::{
@@ -66,6 +66,9 @@ impl OpenAiStreamClient {
         let mut stream = StreamAccumulator::default();
         while let Some(chunk) = response.chunk().await.map_err(map_transport_error)? {
             stream.push(&chunk)?;
+            if stream.done {
+                break;
+            }
         }
         stream.finish(started.elapsed().as_millis())
     }
@@ -115,10 +118,17 @@ impl Default for StreamAccumulator {
 
 impl StreamAccumulator {
     fn push(&mut self, chunk: &[u8]) -> Result<(), ModelError> {
+        if self.done {
+            return Ok(());
+        }
         self.buffer.extend_from_slice(chunk);
         while let Some(end) = event_end(&self.buffer) {
             let event = self.buffer.drain(..end).collect::<Vec<_>>();
             self.consume_event(&event)?;
+            if self.done {
+                self.buffer.clear();
+                break;
+            }
         }
         Ok(())
     }
@@ -141,8 +151,8 @@ impl StreamAccumulator {
         }
         let chunk: ProviderChunk =
             serde_json::from_str(&data).map_err(|_| ModelError::invalid_response(&data))?;
-        if chunk.error.is_some() {
-            return Err(ModelError::from_status(StatusCode::BAD_REQUEST, &data));
+        if let Some(error) = chunk.error {
+            return Err(ModelError::new(provider_error_kind(&error)));
         }
         for choice in chunk.choices {
             if let Some(content) = choice.delta.content {
@@ -169,6 +179,21 @@ impl StreamAccumulator {
             usage: normalize_usage(self.usage),
             latency_ms,
         })
+    }
+}
+
+fn provider_error_kind(error: &serde_json::Value) -> ModelErrorKind {
+    match error.get("code").and_then(serde_json::Value::as_str) {
+        Some("invalid_api_key" | "authentication_error" | "authentication_failed") => {
+            ModelErrorKind::AuthenticationFailed
+        }
+        Some("rate_limit_exceeded" | "rate_limited") => ModelErrorKind::RateLimited,
+        Some("timeout") => ModelErrorKind::Timeout,
+        Some("server_error" | "service_unavailable" | "provider_unavailable") => {
+            ModelErrorKind::ProviderUnavailable
+        }
+        Some("context_length_exceeded") => ModelErrorKind::ContextTooLarge,
+        _ => ModelErrorKind::InvalidResponse,
     }
 }
 
