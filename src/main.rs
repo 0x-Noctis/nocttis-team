@@ -1,3 +1,4 @@
+pub mod api;
 mod config;
 mod model_gateway;
 
@@ -6,8 +7,9 @@ use std::time::Duration;
 use anyhow::Context;
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Extension, State},
     http::{HeaderValue, Method},
+    middleware,
     routing::{get, post},
 };
 use serde::Serialize;
@@ -15,6 +17,7 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
 
+use crate::api::{AppError, RequestId, request_id};
 use crate::config::Config;
 use crate::model_gateway::{OpenAiClient, ProbeResult};
 
@@ -53,13 +56,15 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/api/v1/health", get(health))
         .route("/api/v1/providers/primary/probe", post(probe_provider))
+        .fallback(api::error::not_found)
         .with_state(state)
         .layer(TraceLayer::new_for_http())
         .layer(
             CorsLayer::new()
                 .allow_origin("http://127.0.0.1:5173".parse::<HeaderValue>()?)
                 .allow_methods([Method::GET, Method::POST]),
-        );
+        )
+        .layer(middleware::from_fn(request_id));
 
     let address = config.server.bind;
     let listener = tokio::net::TcpListener::bind(address).await?;
@@ -70,43 +75,30 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn health(State(state): State<AppState>) -> Result<Json<Health>, AppError> {
-    sqlx::query("SELECT 1").execute(&state.database).await?;
+async fn health(
+    State(state): State<AppState>,
+    Extension(request_id): Extension<RequestId>,
+) -> Result<Json<Health>, AppError> {
+    sqlx::query("SELECT 1")
+        .execute(&state.database)
+        .await
+        .map_err(|error| AppError::internal(request_id, error))?;
     Ok(Json(Health {
         status: "ok",
         database: "ok",
     }))
 }
 
-async fn probe_provider(State(state): State<AppState>) -> Result<Json<ProbeResult>, AppError> {
-    Ok(Json(state.model.probe().await?))
-}
-
-struct AppError(anyhow::Error);
-
-impl<E> From<E> for AppError
-where
-    E: Into<anyhow::Error>,
-{
-    fn from(error: E) -> Self {
-        Self(error.into())
-    }
-}
-
-impl axum::response::IntoResponse for AppError {
-    fn into_response(self) -> axum::response::Response {
-        tracing::error!(error = %self.0, "request failed");
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "error": {
-                    "code": "INTERNAL_ERROR",
-                    "message": self.0.to_string()
-                }
-            })),
-        )
-            .into_response()
-    }
+async fn probe_provider(
+    State(state): State<AppState>,
+    Extension(request_id): Extension<RequestId>,
+) -> Result<Json<ProbeResult>, AppError> {
+    state
+        .model
+        .probe()
+        .await
+        .map(Json)
+        .map_err(|error| AppError::internal(request_id, error))
 }
 
 async fn shutdown_signal() {
