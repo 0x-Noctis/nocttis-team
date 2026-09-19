@@ -2,6 +2,7 @@ pub mod api;
 mod config;
 pub mod domain;
 mod model_gateway;
+pub mod store;
 
 use std::time::Duration;
 

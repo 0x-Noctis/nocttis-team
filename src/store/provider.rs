@@ -95,7 +95,7 @@ impl ProviderRepository {
         .bind(provider.request_timeout_seconds.get())
         .execute(&self.pool)
         .await
-        .map_err(|error| map_database_error(error, Conflict::ProviderId))?;
+        .map_err(map_provider_database_error)?;
         Ok(provider_view(provider.clone()))
     }
 
@@ -493,13 +493,13 @@ fn page<T>(
     })
 }
 
-fn map_database_error(error: sqlx::Error, conflict: Conflict) -> StoreError {
+fn map_provider_database_error(error: sqlx::Error) -> StoreError {
     if error
         .as_database_error()
         .and_then(|database| database.constraint())
-        .is_some()
+        == Some("providers_pkey")
     {
-        StoreError::Conflict(conflict)
+        StoreError::Conflict(Conflict::ProviderId)
     } else {
         StoreError::Database(error)
     }

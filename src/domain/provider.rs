@@ -2,6 +2,8 @@ use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 
+pub const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidationError {
     pub field: &'static str,
@@ -163,8 +165,11 @@ pub struct PositiveI64(i64);
 
 impl PositiveI64 {
     pub fn new(field: &'static str, value: i64) -> Result<Self, ValidationError> {
-        if value <= 0 {
-            return Err(ValidationError::new(field, "must be positive"));
+        if !(1..=MAX_SAFE_INTEGER).contains(&value) {
+            return Err(ValidationError::new(
+                field,
+                "must be positive and no greater than Number.MAX_SAFE_INTEGER",
+            ));
         }
         Ok(Self(value))
     }
@@ -194,8 +199,11 @@ pub struct NonNegativeI64(i64);
 
 impl NonNegativeI64 {
     pub fn new(field: &'static str, value: i64) -> Result<Self, ValidationError> {
-        if value < 0 {
-            return Err(ValidationError::new(field, "must not be negative"));
+        if !(0..=MAX_SAFE_INTEGER).contains(&value) {
+            return Err(ValidationError::new(
+                field,
+                "must be non-negative and no greater than Number.MAX_SAFE_INTEGER",
+            ));
         }
         Ok(Self(value))
     }
@@ -365,6 +373,23 @@ mod tests {
         }
         assert!(NonNegativeI64::new("latency_ms", -1).is_err());
         assert_eq!(NonNegativeI64::new("latency_ms", 0).unwrap().get(), 0);
+        let above_i32 = i64::from(i32::MAX) + 1;
+        assert_eq!(
+            PositiveI64::new("limit", above_i32).unwrap().get(),
+            above_i32
+        );
+        assert_eq!(
+            PositiveI64::new("limit", MAX_SAFE_INTEGER).unwrap().get(),
+            MAX_SAFE_INTEGER
+        );
+        assert_eq!(
+            NonNegativeI64::new("latency_ms", MAX_SAFE_INTEGER)
+                .unwrap()
+                .get(),
+            MAX_SAFE_INTEGER
+        );
+        assert!(PositiveI64::new("limit", MAX_SAFE_INTEGER + 1).is_err());
+        assert!(NonNegativeI64::new("latency_ms", MAX_SAFE_INTEGER + 1).is_err());
     }
 
     #[test]

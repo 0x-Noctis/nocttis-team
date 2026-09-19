@@ -4,9 +4,9 @@ mod domain;
 mod provider_store;
 
 use domain::provider::{
-    ClaimedCapabilities, EnvironmentVariable, HttpUrl, Model, ModelCapabilities, NonEmptyString,
-    NonNegativeI64, PositiveI64, ProbeErrorCode, ProbeKind, ProbeResult, ProbeStatus, Provider,
-    VerifiedCapabilities, VerifiedCapability,
+    ClaimedCapabilities, EnvironmentVariable, HttpUrl, MAX_SAFE_INTEGER, Model, ModelCapabilities,
+    NonEmptyString, NonNegativeI64, PositiveI64, ProbeErrorCode, ProbeKind, ProbeResult,
+    ProbeStatus, Provider, VerifiedCapabilities, VerifiedCapability,
 };
 use provider_store::{Conflict, ProviderRepository, StoreError};
 use sqlx::{PgPool, Row};
@@ -149,6 +149,26 @@ async fn provider_and_model_conflicts_are_structured(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn provider_check_constraint_is_not_mapped_to_duplicate_id(pool: PgPool) {
+    let repository = ProviderRepository::new(pool.clone());
+    let invalid = Provider {
+        request_timeout_seconds: PositiveI64::new("request_timeout_seconds", 1).unwrap(),
+        ..provider("invalid", "VALID_ENV")
+    };
+    sqlx::query(
+        "ALTER TABLE providers ADD CONSTRAINT providers_timeout_test_check
+         CHECK (request_timeout_seconds > 10)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(matches!(
+        repository.create_provider(&invalid).await,
+        Err(StoreError::Database(_))
+    ));
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn model_crud_probe_roundtrip_and_cascade(pool: PgPool) {
     let repository = ProviderRepository::new(pool.clone());
     repository
@@ -262,7 +282,8 @@ async fn invalid_database_row_is_rejected_by_domain_validation(pool: PgPool) {
         let statement = format!("ALTER TABLE models DROP CONSTRAINT {constraint}");
         sqlx::query(&statement).execute(&pool).await.unwrap();
     }
-    sqlx::query("UPDATE models SET context_window = 0 WHERE id = 'model-a'")
+    sqlx::query("UPDATE models SET context_window = $1 WHERE id = 'model-a'")
+        .bind(MAX_SAFE_INTEGER + 1)
         .execute(&pool)
         .await
         .unwrap();
