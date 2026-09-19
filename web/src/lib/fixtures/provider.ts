@@ -68,6 +68,15 @@ export const providerApiError: ApiError = {
   }
 };
 
+export const invalidNumericApiError: ApiError = {
+  error: {
+    code: 'INVALID_PROVIDER_TIMEOUT',
+    message: 'Request timeout must be a positive safe integer.',
+    details: { field: 'request_timeout_seconds' },
+    request_id: 'req_fixture_invalid_provider_timeout'
+  }
+};
+
 export const emptyProviders: ProviderViewState = { status: 'empty' };
 export const loadingProviders: ProviderViewState = { status: 'loading' };
 export const configuredProviderState: ProviderViewState = {
@@ -83,3 +92,7 @@ export const missingSecretProviderState: ProviderViewState = {
   probes: []
 };
 export const errorProviders: ProviderViewState = { status: 'error', error: providerApiError };
+export const invalidNumericProviders: ProviderViewState = {
+  status: 'error',
+  error: invalidNumericApiError
+};

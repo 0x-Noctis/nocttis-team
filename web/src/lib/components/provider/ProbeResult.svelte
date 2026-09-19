@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { ProbeResult as Probe } from '$lib/api/types';
+  import { isNonNegativeSafeInteger, type ProbeResult as Probe } from '$lib/api/types';
 
   let { probe }: { probe: Probe } = $props();
 </script>
@@ -11,7 +11,7 @@
   </div>
   <dl>
     <div><dt>Verified</dt><dd>{probe.verified}</dd></div>
-    <div><dt>Latency</dt><dd>{probe.latency_ms} ms</dd></div>
+    <div><dt>Latency</dt><dd>{isNonNegativeSafeInteger(probe.latency_ms) ? `${String(probe.latency_ms)} ms` : 'Invalid value'}</dd></div>
     {#if probe.error_code}<div><dt>Error code</dt><dd><code>{probe.error_code}</code></dd></div>{/if}
   </dl>
 </article>

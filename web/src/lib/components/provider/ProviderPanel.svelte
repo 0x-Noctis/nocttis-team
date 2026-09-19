@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { ProviderViewState } from '$lib/api/types';
+  import { isPositiveSafeInteger, type ProviderViewState } from '$lib/api/types';
   import ErrorPanel from './ErrorPanel.svelte';
   import ModelList from './ModelList.svelte';
   import ProbeResult from './ProbeResult.svelte';
@@ -29,7 +29,7 @@
         <span>{state.provider.api_key_env}</span>
       </div>
     </header>
-    <p class="timeout">Request timeout: {state.provider.request_timeout_seconds} seconds</p>
+    <p class="timeout">Request timeout: {isPositiveSafeInteger(state.provider.request_timeout_seconds) ? `${String(state.provider.request_timeout_seconds)} seconds` : 'Invalid value'}</p>
     <ModelList models={state.models} />
     <section class="probes" aria-labelledby="probe-results-title">
       <h3 id="probe-results-title">Probe results</h3>

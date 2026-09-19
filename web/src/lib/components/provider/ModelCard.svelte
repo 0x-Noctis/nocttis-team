@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { ModelResponse } from '$lib/api/types';
+  import { isPositiveSafeInteger, type ModelResponse } from '$lib/api/types';
   import CapabilityMatrix from './CapabilityMatrix.svelte';
 
   let { model }: { model: ModelResponse } = $props();
@@ -13,8 +13,8 @@
       <code>{model.remote_name}</code>
     </div>
     <dl>
-      <div><dt>Context</dt><dd>{model.context_window.toLocaleString()}</dd></div>
-      <div><dt>Max output</dt><dd>{model.max_output_tokens.toLocaleString()}</dd></div>
+      <div><dt>Context</dt><dd>{isPositiveSafeInteger(model.context_window) ? String(model.context_window) : 'Invalid value'}</dd></div>
+      <div><dt>Max output</dt><dd>{isPositiveSafeInteger(model.max_output_tokens) ? String(model.max_output_tokens) : 'Invalid value'}</dd></div>
     </dl>
   </header>
   <CapabilityMatrix capabilities={model.capabilities} />

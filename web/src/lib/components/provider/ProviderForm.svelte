@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { ProviderInput } from '$lib/api/types';
+  import { MAX_SAFE_INTEGER, isPositiveSafeInteger, type ProviderInput } from '$lib/api/types';
 
   let {
     initial = {
@@ -22,6 +22,7 @@
     api_key_env: '',
     request_timeout_seconds: 180
   });
+  let timeoutError = $state('');
 
   $effect(() => {
     provider = { ...initial };
@@ -29,6 +30,11 @@
 
   function submit(event: SubmitEvent) {
     event.preventDefault();
+    if (!isPositiveSafeInteger(provider.request_timeout_seconds)) {
+      timeoutError = `Request timeout must be a whole number from 1 to ${MAX_SAFE_INTEGER}.`;
+      return;
+    }
+    timeoutError = '';
     onsubmit?.({ ...provider });
   }
 </script>
@@ -58,7 +64,18 @@
     </label>
     <label>
       Request timeout (seconds)
-      <input bind:value={provider.request_timeout_seconds} name="request_timeout_seconds" type="number" min="1" step="1" required />
+      <input
+        bind:value={provider.request_timeout_seconds}
+        name="request_timeout_seconds"
+        type="number"
+        min="1"
+        max={MAX_SAFE_INTEGER}
+        step="1"
+        aria-invalid={timeoutError ? 'true' : undefined}
+        aria-describedby={timeoutError ? 'request-timeout-error' : undefined}
+        required
+      />
+      {#if timeoutError}<span id="request-timeout-error" class="error" role="alert">{timeoutError}</span>{/if}
     </label>
   </div>
 
@@ -74,6 +91,7 @@
   .fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
   label { display: grid; gap: .45rem; font-weight: 700; }
   label span { color: #aeb5ad; font-size: .8rem; font-weight: 400; }
+  label .error { color: #ffb0b0; }
   input { width: 100%; min-height: 2.75rem; padding: .65rem .75rem; border: 1px solid #525b52; background: #090b0a; color: inherit; font: inherit; }
   input:focus-visible, button:focus-visible { outline: 3px solid #fff; outline-offset: 3px; }
   button { justify-self: start; min-height: 2.75rem; padding: .65rem 1rem; border: 0; background: #90e0a8; color: #09100b; font-weight: 800; cursor: pointer; }

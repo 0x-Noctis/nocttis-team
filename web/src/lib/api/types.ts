@@ -1,4 +1,13 @@
 export const capabilityKeys = ['chat', 'streaming', 'tools', 'parallel_tools'] as const;
+export const MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
+
+export function isPositiveSafeInteger(value: number): boolean {
+  return Number.isSafeInteger(value) && value > 0;
+}
+
+export function isNonNegativeSafeInteger(value: number): boolean {
+  return Number.isSafeInteger(value) && value >= 0;
+}
 
 export type CapabilityKey = (typeof capabilityKeys)[number];
 export type VerifiedCapability = 'unknown' | 'supported' | 'unsupported';
