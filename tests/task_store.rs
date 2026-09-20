@@ -1,20 +1,17 @@
-pub use ai_team::domain;
-
-#[path = "../src/store/event.rs"]
-mod event;
-#[path = "../src/store/task.rs"]
-mod task;
-
-use domain::{
-    state_machine::Actor,
-    task::{
-        AllowedPath, MAX_SAFE_INTEGER, MaxAttempts, NonEmptyString, PositiveLimit, TaskContract,
-        TaskLimits, TaskStatus,
+use ai_team::{
+    domain::{
+        state_machine::Actor,
+        task::{
+            AllowedPath, MAX_SAFE_INTEGER, MaxAttempts, NonEmptyString, PositiveLimit,
+            TaskContract, TaskLimits, TaskStatus,
+        },
+    },
+    store::{
+        event::{AgentAttempt, Usage},
+        task::{Conflict, StoreError, TaskRepository},
     },
 };
-use event::{AgentAttempt, Usage};
 use sqlx::{PgPool, Row};
-use task::{Conflict, StoreError, TaskRepository};
 use uuid::Uuid;
 
 fn text(field: &'static str, value: impl Into<String>) -> NonEmptyString {

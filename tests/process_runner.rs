@@ -8,21 +8,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-use ai_team::store::artifact::ArtifactStore;
-
-mod store {
-    pub mod artifact {
-        pub use ai_team::store::artifact::{ArtifactError, ArtifactMetadata, ArtifactStore};
-    }
-}
-
-#[path = "../src/runner/container.rs"]
-mod container;
-#[path = "../src/runner/process.rs"]
-mod process;
-
-use container::{ContainerLimits, docker_available};
-use process::{ArtifactTargets, CommandRequest, ProcessError, ProcessRunner, VerificationCommand};
+use ai_team::{
+    runner::{
+        container::{ContainerLimits, docker_available},
+        process::{
+            ArtifactTargets, CommandRequest, ProcessError, ProcessRunner, VerificationCommand,
+        },
+    },
+    store::artifact::ArtifactStore,
+};
 
 static DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static DOCKER_TEST: Mutex<()> = Mutex::new(());

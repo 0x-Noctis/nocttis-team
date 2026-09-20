@@ -353,7 +353,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
 
 ## Gelombang M2-B — Context dan Tool Runner
 
-- [ ] **M2-005 — Task PostgreSQL store** · Lane A
+- [x] **M2-005 — Task PostgreSQL store** · Lane A
   - Depends On: M2-001
   - Parallel With: M2-006, M2-007
   - Allowed Paths: `migrations/0004_task_runtime.sql`, `src/store/task.rs`, `src/store/event.rs`, `tests/task_store.rs`
@@ -379,7 +379,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
 
 ## Gelombang M2-C — Agent Runtime dan API
 
-- [ ] **M2-008 — Process runner terisolasi** · Lane B
+- [x] **M2-008 — Process runner terisolasi** · Lane B
   - Depends On: M2-007
   - Parallel With: M2-009, M2-010
   - Allowed Paths: `src/runner/process.rs`, `src/runner/container.rs`, `tests/process_runner.rs`, `compose.yaml`
@@ -865,3 +865,4 @@ Tambahkan satu baris saat task selesai atau diblokir.
 | 2026-09-20 | M2-001, M2-002 | Task state machine dan filesystem artifact store terintegrasi ke production crate | `cargo test --test artifact_store -- --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo fmt --check`; `git diff --check` | Migration task runtime memakai nomor `0004` karena `0003` sudah dipakai idempotency |
 | 2026-09-20 | M2-003, M2-004 | Git worktree manager aman dan komponen task fixture terintegrasi | `cargo test --test git_worktree -- --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `npm run check`; `npm run build`; `git diff --check` | M2-005 dan M2-006 menunggu revisi review |
 | 2026-09-20 | M2-006, M2-007 | Context builder bounded dan structured tools terintegrasi ke production crate | `cargo test --test context_builder --test tool_policy -- --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo fmt --check`; `git diff --check` | Timeout filesystem cooperative; M2-005 menunggu dua revisi review |
+| 2026-09-20 | M2-005, M2-008 | Canonical task store dan Docker process runner terintegrasi ke production crate | `cargo test --test task_store -- --test-threads=1 --nocapture`; `cargo test --test process_runner -- --test-threads=1 --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `docker compose config --quiet`; `git diff --check` | Legacy `FAILED_FINAL` dimigrasikan ke `FAILED`; verification runner tidak memiliki host fallback |
