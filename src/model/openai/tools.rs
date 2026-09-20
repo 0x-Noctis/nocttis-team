@@ -106,7 +106,9 @@ impl OpenAiToolsClient {
                 model_class: "probe".to_owned(),
                 messages: vec![Message {
                     role: MessageRole::User,
-                    content: format!("Call {PROBE_TOOL_NAME} with enabled=true. Do not answer in text."),
+                    content: format!(
+                        "Call {PROBE_TOOL_NAME} with enabled=true. Do not answer in text."
+                    ),
                     tool_call_id: None,
                 }],
                 tools: vec![ToolDefinition {
@@ -129,9 +131,7 @@ impl OpenAiToolsClient {
         Ok(response
             .tool_calls
             .into_iter()
-            .find(|call| {
-                call.name == PROBE_TOOL_NAME && call.arguments == json!({"enabled": true})
-            })
+            .find(|call| call.name == PROBE_TOOL_NAME && call.arguments == json!({"enabled": true}))
             .map_or(ToolProbeResult::Unsupported, ToolProbeResult::Supported))
     }
 }
