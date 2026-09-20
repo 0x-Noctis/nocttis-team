@@ -253,7 +253,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: base URL `/v1` tidak hilang, missing usage ditandai estimated, response invalid ditolak aman.
   - Verify: mock tests untuk 200, 401, 429, 500, timeout, malformed JSON, dan missing usage.
 
-- [ ] **M1-006 — Streaming SSE provider** · Lane B
+- [x] **M1-006 — Streaming SSE provider** · Lane B
   - Depends On: M1-003, M1-005
   - Parallel With: M1-004, M1-007
   - Allowed Paths: `src/model/openai/stream.rs`, `src/model/openai/mod.rs`, `tests/model_stream.rs`
@@ -271,7 +271,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
 
 ## Gelombang M1-C — Tool Probe dan API
 
-- [ ] **M1-008 — Tool-call normalization dan probe** · Lane B
+- [x] **M1-008 — Tool-call normalization dan probe** · Lane B
   - Depends On: M1-005
   - Parallel With: M1-009
   - Allowed Paths: `src/model/openai/tools.rs`, `tests/model_tools.rs`
@@ -859,3 +859,4 @@ Tambahkan satu baris saat task selesai atau diblokir.
 | 2026-09-19 | M0-001..005 | Milestone M0 complete; integration commit `eba44d1` | `cargo fmt --check`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo test`; `npm run check`; `npm run build`; `docker compose config --quiet` | Semua full validation lulus |
 | 2026-09-19 | M1-A | Cross-contract provider foundation lulus; test commit `6651bb1` | `cargo test --test provider_contract -- --test-threads=1 --nocapture`; `cargo fmt --check`; `cargo test`; `cargo clippy --all-targets --all-features -- -D warnings`; `git diff --check` | PostgreSQL aktif dari instance sehat; roundtrip domain, capability, probe, ID, dan bigint lossless |
 | 2026-09-20 | M1-004, M1-005, M1-007 | Provider store, non-streaming chat client, dan UI provider foundation terintegrasi | `cargo test --test provider_store -- --test-threads=1 --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `npm run check`; `npm run build` | M1-006 tetap terbuka; milestone M1 belum selesai |
+| 2026-09-20 | M1-006, M1-008 | Streaming SSE dan tool-call probe terintegrasi; tool client ter-wire ke production crate | `cargo test --test model_stream --test model_tools`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo fmt --check`; `git diff --check` | `M1-009` kini dapat dimulai; milestone M1 belum selesai |
