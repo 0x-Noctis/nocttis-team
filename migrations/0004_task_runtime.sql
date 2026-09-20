@@ -27,6 +27,7 @@ ALTER TABLE artifacts ALTER COLUMN task_id TYPE text USING task_id::text;
 
 DROP INDEX tasks_scheduler_idx;
 ALTER TABLE tasks ALTER COLUMN status TYPE text USING status::text;
+UPDATE tasks SET status = 'FAILED' WHERE status = 'FAILED_FINAL';
 CREATE INDEX tasks_scheduler_idx ON tasks (status, priority DESC, created_at) WHERE status = 'READY';
 
 ALTER TABLE tasks

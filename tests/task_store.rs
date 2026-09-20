@@ -22,8 +22,8 @@ fn text(field: &'static str, value: impl Into<String>) -> NonEmptyString {
 }
 
 async fn ownership(pool: &PgPool) -> (Uuid, Uuid) {
-    let project_id = Uuid::new_v4();
-    let run_id = Uuid::new_v4();
+    let project_id = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap();
+    let run_id = Uuid::parse_str("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb").unwrap();
     sqlx::query("INSERT INTO projects (id,name,repository_path) VALUES ($1,'project',$2)")
         .bind(project_id)
         .bind(format!("/repo/{project_id}"))
@@ -75,6 +75,86 @@ async fn migration_uses_only_canonical_tables(pool: PgPool) {
             .await
             .unwrap();
         assert!(exists, "missing {table}");
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn legacy_failed_final_is_migrated_to_failed(pool: PgPool) {
+    let schema = format!("upgrade_{}", Uuid::new_v4().simple());
+    let mut connection = pool.acquire().await.unwrap();
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query(&format!("SET search_path TO {schema}"))
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0001_initial.sql"))
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    let project_id = Uuid::new_v4();
+    let run_id = Uuid::new_v4();
+    let task_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO projects (id,name,repository_path) VALUES ($1,'legacy','/legacy')")
+        .bind(project_id)
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO project_runs (id,project_id,objective,status,token_budget) VALUES ($1,$2,'legacy','done',1)")
+        .bind(run_id)
+        .bind(project_id)
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO tasks (id,project_run_id,role,title,objective,status,input_token_limit,output_token_limit) VALUES ($1,$2,'worker','legacy','legacy','FAILED_FINAL',1,1)")
+        .bind(task_id)
+        .bind(run_id)
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0004_task_runtime.sql"))
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    let status: String = sqlx::query_scalar("SELECT status FROM tasks WHERE id=$1")
+        .bind(task_id.to_string())
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap();
+    assert_eq!(status, "FAILED");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn project_identifiers_require_canonical_uuid_text(pool: PgPool) {
+    let (project_id, run_id) = ownership(&pool).await;
+    let repository = TaskRepository::new(pool);
+    let canonical = contract("canonical", project_id, run_id);
+    let stored = repository.create(&canonical).await.unwrap();
+    assert_eq!(stored.contract.project_id.as_str(), project_id.to_string());
+    assert_eq!(stored.contract.project_run_id.as_str(), run_id.to_string());
+
+    for (field, uuid) in [("project_id", project_id), ("project_run_id", run_id)] {
+        for (index, value) in [
+            uuid.to_string().to_uppercase(),
+            uuid.simple().to_string(),
+            uuid.braced().to_string(),
+            uuid.urn().to_string(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut invalid = contract(&format!("invalid-{field}-{index}"), project_id, run_id);
+            match field {
+                "project_id" => invalid.project_id = text("project_id", value),
+                _ => invalid.project_run_id = text("project_run_id", value),
+            }
+            assert!(matches!(
+                repository.create(&invalid).await,
+                Err(StoreError::InvalidId(error_field)) if error_field == field
+            ));
+        }
     }
 }
 

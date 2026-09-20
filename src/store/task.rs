@@ -478,7 +478,11 @@ fn parse_enum<T: DeserializeOwned>(value: String) -> Result<T, StoreError> {
     Ok(serde_json::from_value(Value::String(value))?)
 }
 fn uuid(field: &'static str, value: &str) -> Result<Uuid, StoreError> {
-    Uuid::parse_str(value).map_err(|_| StoreError::InvalidId(field))
+    let parsed = Uuid::parse_str(value).map_err(|_| StoreError::InvalidId(field))?;
+    if parsed.to_string() != value {
+        return Err(StoreError::InvalidId(field));
+    }
+    Ok(parsed)
 }
 fn constraint(error: &sqlx::Error) -> Option<&str> {
     error
