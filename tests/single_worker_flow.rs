@@ -29,6 +29,94 @@ async fn production_orchestrator_completes_full_flow(pool: PgPool) {
     production_flow(pool, false).await;
 }
 
+#[sqlx::test(migrations = "./migrations")]
+async fn setup_failures_requeue_without_running_event(pool: PgPool) {
+    for failure in ["provider", "secret", "git", "context"] {
+        let fixture = FlowFixture::new();
+        let project_id = Uuid::new_v4();
+        let run_id = Uuid::new_v4();
+        let task_id = Uuid::new_v4().to_string();
+        let secret_name = format!("NOCTIS_MISSING_{}_SECRET", failure.to_uppercase());
+        unsafe { std::env::remove_var(&secret_name) };
+        let repository = fixture.repository.clone();
+        sqlx::query("INSERT INTO projects (id,name,repository_path) VALUES ($1,$2,$3)")
+            .bind(project_id)
+            .bind(format!("setup-{failure}"))
+            .bind(repository.to_string_lossy().as_ref())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO project_runs (id,project_id,objective,status,token_budget) VALUES ($1,$2,'setup','running',1000)")
+            .bind(run_id).bind(project_id).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO providers (id,base_url,api_key_env,request_timeout_seconds) VALUES ($1,'http://127.0.0.1:1',$2,1)")
+            .bind(format!("provider-{failure}")).bind(&secret_name).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO models (id,provider_id,remote_name,class,context_window,max_output_tokens) VALUES ($1,$2,'mock','coding',1000,1000)")
+            .bind(format!("model-{failure}")).bind(format!("provider-{failure}")).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO tasks (id,project_run_id,role,title,objective,status,allowed_paths,acceptance_criteria,verification_commands,max_input_tokens,max_output_tokens,max_attempts) VALUES ($1,$2,'worker','setup','setup','READY','[\"src/**\"]','[\"works\"]','[\"cargo test\"]',1000,1000,2)")
+            .bind(&task_id).bind(run_id).execute(&pool).await.unwrap();
+        let tasks = TaskRepository::new(pool.clone());
+        let providers = ProviderRepository::new(pool.clone());
+        let attempt_id = Uuid::new_v4();
+        claim_task(
+            &tasks,
+            &providers,
+            StartRequest {
+                task_id: &task_id,
+                expected_version: 0,
+                model_id: &format!("model-{failure}"),
+                retention_seconds: 60,
+                attempt_id,
+            },
+        )
+        .await
+        .unwrap();
+        if failure == "provider" {
+            sqlx::query("UPDATE agent_runs SET model_id='missing-model' WHERE id=$1")
+                .bind(attempt_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        } else if matches!(failure, "git" | "context") {
+            unsafe { std::env::set_var(&secret_name, "test-only") };
+            if failure == "git" {
+                sqlx::query("UPDATE projects SET repository_path=$2 WHERE id=$1")
+                    .bind(project_id)
+                    .bind(fixture.root.join("missing").to_string_lossy().as_ref())
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            } else {
+                sqlx::query("UPDATE tasks SET context_refs='[\"invalid\"]' WHERE id=$1")
+                    .bind(&task_id)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+        }
+        let mut orchestrator = Orchestrator::new(
+            tasks.clone(),
+            providers,
+            ArtifactStore::new(&fixture.artifacts, 1024).unwrap(),
+            OrchestratorConfig {
+                worktree_root: fixture.worktrees.clone(),
+                stale_after_seconds: 60,
+                retention_lease_seconds: 60,
+            },
+        );
+        assert!(orchestrator.dispatch_once().await.unwrap());
+        assert_eq!(tasks.get(&task_id).await.unwrap().status, TaskStatus::Ready);
+        assert!(
+            !tasks
+                .events(&task_id)
+                .await
+                .unwrap()
+                .iter()
+                .any(|event| event.to_status == Some(TaskStatus::Running))
+        );
+        assert!(!fixture.worktrees.join(&task_id).exists());
+    }
+}
+
 async fn production_flow(pool: PgPool, conflict: bool) {
     let fixture = FlowFixture::new();
     let patch = "diff --git a/tracked.txt b/tracked.txt\n--- a/tracked.txt\n+++ b/tracked.txt\n@@ -1 +1 @@\n-base\n+changed\n";
@@ -157,6 +245,13 @@ async fn production_flow(pool: PgPool, conflict: bool) {
             }
         ]
     );
+    assert_eq!(
+        transitions
+            .iter()
+            .filter(|status| **status == TaskStatus::Running)
+            .count(),
+        1
+    );
     let target = fixture.worktrees.join(format!("{task_id}-integration"));
     assert_eq!(
         fs::read_to_string(target.join("tracked.txt")).unwrap(),
@@ -242,7 +337,8 @@ async fn start_is_atomic_and_ambiguous_recovery_never_replays(pool: PgPool) {
     assert!(matches!(second, Err(StoreError::Conflict(Conflict::Claim))));
     assert_eq!(tasks.list_attempts(&task_id).await.unwrap().len(), 1);
 
-    tasks.start_claimed(first_id).await.unwrap();
+    let owner = tasks.claim_dispatch(first_id).await.unwrap();
+    tasks.start_claimed(first_id, owner).await.unwrap();
     tasks
         .reserve_tool_call(first_id, "call-1", "apply_patch")
         .await

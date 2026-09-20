@@ -81,6 +81,11 @@ async fn ready(repository: &TaskRepository, task: &TaskContract) {
         .unwrap();
 }
 
+async fn start(repository: &TaskRepository, attempt_id: Uuid) -> RuntimeAttempt {
+    let owner = repository.claim_dispatch(attempt_id).await.unwrap();
+    repository.start_claimed(attempt_id, owner).await.unwrap()
+}
+
 fn claim(task_id: &str) -> ClaimAttempt {
     ClaimAttempt {
         id: Uuid::new_v4(),
@@ -663,7 +668,7 @@ async fn assigned_start_has_exact_events_versions_and_registry_model(pool: PgPoo
     assert_eq!(attempt.status, AttemptStatus::Assigned);
     assert_eq!(repository.get(task.id.as_str()).await.unwrap().version, 3);
 
-    let started = repository.start_claimed(attempt.id).await.unwrap();
+    let started = start(&repository, attempt.id).await;
     assert_eq!(started.status, AttemptStatus::Running);
     let stored = repository.get(task.id.as_str()).await.unwrap();
     assert_eq!((stored.status, stored.version), (TaskStatus::Running, 4));
@@ -681,8 +686,12 @@ async fn assigned_start_has_exact_events_versions_and_registry_model(pool: PgPoo
         .execute(&pool)
         .await
         .unwrap();
+    let owner = repository
+        .claim_dispatch(rollback_attempt.id)
+        .await
+        .unwrap();
     assert!(matches!(
-        repository.start_claimed(rollback_attempt.id).await,
+        repository.start_claimed(rollback_attempt.id, owner).await,
         Err(StoreError::Database(_))
     ));
     assert_eq!(
@@ -820,7 +829,7 @@ async fn stale_assigned_and_running_recover_once(pool: PgPool) {
         .claim_ready(2, &claim(running_task.id.as_str()))
         .await
         .unwrap();
-    repository.start_claimed(running.id).await.unwrap();
+    start(&repository, running.id).await;
     repository
         .reserve_tool_call(running.id, "completed-call", "apply_patch")
         .await
@@ -872,7 +881,7 @@ async fn ambiguous_reservation_is_not_replayed_and_retention_is_idempotent(pool:
         .claim_ready(2, &claim(task.id.as_str()))
         .await
         .unwrap();
-    repository.start_claimed(attempt.id).await.unwrap();
+    start(&repository, attempt.id).await;
     repository
         .reserve_tool_call(attempt.id, "call", "apply_patch")
         .await
@@ -1062,7 +1071,7 @@ async fn recovery_validates_each_execution_stage_and_rolls_back_atomically(pool:
             let task = contract(&name, project_id, run_id, 2);
             ready(&repository, &task).await;
             let attempt = repository.claim_ready(2, &claim(&name)).await.unwrap();
-            repository.start_claimed(attempt.id).await.unwrap();
+            start(&repository, attempt.id).await;
             let mut version = 4;
             if target != TaskStatus::Running {
                 for (next, actor) in [
@@ -1163,7 +1172,7 @@ async fn reservation_and_recovery_are_serialized(pool: PgPool) {
         .claim_ready(2, &claim(task.id.as_str()))
         .await
         .unwrap();
-    repository.start_claimed(attempt.id).await.unwrap();
+    start(&repository, attempt.id).await;
     sqlx::query("UPDATE agent_runs SET heartbeat_at=now()-interval '1 hour' WHERE id=$1")
         .bind(attempt.id)
         .execute(&pool)
@@ -1279,7 +1288,7 @@ async fn runtime_failure_recovery_is_legal_at_every_stage(pool: PgPool) {
             .await
             .unwrap();
         if stage != TaskStatus::Assigned {
-            repository.start_claimed(attempt.id).await.unwrap();
+            start(&repository, attempt.id).await;
         }
         let path = match stage {
             TaskStatus::SelfCheck => vec![(TaskStatus::SelfCheck, Actor::Worker)],
@@ -1337,7 +1346,7 @@ async fn runtime_failure_recovery_is_legal_at_every_stage(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn concurrent_dispatch_start_has_exactly_one_owner(pool: PgPool) {
+async fn concurrent_dispatch_claim_has_exactly_one_owner_without_starting(pool: PgPool) {
     let (project_id, run_id) = ownership(&pool).await;
     let repository = TaskRepository::new(pool.clone());
     let task = contract("dispatch-owner", project_id, run_id, 2);
@@ -1348,8 +1357,8 @@ async fn concurrent_dispatch_start_has_exactly_one_owner(pool: PgPool) {
         .unwrap();
 
     let (left, right) = tokio::join!(
-        repository.start_claimed(attempt.id),
-        repository.start_claimed(attempt.id)
+        repository.claim_dispatch(attempt.id),
+        repository.claim_dispatch(attempt.id)
     );
     assert!(matches!(
         (&left, &right),
@@ -1358,11 +1367,11 @@ async fn concurrent_dispatch_start_has_exactly_one_owner(pool: PgPool) {
     ));
     assert_eq!(
         repository.get_attempt(attempt.id).await.unwrap().status,
-        AttemptStatus::Running
+        AttemptStatus::Assigned
     );
     let stored = repository.get(task.id.as_str()).await.unwrap();
-    assert_eq!((stored.status, stored.version), (TaskStatus::Running, 4));
-    assert_eq!(repository.events(task.id.as_str()).await.unwrap().len(), 4);
+    assert_eq!((stored.status, stored.version), (TaskStatus::Assigned, 3));
+    assert_eq!(repository.events(task.id.as_str()).await.unwrap().len(), 3);
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -1383,7 +1392,7 @@ async fn ambiguous_runtime_failure_requires_human_at_every_started_stage(pool: P
             .claim_ready(2, &claim(task.id.as_str()))
             .await
             .unwrap();
-        repository.start_claimed(attempt.id).await.unwrap();
+        start(&repository, attempt.id).await;
         let path = match stage {
             TaskStatus::SelfCheck => vec![(TaskStatus::SelfCheck, Actor::Worker)],
             TaskStatus::Review => vec![
@@ -1457,7 +1466,7 @@ async fn verifier_failure_and_changes_requested_close_attempt_legally(pool: PgPo
         let task = contract(name, project_id, run_id, 2);
         ready(&repository, &task).await;
         let attempt = repository.claim_ready(2, &claim(name)).await.unwrap();
-        repository.start_claimed(attempt.id).await.unwrap();
+        start(&repository, attempt.id).await;
         for (to, actor) in [
             (TaskStatus::SelfCheck, Actor::Worker),
             (TaskStatus::Review, Actor::Worker),

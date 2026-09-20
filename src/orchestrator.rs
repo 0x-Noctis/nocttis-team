@@ -13,7 +13,7 @@ use crate::{
         verifier::{ProductionExecutor, VerificationVerdict, Verifier},
         worker::{TokenUsage, Worker, WorkerConfig},
     },
-    context::{ContextBuilder, ContextLimits},
+    context::{ContextBuilder, ContextLimits, ContextRequest},
     domain::{
         state_machine::Actor,
         task::{NonEmptyString, TaskStatus},
@@ -146,17 +146,26 @@ impl Orchestrator {
         else {
             return Ok(false);
         };
-        let attempt = match self.tasks.start_claimed(attempt.id).await {
-            Ok(attempt) => attempt,
+        let dispatch_owner = match self.tasks.claim_dispatch(attempt.id).await {
+            Ok(owner) => owner,
             Err(StoreError::Conflict(Conflict::Claim)) => return Ok(true),
             Err(_) => return Err(OrchestratorError::Store),
         };
         let attempt_id = attempt.id;
-        if let Err(error) = self.execute(attempt).await {
-            self.tasks
-                .fail_runtime(attempt_id, error.code())
+        if let Err(error) = self.execute(attempt, dispatch_owner).await {
+            match self
+                .tasks
+                .fail_setup(attempt_id, dispatch_owner, error.code())
                 .await
-                .map_err(|_| OrchestratorError::Store)?;
+            {
+                Ok(()) => {}
+                Err(StoreError::Conflict(Conflict::Claim)) => self
+                    .tasks
+                    .fail_runtime(attempt_id, error.code())
+                    .await
+                    .map_err(|_| OrchestratorError::Store)?,
+                Err(_) => return Err(OrchestratorError::Store),
+            }
             eprintln!("{error}");
         }
         Ok(true)
@@ -208,6 +217,7 @@ impl Orchestrator {
     async fn execute(
         &mut self,
         attempt: crate::store::event::RuntimeAttempt,
+        dispatch_owner: Uuid,
     ) -> Result<(), OrchestratorError> {
         let task = self
             .tasks
@@ -227,6 +237,25 @@ impl Orchestrator {
             .provider;
         let secret =
             env::var(provider.api_key_env.as_str()).map_err(|_| OrchestratorError::Secret)?;
+        let policy = ToolPolicy::new(
+            ToolRole::Worker,
+            task.contract
+                .allowed_paths
+                .iter()
+                .map(|path| path.as_str().to_owned())
+                .collect(),
+            64 * 1024,
+            1024 * 1024,
+            Duration::from_secs(task.contract.limits.timeout_seconds.get() as u64),
+        )
+        .map_err(|_| OrchestratorError::Context)?;
+        let client = OpenAiToolsClient::new(
+            provider.base_url.as_str(),
+            secret,
+            model.remote_name.as_str(),
+            Duration::from_secs(provider.request_timeout_seconds.get() as u64),
+        )
+        .map_err(|_| OrchestratorError::Model)?;
         let repository = self
             .tasks
             .project_repository(attempt.task_id.as_str())
@@ -248,7 +277,7 @@ impl Orchestrator {
                 )
             })
             .map_err(|_| OrchestratorError::Git)?;
-        let context = ContextBuilder::new(
+        let context = match ContextBuilder::new(
             worktree.path(),
             &self.artifacts,
             ContextLimits {
@@ -257,28 +286,32 @@ impl Orchestrator {
                 max_file_bytes: 1024 * 1024,
                 max_command_output_bytes: 1024 * 1024,
             },
-        )
-        .map_err(|_| OrchestratorError::Context)?;
-        let policy = ToolPolicy::new(
-            ToolRole::Worker,
-            task.contract
-                .allowed_paths
-                .iter()
-                .map(|path| path.as_str().to_owned())
-                .collect(),
-            64 * 1024,
-            1024 * 1024,
-            Duration::from_secs(task.contract.limits.timeout_seconds.get() as u64),
-        )
-        .map_err(|_| OrchestratorError::Context)?;
+        ) {
+            Ok(context) => context,
+            Err(_) => {
+                git.cleanup(&worktree).map_err(|_| OrchestratorError::Git)?;
+                return Err(OrchestratorError::Context);
+            }
+        };
+        if context
+            .build(&task.contract, &ContextRequest::default())
+            .is_err()
+        {
+            git.cleanup(&worktree).map_err(|_| OrchestratorError::Git)?;
+            return Err(OrchestratorError::Context);
+        }
         let tools = StructuredTools::new(policy, &git, &worktree, &self.artifacts);
-        let client = OpenAiToolsClient::new(
-            provider.base_url.as_str(),
-            secret,
-            model.remote_name.as_str(),
-            Duration::from_secs(provider.request_timeout_seconds.get() as u64),
-        )
-        .map_err(|_| OrchestratorError::Model)?;
+        if self
+            .tasks
+            .start_claimed(attempt.id, dispatch_owner)
+            .await
+            .is_err()
+        {
+            drop(tools);
+            drop(context);
+            git.cleanup(&worktree).map_err(|_| OrchestratorError::Git)?;
+            return Err(OrchestratorError::Store);
+        }
         let run = Worker::new(
             &task.contract,
             TaskStatus::Running,
