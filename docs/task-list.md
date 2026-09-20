@@ -361,7 +361,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: optimistic conflict/row lock aman; event tercatat bersama transition; pagination cursor tersedia.
   - Verify: integration tests transition race dan rollback.
 
-- [ ] **M2-006 — Context builder minimum** · Lane B
+- [x] **M2-006 — Context builder minimum** · Lane B
   - Depends On: M2-001, M2-002
   - Parallel With: M2-005, M2-007
   - Allowed Paths: `src/context/**`, `tests/context_builder.rs`
@@ -369,7 +369,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: obey allowed paths dan byte/token limit; binary/large file ditolak; sumber context tercatat.
   - Verify: tests relevance, truncation, path rejection, dan deterministic ordering.
 
-- [ ] **M2-007 — Tool policy dan structured tools** · Lane B
+- [x] **M2-007 — Tool policy dan structured tools** · Lane B
   - Depends On: M2-001, M2-003
   - Parallel With: M2-005, M2-006
   - Allowed Paths: `src/runner/policy.rs`, `src/runner/tools/**`, `tests/tool_policy.rs`
@@ -864,3 +864,4 @@ Tambahkan satu baris saat task selesai atau diblokir.
 | 2026-09-20 | M1-011, Exit Gate M1 | Compatibility API/persistence, SSRF guard, CORS preflight, dan error envelope final lulus | `cargo test --test provider_api -- --test-threads=1 --nocapture`; `cargo test --test provider_compatibility -- --test-threads=1 --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `npm run check`; `npm run build` | Milestone M1 selesai; private provider wajib masuk `NOCTIS_PROVIDER_HOST_ALLOWLIST` |
 | 2026-09-20 | M2-001, M2-002 | Task state machine dan filesystem artifact store terintegrasi ke production crate | `cargo test --test artifact_store -- --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo fmt --check`; `git diff --check` | Migration task runtime memakai nomor `0004` karena `0003` sudah dipakai idempotency |
 | 2026-09-20 | M2-003, M2-004 | Git worktree manager aman dan komponen task fixture terintegrasi | `cargo test --test git_worktree -- --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `npm run check`; `npm run build`; `git diff --check` | M2-005 dan M2-006 menunggu revisi review |
+| 2026-09-20 | M2-006, M2-007 | Context builder bounded dan structured tools terintegrasi ke production crate | `cargo test --test context_builder --test tool_policy -- --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo fmt --check`; `git diff --check` | Timeout filesystem cooperative; M2-005 menunggu dua revisi review |

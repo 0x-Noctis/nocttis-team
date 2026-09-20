@@ -1,27 +1,10 @@
-mod runner {
-    pub mod git {
-        pub use ai_team::runner::git::*;
-    }
-    pub mod policy {
-        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/runner/policy.rs"));
-    }
-    pub mod tools {
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/runner/tools/mod.rs"
-        ));
-    }
-}
-mod store {
-    pub mod artifact {
-        pub use ai_team::store::artifact::*;
-    }
-}
-
-use runner::{
-    git::GitWorktreeManager,
-    policy::{ToolPolicy, ToolRole},
-    tools::{StructuredTools, ToolErrorCode, ToolRequest, ToolResult},
+use ai_team::{
+    runner::{
+        git::{GitWorktreeManager, Worktree},
+        policy::{ToolPolicy, ToolRole},
+        tools::{StructuredTools, ToolErrorCode, ToolRequest, ToolResult},
+    },
+    store::artifact::ArtifactStore,
 };
 use std::{
     fs,
@@ -29,13 +12,12 @@ use std::{
     process::Command,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use store::artifact::ArtifactStore;
 
 struct Fixture {
     root: PathBuf,
     repository: PathBuf,
     manager: GitWorktreeManager,
-    worktree: runner::git::Worktree,
+    worktree: Worktree,
     artifacts: ArtifactStore,
 }
 

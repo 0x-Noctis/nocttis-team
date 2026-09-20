@@ -5,19 +5,14 @@ use std::{
 };
 
 use ai_team::{
-    domain::{
-        self,
-        task::{AllowedPath, MaxAttempts, NonEmptyString, PositiveLimit, TaskContract, TaskLimits},
+    context::{
+        BuiltContext, ContextBuilder, ContextError, ContextLimits, ContextRequest,
+        ContextSourceKind, TruncationReason, estimate_tokens,
     },
-    store::{self, artifact::ArtifactStore},
-};
-
-#[path = "../src/context/mod.rs"]
-mod context;
-
-use context::{
-    ContextBuilder, ContextError, ContextLimits, ContextRequest, ContextSourceKind,
-    TruncationReason,
+    domain::task::{
+        AllowedPath, MaxAttempts, NonEmptyString, PositiveLimit, TaskContract, TaskLimits,
+    },
+    store::artifact::ArtifactStore,
 };
 
 static DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -95,7 +90,7 @@ fn stores(repository: &TestDirectory, artifacts: &TestDirectory) -> ArtifactStor
     ArtifactStore::new(&artifacts.0, 8_000).unwrap()
 }
 
-fn source_refs(result: &context::BuiltContext) -> Vec<&str> {
+fn source_refs(result: &BuiltContext) -> Vec<&str> {
     result
         .entries
         .iter()
@@ -558,7 +553,7 @@ fn unicode_truncation_remains_valid_utf8_and_within_budgets() {
         result
             .entries
             .iter()
-            .map(|entry| context::estimate_tokens(entry.content.len()))
+            .map(|entry| estimate_tokens(entry.content.len()))
             .sum::<usize>()
     );
     assert_eq!(result.entries.last().unwrap().content, "éé");
