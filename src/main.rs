@@ -1,7 +1,6 @@
 pub mod api;
 mod config;
 pub mod domain;
-mod model_gateway;
 pub mod store;
 
 use std::time::Duration;
@@ -9,10 +8,10 @@ use std::time::Duration;
 use anyhow::Context;
 use axum::{
     Json, Router,
-    extract::{Extension, State},
+    extract::Extension,
     http::{HeaderValue, Method},
     middleware,
-    routing::{get, post},
+    routing::get,
 };
 use serde::Serialize;
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -21,13 +20,6 @@ use tracing::info;
 
 use crate::api::{AppError, RequestId, request_id};
 use crate::config::Config;
-use crate::model_gateway::{OpenAiClient, ProbeResult};
-
-#[derive(Clone)]
-struct AppState {
-    database: PgPool,
-    model: OpenAiClient,
-}
 
 #[derive(Serialize)]
 struct Health {
@@ -50,21 +42,16 @@ async fn main() -> anyhow::Result<()> {
         .context("failed to connect to PostgreSQL")?;
     sqlx::migrate!().run(&database).await?;
 
-    let state = AppState {
-        database,
-        model: OpenAiClient::from_env()?,
-    };
-
     let app = Router::new()
         .route("/api/v1/health", get(health))
-        .route("/api/v1/providers/primary/probe", post(probe_provider))
+        .merge(api::providers::router(database.clone()))
         .fallback(api::error::not_found)
-        .with_state(state)
+        .layer(Extension(database))
         .layer(TraceLayer::new_for_http())
         .layer(
             CorsLayer::new()
                 .allow_origin("http://127.0.0.1:5173".parse::<HeaderValue>()?)
-                .allow_methods([Method::GET, Method::POST]),
+                .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE]),
         )
         .layer(middleware::from_fn(request_id));
 
@@ -78,29 +65,17 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn health(
-    State(state): State<AppState>,
+    Extension(database): Extension<PgPool>,
     Extension(request_id): Extension<RequestId>,
 ) -> Result<Json<Health>, AppError> {
     sqlx::query("SELECT 1")
-        .execute(&state.database)
+        .execute(&database)
         .await
         .map_err(|error| AppError::internal(request_id, error))?;
     Ok(Json(Health {
         status: "ok",
         database: "ok",
     }))
-}
-
-async fn probe_provider(
-    State(state): State<AppState>,
-    Extension(request_id): Extension<RequestId>,
-) -> Result<Json<ProbeResult>, AppError> {
-    state
-        .model
-        .probe()
-        .await
-        .map(Json)
-        .map_err(|error| AppError::internal(request_id, error))
 }
 
 async fn shutdown_signal() {
