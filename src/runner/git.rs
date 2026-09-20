@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fmt, fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
@@ -19,7 +20,9 @@ pub enum GitOperation {
     ReadHead,
     ReadStatus,
     ReadDiff,
+    CheckPatch,
     ApplyPatch,
+    VerifyIntegration,
     CleanupWorktree,
     PruneWorktrees,
     CleanupBranch,
@@ -37,7 +40,9 @@ impl fmt::Display for GitOperation {
             Self::ReadHead => "HEAD read",
             Self::ReadStatus => "status read",
             Self::ReadDiff => "diff read",
+            Self::CheckPatch => "patch check",
             Self::ApplyPatch => "patch application",
+            Self::VerifyIntegration => "integration verification",
             Self::CleanupWorktree => "worktree cleanup",
             Self::PruneWorktrees => "worktree prune",
             Self::CleanupBranch => "branch cleanup",
@@ -117,6 +122,12 @@ pub struct Worktree {
     path: PathBuf,
     branch: String,
     base_commit: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IntegrationResult {
+    Integrated,
+    Conflict,
 }
 
 impl Worktree {
@@ -326,6 +337,70 @@ impl GitWorktreeManager {
         Ok(())
     }
 
+    pub fn integrate_verified(
+        &self,
+        source: &Worktree,
+        target: &Worktree,
+    ) -> Result<IntegrationResult, GitError> {
+        self.ensure_registered_worktree(source)?;
+        self.ensure_registered_worktree(target)?;
+        if source.path == target.path {
+            return Err(GitError::InvalidInput("source and target worktree match"));
+        }
+        let base_commit = self.resolve_commit(&source.base_commit)?;
+        if base_commit != source.base_commit {
+            return Err(GitError::InvalidInput("source base commit does not match"));
+        }
+        run(
+            Command::new("git")
+                .arg("-C")
+                .arg(&source.path)
+                .args(["merge-base", "--is-ancestor"])
+                .arg(&base_commit)
+                .arg("HEAD"),
+            None,
+            GitOperation::ValidateAncestry,
+        )?;
+        if !self.status(target)?.is_empty() {
+            return Err(GitError::InvalidInput("target worktree is dirty"));
+        }
+
+        let paths = changed_paths(&source.path, &base_commit)?;
+        for path in &paths {
+            validate_patch_path(&source.path, path)?;
+            validate_patch_path(&target.path, path)?;
+        }
+        let patch = self.diff_binary(source)?;
+        if patch.is_empty() {
+            return Ok(IntegrationResult::Integrated);
+        }
+        if let Err(error) = run(
+            Command::new("git").arg("-C").arg(&target.path).args([
+                "apply",
+                "--check",
+                "--recount",
+                "--whitespace=nowarn",
+                "-",
+            ]),
+            Some(&patch),
+            GitOperation::CheckPatch,
+        ) {
+            return match error {
+                GitError::CommandFailed { .. } => Ok(IntegrationResult::Conflict),
+                error => Err(error),
+            };
+        }
+        self.apply_patch(target, &patch)?;
+
+        let applied_paths = working_paths(&target.path)?;
+        if !applied_paths.is_subset(&paths) {
+            return Err(GitError::InvalidInput(
+                "integrated paths differ from verified patch",
+            ));
+        }
+        Ok(IntegrationResult::Integrated)
+    }
+
     pub fn cleanup(&self, worktree: &Worktree) -> Result<(), GitError> {
         validate_component(&worktree.branch, "branch")?;
         if worktree.path.parent() != Some(self.worktree_root.as_path()) {
@@ -446,6 +521,87 @@ impl GitWorktreeManager {
         }
         Ok(())
     }
+
+    fn ensure_registered_worktree(&self, worktree: &Worktree) -> Result<(), GitError> {
+        self.ensure_worktree(worktree)?;
+        let path = fs::canonicalize(&worktree.path)
+            .map_err(|_| GitError::InvalidInput("worktree does not exist"))?;
+        self.validate_registered_worktree(&path)
+    }
+}
+
+fn changed_paths(path: &Path, base: &str) -> Result<BTreeSet<PathBuf>, GitError> {
+    let output = run(
+        Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(["diff", "--name-only", "-z", "--no-ext-diff"])
+            .arg(base)
+            .arg("--"),
+        None,
+        GitOperation::VerifyIntegration,
+    )?;
+    output
+        .split(|byte| *byte == 0)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            std::str::from_utf8(value)
+                .map(PathBuf::from)
+                .map_err(|_| GitError::InvalidInput("patch path was not UTF-8"))
+        })
+        .collect()
+}
+
+fn working_paths(path: &Path) -> Result<BTreeSet<PathBuf>, GitError> {
+    let mut paths = changed_paths(path, "HEAD")?;
+    let output = run(
+        Command::new("git").arg("-C").arg(path).args([
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+        ]),
+        None,
+        GitOperation::VerifyIntegration,
+    )?;
+    for value in output
+        .split(|byte| *byte == 0)
+        .filter(|value| !value.is_empty())
+    {
+        let value = std::str::from_utf8(value)
+            .map_err(|_| GitError::InvalidInput("worktree path was not UTF-8"))?;
+        paths.insert(PathBuf::from(value));
+    }
+    Ok(paths)
+}
+
+fn validate_patch_path(root: &Path, relative: &Path) -> Result<(), GitError> {
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        || relative.to_string_lossy().chars().any(char::is_control)
+    {
+        return Err(GitError::InvalidInput("patch path is invalid"));
+    }
+    if fs::symlink_metadata(root.join(relative))
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return Err(GitError::InvalidInput("patch path is symbolic link"));
+    }
+    let mut candidate = root.join(relative);
+    while !candidate.exists() {
+        candidate = candidate
+            .parent()
+            .ok_or(GitError::InvalidInput("patch path is invalid"))?
+            .to_owned();
+    }
+    let canonical = fs::canonicalize(candidate)?;
+    if !canonical.starts_with(root) {
+        return Err(GitError::InvalidInput("patch path escaped worktree"));
+    }
+    Ok(())
 }
 
 fn validate_component(value: &str, name: &'static str) -> Result<(), GitError> {

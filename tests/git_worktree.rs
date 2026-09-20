@@ -5,7 +5,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use ai_team::runner::git::{GitError, GitWorktreeManager};
+use ai_team::runner::git::{GitError, GitWorktreeManager, IntegrationResult};
 
 struct Fixture {
     root: PathBuf,
@@ -86,6 +86,164 @@ fn create_status_binary_diff_and_base_are_exact() {
     let diff = String::from_utf8_lossy(&diff);
     assert!(diff.contains("GIT binary patch"));
     assert!(diff.contains("tracked.txt"));
+}
+
+#[test]
+fn integrates_verified_patch_into_clean_target() {
+    let fixture = Fixture::new();
+    let manager = fixture.manager();
+    let source = manager
+        .create("source", "source-branch", &fixture.base)
+        .unwrap();
+    let target = manager
+        .create("target", "target-branch", &fixture.base)
+        .unwrap();
+    fs::write(source.path().join("tracked.txt"), "integrated\n").unwrap();
+
+    assert_eq!(
+        manager.integrate_verified(&source, &target).unwrap(),
+        IntegrationResult::Integrated
+    );
+    assert_eq!(
+        fs::read_to_string(target.path().join("tracked.txt")).unwrap(),
+        "integrated\n"
+    );
+    assert_eq!(manager.head(&target).unwrap(), fixture.base);
+}
+
+#[test]
+fn conflict_does_not_mutate_target() {
+    let fixture = Fixture::new();
+    let manager = fixture.manager();
+    let source = manager
+        .create("source", "source-branch", &fixture.base)
+        .unwrap();
+    let target = manager
+        .create("target", "target-branch", &fixture.base)
+        .unwrap();
+    fs::write(source.path().join("tracked.txt"), "source\n").unwrap();
+    fs::write(target.path().join("tracked.txt"), "target\n").unwrap();
+    git(target.path(), &["add", "tracked.txt"]);
+    git(target.path(), &["commit", "-m", "target change"]);
+    let before = fs::read(target.path().join("tracked.txt")).unwrap();
+    let head = manager.head(&target).unwrap();
+
+    assert_eq!(
+        manager.integrate_verified(&source, &target).unwrap(),
+        IntegrationResult::Conflict
+    );
+    assert_eq!(fs::read(target.path().join("tracked.txt")).unwrap(), before);
+    assert_eq!(manager.head(&target).unwrap(), head);
+    assert!(manager.status(&target).unwrap().is_empty());
+}
+
+#[test]
+fn rejects_dirty_target_and_repository_or_base_mismatch() {
+    let fixture = Fixture::new();
+    let manager = fixture.manager();
+    let source = manager
+        .create("source", "source-branch", &fixture.base)
+        .unwrap();
+    let target = manager
+        .create("target", "target-branch", &fixture.base)
+        .unwrap();
+    fs::write(source.path().join("tracked.txt"), "source\n").unwrap();
+    fs::write(target.path().join("tracked.txt"), "dirty\n").unwrap();
+    assert!(matches!(
+        manager.integrate_verified(&source, &target),
+        Err(GitError::InvalidInput("target worktree is dirty"))
+    ));
+
+    fs::write(target.path().join("tracked.txt"), "base\n").unwrap();
+    let other = Fixture::new();
+    let foreign = other
+        .manager()
+        .create("foreign", "foreign-branch", &other.base)
+        .unwrap();
+    assert!(matches!(
+        manager.integrate_verified(&foreign, &target),
+        Err(GitError::InvalidInput("worktree escaped configured root"))
+    ));
+
+    git(source.path(), &["checkout", "--orphan", "unrelated"]);
+    fs::write(source.path().join("unrelated.txt"), "unrelated\n").unwrap();
+    git(source.path(), &["add", "unrelated.txt"]);
+    git(source.path(), &["commit", "-m", "unrelated"]);
+    assert!(matches!(
+        manager.integrate_verified(&source, &target),
+        Err(GitError::CommandFailed {
+            operation: ai_team::runner::git::GitOperation::ValidateAncestry,
+            ..
+        })
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_symlink_patch_escape_without_mutating_target() {
+    let fixture = Fixture::new();
+    let manager = fixture.manager();
+    let source = manager
+        .create("link-source", "link-source-branch", &fixture.base)
+        .unwrap();
+    let target = manager
+        .create("link-target", "link-target-branch", &fixture.base)
+        .unwrap();
+    std::os::unix::fs::symlink("../../outside", source.path().join("escape-link")).unwrap();
+    git(source.path(), &["add", "escape-link"]);
+
+    assert!(matches!(
+        manager.integrate_verified(&source, &target),
+        Err(GitError::InvalidInput("patch path is symbolic link"))
+    ));
+    assert!(!target.path().join("escape-link").exists());
+    assert!(manager.status(&target).unwrap().is_empty());
+}
+
+#[test]
+fn integrates_binary_patch_and_rejects_oversized_patch() {
+    let fixture = Fixture::new();
+    let manager = fixture.manager();
+    let source = manager
+        .create("binary-source", "binary-source-branch", &fixture.base)
+        .unwrap();
+    let target = manager
+        .create("binary-target", "binary-target-branch", &fixture.base)
+        .unwrap();
+    let binary = [0, 255, 1, 254, 2, 0, 253];
+    fs::write(source.path().join("binary.bin"), binary).unwrap();
+    git(source.path(), &["add", "binary.bin"]);
+    assert_eq!(
+        manager.integrate_verified(&source, &target).unwrap(),
+        IntegrationResult::Integrated
+    );
+    assert_eq!(fs::read(target.path().join("binary.bin")).unwrap(), binary);
+
+    let large_source = manager
+        .create("large-source", "large-source-branch", &fixture.base)
+        .unwrap();
+    let large_target = manager
+        .create("large-target", "large-target-branch", &fixture.base)
+        .unwrap();
+    fs::write(
+        large_source.path().join("tracked.txt"),
+        "NOCTIS_PRIVATE_PATCH_MARKER\n".repeat(50_000),
+    )
+    .unwrap();
+    let error = manager
+        .integrate_verified(&large_source, &large_target)
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        GitError::OutputTooLarge {
+            operation: ai_team::runner::git::GitOperation::ReadDiff,
+            ..
+        }
+    ));
+    let rendered = format!("{error} {error:?}");
+    assert!(!rendered.contains("NOCTIS_PRIVATE_PATCH_MARKER"));
+    assert!(!rendered.contains(fixture.root.to_string_lossy().as_ref()));
+    assert!(manager.status(&large_target).unwrap().is_empty());
 }
 
 #[test]
