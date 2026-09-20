@@ -395,7 +395,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: side effect tercatat sebelum turn berikutnya; stop pada budget/timeout; tidak mengulang tool non-idempotent.
   - Verify: scripted fake model menyelesaikan edit sederhana dan berhenti pada limit.
 
-- [ ] **M2-010 — Task dan artifact HTTP API** · Lane A
+- [x] **M2-010 — Task dan artifact HTTP API** · Lane A
   - Depends On: M2-002, M2-005
   - Parallel With: M2-008, M2-009
   - Allowed Paths: `src/api/tasks.rs`, `src/api/artifacts.rs`, `src/api/events.rs`, `src/api/mod.rs`, `src/main.rs`, `tests/task_api.rs`
@@ -868,3 +868,4 @@ Tambahkan satu baris saat task selesai atau diblokir.
 | 2026-09-20 | M2-005, M2-008 | Canonical task store dan Docker process runner terintegrasi ke production crate | `cargo test --test task_store -- --test-threads=1 --nocapture`; `cargo test --test process_runner -- --test-threads=1 --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `docker compose config --quiet`; `git diff --check` | Legacy `FAILED_FINAL` dimigrasikan ke `FAILED`; verification runner tidak memiliki host fallback |
 | 2026-09-20 | M2-009 | Worker turn loop terintegrasi ke production crate dengan deadline pasca-model dan pasca-checkpoint | `cargo test --test worker_loop -- --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo fmt --check`; `git diff --check` | Deadline cooperative; hasil operasi yang kembali terlambat ditolak |
 | 2026-09-20 | M2-012 | Verifier deterministik terintegrasi ke production crate | `cargo test --test verifier -- --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo fmt --check`; `git diff --check` | Verdict berdasarkan exit code; mutasi source menghasilkan policy failure |
+| 2026-09-20 | M2-010 | Task/artifact HTTP API terintegrasi dengan versioned delete dan live SSE bounded | `cargo test --test task_store --test task_api -- --test-threads=1 --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo fmt --check`; `git diff --check` | SSE mendukung heartbeat dan reconnect `Last-Event-ID` tanpa duplikat; CORS mengekspos `x-request-id` |
