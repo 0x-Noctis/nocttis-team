@@ -133,6 +133,7 @@ mod tests {
         TaskContract {
             id: text("id", "BE-014"),
             project_id: text("project_id", "P-001"),
+            project_run_id: text("project_run_id", "RUN-001"),
             title: text("title", "Create endpoint"),
             role: text("role", "backend_engineer"),
             objective: text("objective", "Create endpoint safely"),

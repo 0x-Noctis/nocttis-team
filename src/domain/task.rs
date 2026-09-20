@@ -220,6 +220,7 @@ impl TaskStatus {
 pub struct TaskContract {
     pub id: NonEmptyString,
     pub project_id: NonEmptyString,
+    pub project_run_id: NonEmptyString,
     pub title: NonEmptyString,
     pub role: NonEmptyString,
     pub objective: NonEmptyString,
@@ -262,6 +263,7 @@ mod tests {
         TaskContract {
             id: NonEmptyString::parse("id", "BE-014").unwrap(),
             project_id: NonEmptyString::parse("project_id", "P-001").unwrap(),
+            project_run_id: NonEmptyString::parse("project_run_id", "RUN-001").unwrap(),
             title: NonEmptyString::parse("title", "Create product endpoint").unwrap(),
             role: NonEmptyString::parse("role", "backend_engineer").unwrap(),
             objective: NonEmptyString::parse("objective", "Create products safely").unwrap(),

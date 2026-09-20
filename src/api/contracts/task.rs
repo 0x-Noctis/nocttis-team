@@ -34,6 +34,7 @@ impl TryFrom<TaskLimitsInput> for TaskLimits {
 pub struct TaskContractInput {
     pub id: String,
     pub project_id: String,
+    pub project_run_id: String,
     pub title: String,
     pub role: String,
     pub objective: String,
@@ -57,6 +58,7 @@ impl TryFrom<TaskContractInput> for TaskContract {
         Ok(Self {
             id: NonEmptyString::parse("id", input.id)?,
             project_id: NonEmptyString::parse("project_id", input.project_id)?,
+            project_run_id: NonEmptyString::parse("project_run_id", input.project_run_id)?,
             title: NonEmptyString::parse("title", input.title)?,
             role: NonEmptyString::parse("role", input.role)?,
             objective: NonEmptyString::parse("objective", input.objective)?,
@@ -108,6 +110,7 @@ mod tests {
         json!({
             "id": "BE-014",
             "project_id": "P-001",
+            "project_run_id": "RUN-001",
             "title": "Create endpoint",
             "role": "backend_engineer",
             "objective": "Create endpoint safely",
@@ -147,7 +150,14 @@ mod tests {
 
     #[test]
     fn dto_rejects_empty_scalars_paths_and_list_items() {
-        for field in ["id", "project_id", "title", "role", "objective"] {
+        for field in [
+            "id",
+            "project_id",
+            "project_run_id",
+            "title",
+            "role",
+            "objective",
+        ] {
             let mut value = input();
             value[field] = json!(" ");
             let dto: TaskContractInput = serde_json::from_value(value).unwrap();

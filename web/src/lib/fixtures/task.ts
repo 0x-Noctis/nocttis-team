@@ -11,6 +11,7 @@ import type {
 export const activeTask: TaskContract = {
   id: 'M2-004',
   project_id: 'NOCTIS',
+  project_run_id: 'RUN-M2',
   title: 'Web task components berbasis fixture',
   role: 'frontend_engineer',
   objective: 'Build presentational task components without API wiring.',

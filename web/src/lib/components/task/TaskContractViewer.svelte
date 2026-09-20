@@ -13,7 +13,7 @@
   <section class="state"><h2>No task selected</h2><p>Select a task to inspect its contract.</p></section>
 {:else}
   <article aria-labelledby={`task-${task.contract.id}`}>
-    <header><div><p class="eyebrow">{task.contract.id} · {task.contract.project_id}</p><h2 id={`task-${task.contract.id}`}>{task.contract.title}</h2></div><TaskStatusBadge status={task.status} /></header>
+    <header><div><p class="eyebrow">{task.contract.id} · {task.contract.project_id} · {task.contract.project_run_id}</p><h2 id={`task-${task.contract.id}`}>{task.contract.title}</h2></div><TaskStatusBadge status={task.status} /></header>
     <p><strong>Role:</strong> {task.contract.role}</p>
     <p>{task.contract.objective}</p>
     <div class="grid">

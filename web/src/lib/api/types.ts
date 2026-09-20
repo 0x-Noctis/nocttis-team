@@ -136,6 +136,7 @@ export function isValidTaskLimits(limits: TaskLimits): boolean {
 export interface TaskContract {
   id: string;
   project_id: string;
+  project_run_id: string;
   title: string;
   role: string;
   objective: string;

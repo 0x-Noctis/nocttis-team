@@ -169,6 +169,7 @@ Setiap task wajib memiliki kontrak berikut sebelum masuk status `READY`:
 {
   "id": "BE-014",
   "project_id": "P-001",
+  "project_run_id": "RUN-001",
   "title": "Buat endpoint produk",
   "role": "backend_engineer",
   "objective": "Implementasikan pembuatan produk sesuai kontrak API",
