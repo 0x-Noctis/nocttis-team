@@ -71,11 +71,19 @@ impl AllowedPath {
                 .is_some_and(|separator| *separator == b':');
         let invalid_component = std::path::Path::new(&normalized)
             .components()
-            .any(|component| matches!(component, Component::ParentDir | Component::RootDir));
+            .any(|component| {
+                matches!(
+                    component,
+                    Component::CurDir | Component::ParentDir | Component::RootDir
+                )
+            });
         if value.trim().is_empty() {
-            return Err(ValidationError::new("allowed_paths", "must not contain empty paths"));
+            return Err(ValidationError::new(
+                "allowed_paths",
+                "must not contain empty paths",
+            ));
         }
-        if windows_absolute || invalid_component {
+        if windows_absolute || invalid_component || value.chars().any(char::is_control) {
             return Err(ValidationError::new(
                 "allowed_paths",
                 "must contain only relative paths without traversal",
@@ -229,10 +237,16 @@ impl TaskContract {
             for (field, empty) in [
                 ("acceptance_criteria", self.acceptance_criteria.is_empty()),
                 ("allowed_paths", self.allowed_paths.is_empty()),
-                ("verification_commands", self.verification_commands.is_empty()),
+                (
+                    "verification_commands",
+                    self.verification_commands.is_empty(),
+                ),
             ] {
                 if empty {
-                    return Err(ValidationError::new(field, "must not be empty before READY"));
+                    return Err(ValidationError::new(
+                        field,
+                        "must not be empty before READY",
+                    ));
                 }
             }
         }
@@ -254,8 +268,12 @@ mod tests {
             depends_on: Vec::new(),
             allowed_paths: vec![AllowedPath::parse("src/products/**").unwrap()],
             context_refs: Vec::new(),
-            acceptance_criteria: vec![NonEmptyString::parse("acceptance_criteria", "Tests pass").unwrap()],
-            verification_commands: vec![NonEmptyString::parse("verification_commands", "cargo test products").unwrap()],
+            acceptance_criteria: vec![
+                NonEmptyString::parse("acceptance_criteria", "Tests pass").unwrap(),
+            ],
+            verification_commands: vec![
+                NonEmptyString::parse("verification_commands", "cargo test products").unwrap(),
+            ],
             limits: TaskLimits {
                 max_input_tokens: PositiveLimit::new("max_input_tokens", 30_000).unwrap(),
                 max_output_tokens: PositiveLimit::new("max_output_tokens", 8_000).unwrap(),
@@ -271,24 +289,51 @@ mod tests {
         let mut task = contract();
         assert!(task.validate_for_status(TaskStatus::Ready).is_ok());
         task.acceptance_criteria.clear();
-        assert_eq!(task.validate_for_status(TaskStatus::Ready).unwrap_err().field, "acceptance_criteria");
+        assert_eq!(
+            task.validate_for_status(TaskStatus::Ready)
+                .unwrap_err()
+                .field,
+            "acceptance_criteria"
+        );
         assert!(task.validate_for_status(TaskStatus::Draft).is_ok());
 
         let mut task = contract();
         task.allowed_paths.clear();
-        assert_eq!(task.validate_for_status(TaskStatus::Ready).unwrap_err().field, "allowed_paths");
+        assert_eq!(
+            task.validate_for_status(TaskStatus::Ready)
+                .unwrap_err()
+                .field,
+            "allowed_paths"
+        );
 
         let mut task = contract();
         task.verification_commands.clear();
-        assert_eq!(task.validate_for_status(TaskStatus::Ready).unwrap_err().field, "verification_commands");
+        assert_eq!(
+            task.validate_for_status(TaskStatus::Ready)
+                .unwrap_err()
+                .field,
+            "verification_commands"
+        );
     }
 
     #[test]
     fn paths_reject_empty_absolute_and_traversal() {
-        for path in ["", " ", "/etc/passwd", "../secret", "src/../../secret", r"C:\\secret", r"..\\secret", r"\\server\\share"] {
+        for path in [
+            "",
+            " ",
+            "/etc/passwd",
+            "../secret",
+            "src/../../secret",
+            r"C:\\secret",
+            r"..\\secret",
+            r"\\server\\share",
+            ".",
+            "./README.md",
+            "src/secret\n",
+        ] {
             assert!(AllowedPath::parse(path).is_err(), "accepted {path}");
         }
-        for path in ["src/**", "tests/task.rs", "./README.md"] {
+        for path in ["src/**", "tests/task.rs", "README.md"] {
             assert!(AllowedPath::parse(path).is_ok(), "rejected {path}");
         }
     }

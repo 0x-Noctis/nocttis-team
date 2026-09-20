@@ -319,7 +319,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
 
 ## Gelombang M2-A — Task dan Artifact Foundation
 
-- [ ] **M2-001 — Task domain dan state machine** · Lane A
+- [x] **M2-001 — Task domain dan state machine** · Lane A
   - Depends On: M1 exit gate
   - Parallel With: M2-002, M2-003, M2-004
   - Allowed Paths: `src/domain/task.rs`, `src/domain/state_machine.rs`, `src/api/contracts/task.rs`
@@ -327,7 +327,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: Worker tidak dapat menandai `DONE`; invalid transition ditolak; acceptance criteria/allowed paths/verification wajib sebelum `READY`.
   - Verify: table-driven unit test seluruh transition valid dan invalid.
 
-- [ ] **M2-002 — Artifact store filesystem** · Lane A
+- [x] **M2-002 — Artifact store filesystem** · Lane A
   - Depends On: M1 exit gate
   - Parallel With: M2-001, M2-003, M2-004
   - Allowed Paths: `src/store/artifact.rs`, `tests/artifact_store.rs`
@@ -356,7 +356,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
 - [ ] **M2-005 — Task PostgreSQL store** · Lane A
   - Depends On: M2-001
   - Parallel With: M2-006, M2-007
-  - Allowed Paths: `migrations/0003_task_runtime.sql`, `src/store/task.rs`, `src/store/event.rs`, `tests/task_store.rs`
+  - Allowed Paths: `migrations/0004_task_runtime.sql`, `src/store/task.rs`, `src/store/event.rs`, `tests/task_store.rs`
   - Output: task CRUD, event append, agent attempt, usage, dan transactional transition.
   - Acceptance: optimistic conflict/row lock aman; event tercatat bersama transition; pagination cursor tersedia.
   - Verify: integration tests transition race dan rollback.
@@ -862,3 +862,4 @@ Tambahkan satu baris saat task selesai atau diblokir.
 | 2026-09-20 | M1-006, M1-008 | Streaming SSE dan tool-call probe terintegrasi; tool client ter-wire ke production crate | `cargo test --test model_stream --test model_tools`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo fmt --check`; `git diff --check` | `M1-009` kini dapat dimulai; milestone M1 belum selesai |
 | 2026-09-20 | M1-009, M1-010, M1-011A | Provider HTTP API dan halaman Providers terintegrasi; compatibility suite model-level tersedia | `cargo test --test provider_api -- --test-threads=1 --nocapture`; `cargo test --test provider_compatibility -- --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `npm run check`; `npm run build` | Kontrak list memakai page envelope; M1-011 menunggu verifikasi API/persistence |
 | 2026-09-20 | M1-011, Exit Gate M1 | Compatibility API/persistence, SSRF guard, CORS preflight, dan error envelope final lulus | `cargo test --test provider_api -- --test-threads=1 --nocapture`; `cargo test --test provider_compatibility -- --test-threads=1 --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `npm run check`; `npm run build` | Milestone M1 selesai; private provider wajib masuk `NOCTIS_PROVIDER_HOST_ALLOWLIST` |
+| 2026-09-20 | M2-001, M2-002 | Task state machine dan filesystem artifact store terintegrasi ke production crate | `cargo test --test artifact_store -- --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo fmt --check`; `git diff --check` | Migration task runtime memakai nomor `0004` karena `0003` sudah dipakai idempotency |

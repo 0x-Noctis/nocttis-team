@@ -57,37 +57,21 @@ pub const VALID_TRANSITIONS: &[(TaskStatus, TaskStatus, Actor)] = &[
         Actor::System,
     ),
     (TaskStatus::Verify, TaskStatus::Failed, Actor::Verifier),
-    (
-        TaskStatus::Verify,
-        TaskStatus::Integrate,
-        Actor::Verifier,
-    ),
+    (TaskStatus::Verify, TaskStatus::Integrate, Actor::Verifier),
     (TaskStatus::Failed, TaskStatus::Ready, Actor::System),
-    (
-        TaskStatus::Integrate,
-        TaskStatus::Done,
-        Actor::Integrator,
-    ),
+    (TaskStatus::Integrate, TaskStatus::Done, Actor::Integrator),
     (
         TaskStatus::Integrate,
         TaskStatus::Conflict,
         Actor::Integrator,
     ),
-    (
-        TaskStatus::Integrate,
-        TaskStatus::Ready,
-        Actor::Integrator,
-    ),
+    (TaskStatus::Integrate, TaskStatus::Ready, Actor::Integrator),
     (
         TaskStatus::Conflict,
         TaskStatus::NeedsHuman,
         Actor::Integrator,
     ),
-    (
-        TaskStatus::NeedsHuman,
-        TaskStatus::Ready,
-        Actor::Human,
-    ),
+    (TaskStatus::NeedsHuman, TaskStatus::Ready, Actor::Human),
 ];
 
 pub fn transition(
@@ -225,12 +209,7 @@ mod tests {
         let mut task = contract();
         task.acceptance_criteria.clear();
         assert!(matches!(
-            transition(
-                &task,
-                TaskStatus::Planned,
-                TaskStatus::Ready,
-                Actor::System
-            ),
+            transition(&task, TaskStatus::Planned, TaskStatus::Ready, Actor::System),
             Err(TransitionError::InvalidContract(_))
         ));
     }

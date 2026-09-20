@@ -67,10 +67,7 @@ impl TryFrom<TaskContractInput> for TaskContract {
                 .map(AllowedPath::parse)
                 .collect::<Result<_, _>>()?,
             context_refs: non_empty_list("context_refs", input.context_refs)?,
-            acceptance_criteria: non_empty_list(
-                "acceptance_criteria",
-                input.acceptance_criteria,
-            )?,
+            acceptance_criteria: non_empty_list("acceptance_criteria", input.acceptance_criteria)?,
             verification_commands: non_empty_list(
                 "verification_commands",
                 input.verification_commands,
