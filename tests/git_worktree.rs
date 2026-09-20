@@ -112,6 +112,29 @@ fn integrates_verified_patch_into_clean_target() {
 }
 
 #[test]
+fn integrates_quoted_patch_path() {
+    let fixture = Fixture::new();
+    let manager = fixture.manager();
+    let source = manager
+        .create("quoted-source", "quoted-source-branch", &fixture.base)
+        .unwrap();
+    let target = manager
+        .create("quoted-target", "quoted-target-branch", &fixture.base)
+        .unwrap();
+    fs::write(source.path().join("quoted path.txt"), "quoted\n").unwrap();
+    git(source.path(), &["add", "quoted path.txt"]);
+
+    assert_eq!(
+        manager.integrate_verified(&source, &target).unwrap(),
+        IntegrationResult::Integrated
+    );
+    assert_eq!(
+        fs::read_to_string(target.path().join("quoted path.txt")).unwrap(),
+        "quoted\n"
+    );
+}
+
+#[test]
 fn conflict_does_not_mutate_target() {
     let fixture = Fixture::new();
     let manager = fixture.manager();

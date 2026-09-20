@@ -311,7 +311,7 @@ impl GitWorktreeManager {
             Command::new("git")
                 .arg("-C")
                 .arg(&worktree.path)
-                .args(["diff", "--binary", "--no-ext-diff"])
+                .args(["diff", "--binary", "--no-ext-diff", "--no-renames"])
                 .arg(&worktree.base_commit)
                 .arg("--"),
             None,
@@ -365,14 +365,19 @@ impl GitWorktreeManager {
             return Err(GitError::InvalidInput("target worktree is dirty"));
         }
 
-        let paths = changed_paths(&source.path, &base_commit)?;
-        for path in &paths {
+        let source_paths = changed_paths(&source.path, &base_commit)?;
+        for path in &source_paths {
             validate_patch_path(&source.path, path)?;
             validate_patch_path(&target.path, path)?;
         }
         let patch = self.diff_binary(source)?;
         if patch.is_empty() {
             return Ok(IntegrationResult::Integrated);
+        }
+        if patch_paths(&patch)? != source_paths {
+            return Err(GitError::InvalidInput(
+                "patch paths do not match source status",
+            ));
         }
         if let Err(error) = run(
             Command::new("git").arg("-C").arg(&target.path).args([
@@ -391,13 +396,6 @@ impl GitWorktreeManager {
             };
         }
         self.apply_patch(target, &patch)?;
-
-        let applied_paths = working_paths(&target.path)?;
-        if !applied_paths.is_subset(&paths) {
-            return Err(GitError::InvalidInput(
-                "integrated paths differ from verified patch",
-            ));
-        }
         Ok(IntegrationResult::Integrated)
     }
 
@@ -535,7 +533,7 @@ fn changed_paths(path: &Path, base: &str) -> Result<BTreeSet<PathBuf>, GitError>
         Command::new("git")
             .arg("-C")
             .arg(path)
-            .args(["diff", "--name-only", "-z", "--no-ext-diff"])
+            .args(["diff", "--name-only", "-z", "--no-ext-diff", "--no-renames"])
             .arg(base)
             .arg("--"),
         None,
@@ -552,32 +550,9 @@ fn changed_paths(path: &Path, base: &str) -> Result<BTreeSet<PathBuf>, GitError>
         .collect()
 }
 
-fn working_paths(path: &Path) -> Result<BTreeSet<PathBuf>, GitError> {
-    let mut paths = changed_paths(path, "HEAD")?;
-    let output = run(
-        Command::new("git").arg("-C").arg(path).args([
-            "ls-files",
-            "--others",
-            "--exclude-standard",
-            "-z",
-            "--",
-        ]),
-        None,
-        GitOperation::VerifyIntegration,
-    )?;
-    for value in output
-        .split(|byte| *byte == 0)
-        .filter(|value| !value.is_empty())
-    {
-        let value = std::str::from_utf8(value)
-            .map_err(|_| GitError::InvalidInput("worktree path was not UTF-8"))?;
-        paths.insert(PathBuf::from(value));
-    }
-    Ok(paths)
-}
-
 fn validate_patch_path(root: &Path, relative: &Path) -> Result<(), GitError> {
     if relative.is_absolute()
+        || relative.to_string_lossy().starts_with('-')
         || relative
             .components()
             .any(|part| !matches!(part, std::path::Component::Normal(_)))
@@ -602,6 +577,233 @@ fn validate_patch_path(root: &Path, relative: &Path) -> Result<(), GitError> {
         return Err(GitError::InvalidInput("patch path escaped worktree"));
     }
     Ok(())
+}
+
+fn patch_paths(patch: &[u8]) -> Result<BTreeSet<PathBuf>, GitError> {
+    let text = std::str::from_utf8(patch)
+        .map_err(|_| GitError::InvalidInput("patch metadata was not UTF-8"))?;
+    let mut paths = BTreeSet::new();
+    let mut section = None;
+    for line in text.lines() {
+        if let Some(value) = line.strip_prefix("diff --git ") {
+            if let Some(previous) = section.take() {
+                finish_patch_section(previous)?;
+            }
+            let (old, new) = parse_diff_paths(value)?;
+            validate_relative_patch_path(&old)?;
+            validate_relative_patch_path(&new)?;
+            paths.insert(old.clone());
+            paths.insert(new.clone());
+            section = Some(PatchSection::new(old, new));
+            continue;
+        }
+        let Some(current) = section.as_mut() else {
+            if is_path_metadata(line) {
+                return Err(GitError::InvalidInput("patch path metadata is invalid"));
+            }
+            continue;
+        };
+        if line.starts_with("@@") || line == "GIT binary patch" {
+            current.content_started = true;
+            continue;
+        }
+        if is_path_metadata(line) && current.content_started {
+            return Err(GitError::InvalidInput(
+                "patch path metadata follows content",
+            ));
+        }
+        if let Some(value) = line.strip_prefix("--- ") {
+            current.check_old(parse_marker_path(value, "a/")?)?;
+        } else if let Some(value) = line.strip_prefix("+++ ") {
+            current.check_new(parse_marker_path(value, "b/")?)?;
+        } else if let Some(value) = line.strip_prefix("rename from ") {
+            current.check_old(Some(parse_metadata_path(value)?))?;
+        } else if let Some(value) = line.strip_prefix("rename to ") {
+            current.check_new(Some(parse_metadata_path(value)?))?;
+        } else if let Some(value) = line.strip_prefix("copy from ") {
+            current.check_old(Some(parse_metadata_path(value)?))?;
+        } else if let Some(value) = line.strip_prefix("copy to ") {
+            current.check_new(Some(parse_metadata_path(value)?))?;
+        }
+    }
+    finish_patch_section(section.ok_or(GitError::InvalidInput("patch has no file header"))?)?;
+    Ok(paths)
+}
+
+struct PatchSection {
+    old: PathBuf,
+    new: PathBuf,
+    old_metadata: bool,
+    new_metadata: bool,
+    content_started: bool,
+}
+
+impl PatchSection {
+    fn new(old: PathBuf, new: PathBuf) -> Self {
+        Self {
+            old,
+            new,
+            old_metadata: false,
+            new_metadata: false,
+            content_started: false,
+        }
+    }
+
+    fn check_old(&mut self, path: Option<PathBuf>) -> Result<(), GitError> {
+        if path.as_ref().is_some_and(|path| path != &self.old) {
+            return Err(GitError::InvalidInput("patch old path does not match"));
+        }
+        self.old_metadata = true;
+        Ok(())
+    }
+
+    fn check_new(&mut self, path: Option<PathBuf>) -> Result<(), GitError> {
+        if path.as_ref().is_some_and(|path| path != &self.new) {
+            return Err(GitError::InvalidInput("patch new path does not match"));
+        }
+        self.new_metadata = true;
+        Ok(())
+    }
+}
+
+fn finish_patch_section(section: PatchSection) -> Result<(), GitError> {
+    if section.old_metadata != section.new_metadata {
+        return Err(GitError::InvalidInput("patch path metadata is incomplete"));
+    }
+    Ok(())
+}
+
+fn is_path_metadata(line: &str) -> bool {
+    [
+        "--- ",
+        "+++ ",
+        "rename from ",
+        "rename to ",
+        "copy from ",
+        "copy to ",
+    ]
+    .iter()
+    .any(|prefix| line.starts_with(prefix))
+}
+
+fn parse_diff_paths(value: &str) -> Result<(PathBuf, PathBuf), GitError> {
+    if !value.starts_with('"') {
+        let (old, new) = value
+            .rsplit_once(" b/")
+            .ok_or(GitError::InvalidInput("patch file header is invalid"))?;
+        return Ok((
+            strip_patch_prefix(PathBuf::from(old), "a/")?,
+            PathBuf::from(new),
+        ));
+    }
+    let (old, rest) = parse_token(value)?;
+    let (new, trailing) = parse_token(rest.trim_start())?;
+    if !trailing.is_empty() {
+        return Err(GitError::InvalidInput("patch file header is invalid"));
+    }
+    Ok((
+        strip_patch_prefix(old, "a/")?,
+        strip_patch_prefix(new, "b/")?,
+    ))
+}
+
+fn parse_marker_path(value: &str, prefix: &str) -> Result<Option<PathBuf>, GitError> {
+    let value = value.split_once('\t').map_or(value, |(path, _)| path);
+    if value == "/dev/null" {
+        return Ok(None);
+    }
+    parse_metadata_path(value)
+        .and_then(|path| strip_patch_prefix(path, prefix))
+        .map(Some)
+}
+
+fn parse_metadata_path(value: &str) -> Result<PathBuf, GitError> {
+    if value.starts_with('"') {
+        let (path, trailing) = parse_token(value)?;
+        if !trailing.is_empty() {
+            return Err(GitError::InvalidInput("patch path metadata is invalid"));
+        }
+        Ok(path)
+    } else if value.is_empty() {
+        Err(GitError::InvalidInput("patch path is empty"))
+    } else {
+        Ok(PathBuf::from(value))
+    }
+}
+
+fn strip_patch_prefix(path: PathBuf, prefix: &str) -> Result<PathBuf, GitError> {
+    let value = path
+        .to_str()
+        .ok_or(GitError::InvalidInput("patch path was not UTF-8"))?;
+    value
+        .strip_prefix(prefix)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or(GitError::InvalidInput("patch path prefix is invalid"))
+}
+
+fn validate_relative_patch_path(path: &Path) -> Result<(), GitError> {
+    if path.is_absolute()
+        || path.to_string_lossy().starts_with('-')
+        || path
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        || path.to_string_lossy().chars().any(char::is_control)
+    {
+        return Err(GitError::InvalidInput("patch path is invalid"));
+    }
+    Ok(())
+}
+
+fn parse_token(value: &str) -> Result<(PathBuf, &str), GitError> {
+    if let Some(quoted) = value.strip_prefix('"') {
+        let mut bytes = Vec::new();
+        let mut index = 0;
+        while index < quoted.len() {
+            let byte = quoted.as_bytes()[index];
+            if byte == b'"' {
+                let path = String::from_utf8(bytes)
+                    .map(PathBuf::from)
+                    .map_err(|_| GitError::InvalidInput("patch path was not UTF-8"))?;
+                return Ok((path, &quoted[index + 1..]));
+            }
+            if byte != b'\\' {
+                bytes.push(byte);
+                index += 1;
+                continue;
+            }
+            index += 1;
+            let escaped = *quoted
+                .as_bytes()
+                .get(index)
+                .ok_or(GitError::InvalidInput("patch path escape is invalid"))?;
+            match escaped {
+                b'"' | b'\\' => bytes.push(escaped),
+                b'n' => bytes.push(b'\n'),
+                b'r' => bytes.push(b'\r'),
+                b't' => bytes.push(b'\t'),
+                b'0'..=b'7' => {
+                    let end = (index + 3).min(quoted.len());
+                    let digits = &quoted[index..end];
+                    let count = digits.bytes().take_while(u8::is_ascii_digit).count();
+                    let digits = &digits[..count.min(3)];
+                    bytes.push(
+                        u8::from_str_radix(digits, 8)
+                            .map_err(|_| GitError::InvalidInput("patch path escape is invalid"))?,
+                    );
+                    index += digits.len() - 1;
+                }
+                _ => return Err(GitError::InvalidInput("patch path escape is invalid")),
+            }
+            index += 1;
+        }
+        return Err(GitError::InvalidInput("patch path quote is invalid"));
+    }
+    let end = value.find(char::is_whitespace).unwrap_or(value.len());
+    if end == 0 {
+        return Err(GitError::InvalidInput("patch path is empty"));
+    }
+    Ok((PathBuf::from(&value[..end]), &value[end..]))
 }
 
 fn validate_component(value: &str, name: &'static str) -> Result<(), GitError> {
@@ -723,6 +925,28 @@ fn path_output(output: &[u8]) -> Result<PathBuf, GitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn patch_parser_rejects_path_metadata_after_content() {
+        let patch = b"diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\nrename to secret.txt\n";
+        assert!(matches!(
+            patch_paths(patch),
+            Err(GitError::InvalidInput(
+                "patch path metadata follows content"
+            ))
+        ));
+    }
+
+    #[test]
+    fn patch_parser_rejects_rename_and_copy_path_mismatch() {
+        for patch in [
+            b"diff --git a/old.txt b/new.txt\nrename from other.txt\nrename to new.txt\n"
+                .as_slice(),
+            b"diff --git a/old.txt b/new.txt\ncopy from old.txt\ncopy to other.txt\n".as_slice(),
+        ] {
+            assert!(matches!(patch_paths(patch), Err(GitError::InvalidInput(_))));
+        }
+    }
 
     #[test]
     fn stderr_overflow_has_typed_error_without_content() {
