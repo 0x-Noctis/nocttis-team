@@ -76,6 +76,16 @@ impl AppError {
         )
     }
 
+    pub fn method_not_allowed(request_id: RequestId, details: Value) -> Self {
+        Self::public(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "METHOD_NOT_ALLOWED",
+            "Method not allowed",
+            details,
+            request_id,
+        )
+    }
+
     pub fn conflict(request_id: RequestId, details: Value) -> Self {
         Self::public(
             StatusCode::CONFLICT,

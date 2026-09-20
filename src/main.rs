@@ -3,16 +3,10 @@ mod config;
 use std::time::Duration;
 
 use anyhow::Context;
-use axum::{
-    Json, Router,
-    extract::Extension,
-    http::{HeaderValue, Method},
-    middleware,
-    routing::get,
-};
+use axum::{Json, Router, extract::Extension, http::HeaderValue, middleware, routing::get};
 use serde::Serialize;
 use sqlx::{PgPool, postgres::PgPoolOptions};
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::trace::TraceLayer;
 use tracing::info;
 
 use crate::config::Config;
@@ -45,11 +39,9 @@ async fn main() -> anyhow::Result<()> {
         .fallback(api::error::not_found)
         .layer(Extension(database))
         .layer(TraceLayer::new_for_http())
-        .layer(
-            CorsLayer::new()
-                .allow_origin("http://127.0.0.1:5173".parse::<HeaderValue>()?)
-                .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE]),
-        )
+        .layer(api::cors_layer(
+            "http://127.0.0.1:5173".parse::<HeaderValue>()?,
+        ))
         .layer(middleware::from_fn(request_id));
 
     let address = config.server.bind;

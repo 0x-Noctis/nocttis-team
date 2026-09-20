@@ -185,6 +185,7 @@ async fn maps_timeout() {
 }
 
 async fn start_api(pool: PgPool) -> String {
+    unsafe { std::env::set_var("NOCTIS_PROVIDER_HOST_ALLOWLIST", "127.0.0.1,localhost") };
     let app = api::providers::router(pool)
         .fallback(api::error::not_found)
         .layer(middleware::from_fn(api::request_id));

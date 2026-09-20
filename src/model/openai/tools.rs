@@ -38,6 +38,7 @@ impl OpenAiToolsClient {
             .and_then(|url| url.join("chat/completions"))
             .map_err(|_| ModelError::new(ModelErrorKind::InvalidResponse))?;
         let http = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(timeout)
             .build()
             .map_err(|_| ModelError::new(ModelErrorKind::InvalidResponse))?;

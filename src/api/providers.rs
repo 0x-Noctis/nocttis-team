@@ -1,4 +1,4 @@
-use std::{env, future::Future, time::Duration};
+use std::{env, future::Future, net::IpAddr, time::Duration};
 
 use crate::{
     model::{Message, MessageRole, ModelErrorKind, ModelLimits, ModelRequest},
@@ -6,7 +6,10 @@ use crate::{
 };
 use axum::{
     Json, Router,
-    extract::{Extension, Path, Query, State, rejection::JsonRejection},
+    extract::{
+        Extension, Path, Query, State,
+        rejection::{JsonRejection, QueryRejection},
+    },
     http::{HeaderMap, Method, StatusCode, header::HeaderName},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -78,14 +81,17 @@ pub fn router(pool: PgPool) -> Router {
             get(get_model).put(update_model).delete(delete_model),
         )
         .route("/api/v1/models/{model_id}/probes/{kind}", post(probe_model))
+        .method_not_allowed_fallback(method_not_allowed)
         .with_state(state)
 }
 
 async fn list_providers(
     State(state): State<ApiState>,
     Extension(request_id): Extension<RequestId>,
-    Query(page): Query<Pagination>,
+    page: Result<Query<Pagination>, QueryRejection>,
 ) -> Result<Json<Value>, AppError> {
+    let Query(page) = page
+        .map_err(|_| AppError::bad_request(request_id, json!({"query": "invalid pagination"})))?;
     let page = state
         .providers
         .list_providers(page.cursor.as_deref(), page.limit)
@@ -215,8 +221,10 @@ async fn list_models(
     State(state): State<ApiState>,
     Extension(request_id): Extension<RequestId>,
     Path(provider_id): Path<String>,
-    Query(page): Query<Pagination>,
+    page: Result<Query<Pagination>, QueryRejection>,
 ) -> Result<Json<Value>, AppError> {
+    let Query(page) = page
+        .map_err(|_| AppError::bad_request(request_id, json!({"query": "invalid pagination"})))?;
     state
         .providers
         .get_provider(&provider_id)
@@ -397,6 +405,15 @@ async fn probe_model(
 }
 
 async fn run_probe(provider: &Provider, model: &Model, kind: ProbeKind) -> ProbeResult {
+    if !provider_destination_allowed(provider.base_url.as_str()).await {
+        return failed_probe(
+            provider,
+            model,
+            kind,
+            ModelErrorKind::ProviderUnavailable,
+            0,
+        );
+    }
     let api_key = match env::var(provider.api_key_env.as_str()) {
         Ok(value) => value,
         Err(_) => {
@@ -470,6 +487,55 @@ async fn run_probe(provider: &Provider, model: &Model, kind: ProbeKind) -> Probe
         },
         Err(error) => failed_probe(provider, model, kind, error.kind(), 0),
     }
+}
+
+async fn provider_destination_allowed(base_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base_url) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    if env::var("NOCTIS_PROVIDER_HOST_ALLOWLIST")
+        .ok()
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .any(|allowed| allowed == host)
+        })
+    {
+        return true;
+    }
+    let port = url.port_or_known_default().unwrap_or(443);
+    tokio::net::lookup_host((host, port))
+        .await
+        .is_ok_and(|addresses| addresses.map(|address| address.ip()).all(public_ip))
+}
+
+fn public_ip(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => {
+            !address.is_private()
+                && !address.is_loopback()
+                && !address.is_link_local()
+                && !address.is_broadcast()
+                && !address.is_documentation()
+                && !address.is_multicast()
+                && !address.is_unspecified()
+        }
+        IpAddr::V6(address) => {
+            !address.is_loopback()
+                && !address.is_unique_local()
+                && !address.is_unicast_link_local()
+                && !address.is_multicast()
+                && !address.is_unspecified()
+        }
+    }
+}
+
+async fn method_not_allowed(Extension(request_id): Extension<RequestId>) -> AppError {
+    AppError::method_not_allowed(request_id, json!({"method": "not allowed"}))
 }
 
 fn failed_probe(
@@ -659,5 +725,28 @@ fn kind_name(kind: ProbeKind) -> &'static str {
         ProbeKind::Chat => "chat",
         ProbeKind::Streaming => "streaming",
         ProbeKind::Tools => "tools",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::public_ip;
+
+    #[test]
+    fn blocks_non_public_provider_addresses() {
+        for address in [
+            "127.0.0.1",
+            "10.0.0.1",
+            "172.16.0.1",
+            "192.168.0.1",
+            "169.254.169.254",
+            "::1",
+            "fc00::1",
+            "fe80::1",
+        ] {
+            assert!(!public_ip(address.parse().unwrap()), "accepted {address}");
+        }
+        assert!(public_ip("1.1.1.1".parse().unwrap()));
+        assert!(public_ip("2606:4700:4700::1111".parse().unwrap()));
     }
 }

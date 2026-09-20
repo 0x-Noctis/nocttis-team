@@ -26,9 +26,11 @@ async fn serve(app: Router) -> SocketAddr {
 }
 
 async fn servers(pool: PgPool) -> Servers {
+    unsafe { std::env::set_var("NOCTIS_PROVIDER_HOST_ALLOWLIST", "127.0.0.1,localhost") };
     let provider = serve(Router::new().route("/v1/chat/completions", post(mock_provider))).await;
     let api = api::providers::router(pool)
         .fallback(api::error::not_found)
+        .layer(api::cors_layer("http://127.0.0.1:5173".parse().unwrap()))
         .layer(middleware::from_fn(api::request_id));
     let api = serve(api).await;
     Servers {
@@ -121,6 +123,45 @@ async fn provider_model_crud_idempotency_and_errors(pool: PgPool) {
     let servers = servers(pool.clone()).await;
     let client = Client::new();
     let providers = format!("{}/api/v1/providers", servers.api);
+
+    let invalid_query = client
+        .get(format!("{providers}?limit=invalid"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid_query.status(), StatusCode::BAD_REQUEST);
+    assert!(invalid_query.headers().contains_key("x-request-id"));
+    assert!(invalid_query.json::<Value>().await.unwrap()["error"]["request_id"].is_string());
+
+    let invalid_method = client.patch(&providers).send().await.unwrap();
+    assert_eq!(invalid_method.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert!(invalid_method.headers().contains_key("x-request-id"));
+    assert_eq!(
+        invalid_method.json::<Value>().await.unwrap()["error"]["code"],
+        "METHOD_NOT_ALLOWED"
+    );
+
+    let preflight = client
+        .request(reqwest::Method::OPTIONS, &providers)
+        .header("Origin", "http://127.0.0.1:5173")
+        .header("Access-Control-Request-Method", "POST")
+        .header(
+            "Access-Control-Request-Headers",
+            "content-type,idempotency-key",
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(preflight.status(), StatusCode::OK);
+    assert!(
+        preflight
+            .headers()
+            .get("access-control-allow-headers")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("idempotency-key")
+    );
 
     let missing_key = client
         .post(&providers)
