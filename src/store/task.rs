@@ -6,7 +6,7 @@ use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
 use uuid::Uuid;
 
 use crate::domain::{
-    state_machine::{Actor, TransitionError, transition},
+    state_machine::{Actor, TransitionError, recovery_transition, transition},
     task::{
         MaxAttempts, NonEmptyString, PositiveLimit, TaskContract, TaskLimits, TaskStatus,
         ValidationError,
@@ -15,8 +15,8 @@ use crate::domain::{
 
 use super::event::{
     AgentAttempt, ArtifactRecord, AttemptStatus, AttemptUpdate, ClaimAttempt, DispatchClaim,
-    NumericError, RecoveryDisposition, RecoveryResult, RuntimeAttempt, TaskEvent, ToolCallMetadata,
-    ToolCallReservation, ToolOutcome, Usage,
+    NumericError, RecoveryDisposition, RecoveryResult, RetentionClaim, RuntimeAttempt, TaskEvent,
+    ToolCallMetadata, ToolCallReservation, ToolOutcome, Usage,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,6 +25,7 @@ pub enum Conflict {
     Attempt,
     Claim,
     ToolCall,
+    RetentionLease,
     Usage,
     StaleVersion,
 }
@@ -587,14 +588,15 @@ impl TaskRepository {
         };
         let attempt_id = attempt.get::<Uuid, _>("id");
         let task_id = attempt.get::<String, _>("task_id");
-        let task = sqlx::query("SELECT status,project_run_id FROM tasks WHERE id=$1 FOR UPDATE")
-            .bind(&task_id)
+        let task = task_query("WHERE t.id=$1 FOR UPDATE OF t")
+            .bind(task_id.clone())
             .fetch_one(&mut *transaction)
             .await
             .map_err(StoreError::Database)?;
-        let from = task.get::<String, _>("status");
+        let stored = task_from_row(&task)?;
         let ambiguous: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tool_call_reservations WHERE agent_run_id=$1 AND status='in_progress')")
             .bind(attempt_id).fetch_one(&mut *transaction).await.map_err(StoreError::Database)?;
+        let to = recovery_transition(&stored.contract, stored.status, ambiguous)?;
         let disposition = if ambiguous {
             sqlx::query("UPDATE agent_runs SET status='recovery_required',error_code='recovery.tool_in_progress',heartbeat_at=now(),finished_at=now() WHERE id=$1")
                 .bind(attempt_id).execute(&mut *transaction).await.map_err(StoreError::Database)?;
@@ -602,31 +604,22 @@ impl TaskRepository {
         } else {
             sqlx::query("UPDATE agent_runs SET status='failed',error_code='recovery.stale',heartbeat_at=now(),finished_at=now() WHERE id=$1")
                 .bind(attempt_id).execute(&mut *transaction).await.map_err(StoreError::Database)?;
-            sqlx::query(
-                "UPDATE tasks SET status='READY',version=version+2,updated_at=now() WHERE id=$1",
-            )
+            RecoveryDisposition::Requeued
+        };
+        sqlx::query("UPDATE tasks SET status=$2,version=version+1,updated_at=now() WHERE id=$1")
             .bind(&task_id)
+            .bind(enum_text(&to)?)
             .execute(&mut *transaction)
             .await
             .map_err(StoreError::Database)?;
-            insert_transition(
-                &mut transaction,
-                task.get("project_run_id"),
-                &task_id,
-                &from,
-                "FAILED",
-            )
-            .await?;
-            insert_transition(
-                &mut transaction,
-                task.get("project_run_id"),
-                &task_id,
-                "FAILED",
-                "READY",
-            )
-            .await?;
-            RecoveryDisposition::Requeued
-        };
+        insert_event(
+            &mut transaction,
+            &stored.contract,
+            Actor::System,
+            stored.status,
+            to,
+        )
+        .await?;
         transaction.commit().await.map_err(StoreError::Database)?;
         Ok(Some(RecoveryResult {
             attempt_id,
@@ -635,30 +628,54 @@ impl TaskRepository {
         }))
     }
 
-    pub async fn retention_due(&self) -> Result<Vec<RuntimeAttempt>, StoreError> {
-        let rows = attempt_query("WHERE finished_at IS NOT NULL AND retain_until <= now() AND cleanup_completed_at IS NULL ORDER BY retain_until,id")
-            .fetch_all(&self.pool).await.map_err(StoreError::Database)?;
-        rows.iter().map(runtime_attempt_from_row).collect()
+    pub async fn claim_retention_due(
+        &self,
+        lease_seconds: i64,
+    ) -> Result<Option<RetentionClaim>, StoreError> {
+        if !(1..=86400).contains(&lease_seconds) {
+            return Err(invalid_numeric("lease_seconds"));
+        }
+        let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
+        let row = attempt_query("WHERE finished_at IS NOT NULL AND retain_until <= now() AND (cleanup_state='pending' OR (cleanup_state='in_progress' AND cleanup_lease_until <= now())) ORDER BY retain_until,id FOR UPDATE SKIP LOCKED LIMIT 1")
+            .fetch_optional(&mut *transaction).await.map_err(StoreError::Database)?;
+        let Some(row) = row else {
+            transaction.commit().await.map_err(StoreError::Database)?;
+            return Ok(None);
+        };
+        let attempt = runtime_attempt_from_row(&row)?;
+        let owner_token = Uuid::new_v4();
+        let lease_until_unix_ms = sqlx::query_scalar("UPDATE agent_runs SET cleanup_state='in_progress',cleanup_owner=$2,cleanup_lease_until=now()+($3 * interval '1 second') WHERE id=$1 RETURNING (extract(epoch FROM cleanup_lease_until)*1000)::bigint")
+            .bind(attempt.id).bind(owner_token).bind(lease_seconds).fetch_one(&mut *transaction).await.map_err(StoreError::Database)?;
+        transaction.commit().await.map_err(StoreError::Database)?;
+        Ok(Some(RetentionClaim {
+            attempt,
+            owner_token,
+            lease_until_unix_ms,
+        }))
     }
 
-    pub async fn complete_retention_cleanup(&self, attempt_id: Uuid) -> Result<bool, StoreError> {
-        let result = sqlx::query("UPDATE agent_runs SET cleanup_completed_at=now() WHERE id=$1 AND finished_at IS NOT NULL AND cleanup_completed_at IS NULL")
-            .bind(attempt_id).execute(&self.pool).await.map_err(StoreError::Database)?;
-        if result.rows_affected() == 1 {
-            return Ok(true);
+    pub async fn complete_retention_cleanup(
+        &self,
+        attempt_id: Uuid,
+        owner_token: Uuid,
+    ) -> Result<bool, StoreError> {
+        let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
+        let row = sqlx::query("SELECT cleanup_state,cleanup_owner,cleanup_lease_until > now() AS active FROM agent_runs WHERE id=$1 FOR UPDATE")
+            .bind(attempt_id).fetch_optional(&mut *transaction).await.map_err(StoreError::Database)?.ok_or(StoreError::NotFound)?;
+        if row.get::<Option<Uuid>, _>("cleanup_owner") != Some(owner_token) {
+            return Err(StoreError::Conflict(Conflict::RetentionLease));
         }
-        let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM agent_runs WHERE id=$1 AND finished_at IS NOT NULL)",
-        )
-        .bind(attempt_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(StoreError::Database)?;
-        if exists {
-            Ok(false)
-        } else {
-            Err(StoreError::NotFound)
+        if row.get::<String, _>("cleanup_state") == "completed" {
+            transaction.commit().await.map_err(StoreError::Database)?;
+            return Ok(false);
         }
+        if row.get::<Option<bool>, _>("active") != Some(true) {
+            return Err(StoreError::Conflict(Conflict::RetentionLease));
+        }
+        sqlx::query("UPDATE agent_runs SET cleanup_state='completed',cleanup_completed_at=now(),cleanup_lease_until=NULL WHERE id=$1")
+            .bind(attempt_id).execute(&mut *transaction).await.map_err(StoreError::Database)?;
+        transaction.commit().await.map_err(StoreError::Database)?;
+        Ok(true)
     }
 
     pub async fn reserve_tool_call(
@@ -667,8 +684,15 @@ impl TaskRepository {
         call_id: &str,
     ) -> Result<ToolCallReservation, StoreError> {
         validate_key(call_id, "call ID")?;
+        let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
+        let active: bool = sqlx::query_scalar("SELECT finished_at IS NULL AND status IN ('assigned','running') FROM agent_runs WHERE id=$1 FOR UPDATE")
+            .bind(agent_run_id).fetch_optional(&mut *transaction).await.map_err(StoreError::Database)?.ok_or(StoreError::NotFound)?;
+        if !active {
+            return Err(StoreError::Conflict(Conflict::ToolCall));
+        }
         let inserted = sqlx::query("INSERT INTO tool_call_reservations (agent_run_id,call_id) VALUES ($1,$2) ON CONFLICT DO NOTHING")
-            .bind(agent_run_id).bind(call_id).execute(&self.pool).await.map_err(StoreError::Database)?;
+            .bind(agent_run_id).bind(call_id).execute(&mut *transaction).await.map_err(StoreError::Database)?;
+        transaction.commit().await.map_err(StoreError::Database)?;
         if inserted.rows_affected() == 1 {
             return Ok(ToolCallReservation::New);
         }

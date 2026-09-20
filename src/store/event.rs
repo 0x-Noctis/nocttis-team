@@ -114,6 +114,13 @@ pub struct RecoveryResult {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RetentionClaim {
+    pub attempt: RuntimeAttempt,
+    pub owner_token: Uuid,
+    pub lease_until_unix_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AttemptUpdate {
     pub status: AttemptStatus,
     pub error_code: Option<String>,

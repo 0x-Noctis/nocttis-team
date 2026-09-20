@@ -74,6 +74,37 @@ pub const VALID_TRANSITIONS: &[(TaskStatus, TaskStatus, Actor)] = &[
     (TaskStatus::NeedsHuman, TaskStatus::Ready, Actor::Human),
 ];
 
+pub fn recovery_transition(
+    contract: &TaskContract,
+    from: TaskStatus,
+    ambiguous_side_effect: bool,
+) -> Result<TaskStatus, TransitionError> {
+    let to = if ambiguous_side_effect {
+        TaskStatus::NeedsHuman
+    } else {
+        TaskStatus::Ready
+    };
+    let allowed = matches!(
+        from,
+        TaskStatus::Running
+            | TaskStatus::SelfCheck
+            | TaskStatus::Review
+            | TaskStatus::Verify
+            | TaskStatus::Integrate
+    ) || (from == TaskStatus::Assigned && !ambiguous_side_effect);
+    if !allowed {
+        return Err(TransitionError::InvalidTransition {
+            from,
+            to,
+            actor: Actor::System,
+        });
+    }
+    contract
+        .validate_for_status(to)
+        .map_err(TransitionError::InvalidContract)?;
+    Ok(to)
+}
+
 pub fn transition(
     contract: &TaskContract,
     from: TaskStatus,
@@ -149,6 +180,35 @@ mod tests {
                 max_attempts: MaxAttempts::new(1).unwrap(),
                 timeout_seconds: PositiveLimit::new("timeout_seconds", 1).unwrap(),
             },
+        }
+    }
+
+    #[test]
+    fn recovery_is_separate_from_normal_workflow() {
+        let task = contract();
+        for from in STATUSES {
+            for ambiguous in [false, true] {
+                let expected = if ambiguous {
+                    TaskStatus::NeedsHuman
+                } else {
+                    TaskStatus::Ready
+                };
+                let allowed = matches!(
+                    from,
+                    TaskStatus::Running
+                        | TaskStatus::SelfCheck
+                        | TaskStatus::Review
+                        | TaskStatus::Verify
+                        | TaskStatus::Integrate
+                ) || (from == TaskStatus::Assigned && !ambiguous);
+                let result = recovery_transition(&task, from, ambiguous);
+                if allowed {
+                    assert_eq!(result, Ok(expected));
+                    assert!(transition(&task, from, expected, Actor::System).is_err());
+                } else {
+                    assert!(result.is_err());
+                }
+            }
         }
     }
 
