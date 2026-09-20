@@ -114,16 +114,42 @@ export const taskStatuses = [
 
 export type TaskStatus = (typeof taskStatuses)[number];
 
+export interface TaskLimits {
+  max_input_tokens: number;
+  max_output_tokens: number;
+  max_tool_calls: number;
+  max_attempts: number;
+  timeout_seconds: number;
+}
+
+export function isValidTaskLimits(limits: TaskLimits): boolean {
+  return (
+    isPositiveSafeInteger(limits.max_input_tokens) &&
+    isPositiveSafeInteger(limits.max_output_tokens) &&
+    isPositiveSafeInteger(limits.max_tool_calls) &&
+    isPositiveSafeInteger(limits.max_attempts) &&
+    limits.max_attempts <= 10 &&
+    isPositiveSafeInteger(limits.timeout_seconds)
+  );
+}
+
 export interface TaskContract {
   id: string;
+  project_id: string;
   title: string;
-  description: string;
-  status: TaskStatus;
-  acceptance_criteria: string[];
+  role: string;
+  objective: string;
+  depends_on: string[];
   allowed_paths: string[];
+  context_refs: string[];
+  acceptance_criteria: string[];
   verification_commands: string[];
-  dependencies: string[];
-  attempt_limit: number;
+  limits: TaskLimits;
+}
+
+export interface TaskView {
+  contract: TaskContract;
+  status: TaskStatus;
 }
 
 export interface TaskTimelineEvent {
@@ -172,7 +198,7 @@ export type TaskViewState =
   | { state: 'error'; message: string }
   | {
       state: 'ready';
-      task: TaskContract;
+      task: TaskView;
       timeline: TaskTimelineEvent[];
       artifacts: TaskArtifact[];
       diff: TaskDiff | null;

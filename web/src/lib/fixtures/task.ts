@@ -4,24 +4,34 @@ import type {
   TaskDiff,
   TaskTimelineEvent,
   TaskUsage,
+  TaskView,
   TaskViewState
 } from '$lib/api/types';
 
 export const activeTask: TaskContract = {
   id: 'M2-004',
+  project_id: 'NOCTIS',
   title: 'Web task components berbasis fixture',
-  description: 'Build presentational task components without API wiring.',
-  status: 'RUNNING',
-  acceptance_criteria: ['Status includes text and icon', 'Diff remains keyboard readable'],
+  role: 'frontend_engineer',
+  objective: 'Build presentational task components without API wiring.',
+  depends_on: ['M1 exit gate'],
   allowed_paths: ['web/src/lib/components/task/**', 'web/src/lib/fixtures/task.ts'],
+  context_refs: ['artifact://decisions/task-contract-v1'],
+  acceptance_criteria: ['Status includes text and icon', 'Diff remains keyboard readable'],
   verification_commands: ['npm run check', 'npm run build'],
-  dependencies: ['M1 exit gate'],
-  attempt_limit: 2
+  limits: {
+    max_input_tokens: 30000,
+    max_output_tokens: 8000,
+    max_tool_calls: 40,
+    max_attempts: 2,
+    timeout_seconds: 1200
+  }
 };
 
-export const completedTask: TaskContract = { ...activeTask, id: 'M2-003', title: 'Git worktree manager', status: 'DONE' };
-export const failedTask: TaskContract = { ...activeTask, id: 'M2-002', title: 'Artifact store filesystem', status: 'FAILED' };
-export const changesRequestedTask: TaskContract = { ...activeTask, status: 'CHANGES_REQUESTED' };
+export const activeTaskView: TaskView = { contract: activeTask, status: 'RUNNING' };
+export const completedTaskView: TaskView = { contract: { ...activeTask, id: 'M2-003', title: 'Git worktree manager' }, status: 'DONE' };
+export const failedTaskView: TaskView = { contract: { ...activeTask, id: 'M2-002', title: 'Artifact store filesystem' }, status: 'FAILED' };
+export const changesRequestedTaskView: TaskView = { contract: activeTask, status: 'CHANGES_REQUESTED' };
 
 export const taskTimeline: TaskTimelineEvent[] = [
   { id: 'event-1', status: 'READY', label: 'Contract ready', timestamp: '2026-09-20T08:00:00Z', detail: 'Dependencies and task contract validated.' },
@@ -49,7 +59,7 @@ export const estimatedUsage: TaskUsage = { input_tokens: 8000, cached_tokens: 0,
 export const loadingTaskState: TaskViewState = { state: 'loading' };
 export const emptyTaskState: TaskViewState = { state: 'empty' };
 export const errorTaskState: TaskViewState = { state: 'error', message: 'Task data could not be loaded.' };
-export const activeTaskState: TaskViewState = { state: 'ready', task: activeTask, timeline: taskTimeline, artifacts: taskArtifacts, diff: taskDiff, usage: estimatedUsage };
-export const completedTaskState: TaskViewState = { state: 'ready', task: completedTask, timeline: taskTimeline, artifacts: taskArtifacts, diff: taskDiff, usage: measuredUsage };
-export const failedTaskState: TaskViewState = { state: 'ready', task: failedTask, timeline: taskTimeline, artifacts: taskArtifacts, diff: taskDiff, usage: measuredUsage };
-export const changesRequestedTaskState: TaskViewState = { state: 'ready', task: changesRequestedTask, timeline: taskTimeline, artifacts: taskArtifacts, diff: taskDiff, usage: estimatedUsage };
+export const activeTaskState: TaskViewState = { state: 'ready', task: activeTaskView, timeline: taskTimeline, artifacts: taskArtifacts, diff: taskDiff, usage: estimatedUsage };
+export const completedTaskState: TaskViewState = { state: 'ready', task: completedTaskView, timeline: taskTimeline, artifacts: taskArtifacts, diff: taskDiff, usage: measuredUsage };
+export const failedTaskState: TaskViewState = { state: 'ready', task: failedTaskView, timeline: taskTimeline, artifacts: taskArtifacts, diff: taskDiff, usage: measuredUsage };
+export const changesRequestedTaskState: TaskViewState = { state: 'ready', task: changesRequestedTaskView, timeline: taskTimeline, artifacts: taskArtifacts, diff: taskDiff, usage: estimatedUsage };
