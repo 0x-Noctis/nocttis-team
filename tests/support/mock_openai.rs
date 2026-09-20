@@ -9,9 +9,11 @@ pub enum Scenario {
     NormalMeasured,
     NormalMissingUsage,
     ToolCall,
+    ToolProbe,
     AuthenticationFailure,
     RateLimit,
     Timeout,
+    ApiTimeout,
     ContextOverflow,
     ProviderUnavailable,
     MalformedResponse,
@@ -63,6 +65,11 @@ fn serve(stream: &mut impl Write, scenario: Scenario) {
             "200 OK",
             r#"{"choices":[{"message":{"content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"lookup","arguments":"{\"id\":7}"}}]},"finish_reason":"tool_calls"}]}"#,
         ),
+        Scenario::ToolProbe => response(
+            stream,
+            "200 OK",
+            r#"{"choices":[{"message":{"content":null,"tool_calls":[{"id":"probe-call","type":"function","function":{"name":"noctis_capability_probe","arguments":"{\"enabled\":true}"}}]},"finish_reason":"tool_calls"}]}"#,
+        ),
         Scenario::AuthenticationFailure => response(
             stream,
             "401 Unauthorized",
@@ -75,6 +82,10 @@ fn serve(stream: &mut impl Write, scenario: Scenario) {
         ),
         Scenario::Timeout => {
             thread::sleep(Duration::from_millis(100));
+            response(stream, "200 OK", r#"{"choices":[]}"#);
+        }
+        Scenario::ApiTimeout => {
+            thread::sleep(Duration::from_millis(1_100));
             response(stream, "200 OK", r#"{"choices":[]}"#);
         }
         Scenario::ContextOverflow => response(
