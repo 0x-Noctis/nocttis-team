@@ -7,6 +7,7 @@ use std::{
 };
 
 use ai_team::{
+    agent::verifier::{ProcessExecutor, VerificationVerdict, Verifier, VerifierError},
     domain::task::{
         AllowedPath, MaxAttempts, NonEmptyString, PositiveLimit, TaskContract, TaskLimits,
         TaskStatus,
@@ -16,21 +17,6 @@ use ai_team::{
     },
     store::artifact::ArtifactMetadata,
 };
-
-mod domain {
-    pub use ai_team::domain::*;
-}
-mod runner {
-    pub use ai_team::runner::*;
-}
-mod store {
-    pub use ai_team::store::*;
-}
-#[allow(dead_code)]
-#[path = "../src/agent/verifier.rs"]
-mod verifier;
-
-use verifier::{ProcessExecutor, VerificationVerdict, Verifier, VerifierError};
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
