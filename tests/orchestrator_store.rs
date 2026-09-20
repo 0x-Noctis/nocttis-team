@@ -822,7 +822,7 @@ async fn stale_assigned_and_running_recover_once(pool: PgPool) {
         .unwrap();
     repository.start_claimed(running.id).await.unwrap();
     repository
-        .reserve_tool_call(running.id, "completed-call")
+        .reserve_tool_call(running.id, "completed-call", "apply_patch")
         .await
         .unwrap();
     let metadata = ToolCallMetadata {
@@ -874,7 +874,7 @@ async fn ambiguous_reservation_is_not_replayed_and_retention_is_idempotent(pool:
         .unwrap();
     repository.start_claimed(attempt.id).await.unwrap();
     repository
-        .reserve_tool_call(attempt.id, "call")
+        .reserve_tool_call(attempt.id, "call", "apply_patch")
         .await
         .unwrap();
     sqlx::query("UPDATE agent_runs SET heartbeat_at=now()-interval '1 hour' WHERE id=$1")
@@ -903,7 +903,9 @@ async fn ambiguous_reservation_is_not_replayed_and_retention_is_idempotent(pool:
             .is_none()
     );
     assert!(matches!(
-        repository.reserve_tool_call(attempt.id, "late-call").await,
+        repository
+            .reserve_tool_call(attempt.id, "late-call", "apply_patch")
+            .await,
         Err(StoreError::Conflict(Conflict::ToolCall))
     ));
     assert_eq!(
@@ -1081,7 +1083,7 @@ async fn recovery_validates_each_execution_stage_and_rolls_back_atomically(pool:
             }
             if ambiguous {
                 repository
-                    .reserve_tool_call(attempt.id, "in-progress")
+                    .reserve_tool_call(attempt.id, "in-progress", "apply_patch")
                     .await
                     .unwrap();
             }
@@ -1168,7 +1170,7 @@ async fn reservation_and_recovery_are_serialized(pool: PgPool) {
         .await
         .unwrap();
     let (reservation, recovery) = tokio::join!(
-        repository.reserve_tool_call(attempt.id, "racing-call"),
+        repository.reserve_tool_call(attempt.id, "racing-call", "apply_patch"),
         repository.recover_stale(chrono_cutoff())
     );
     let recovered = match recovery.unwrap() {
@@ -1242,7 +1244,9 @@ async fn recovery_rejects_workflow_bypass_and_late_reservation(pool: PgPool) {
         .await
         .unwrap();
     assert!(matches!(
-        repository.reserve_tool_call(attempt.id, "late-call").await,
+        repository
+            .reserve_tool_call(attempt.id, "late-call", "apply_patch")
+            .await,
         Err(StoreError::Conflict(Conflict::ToolCall))
     ));
 }
