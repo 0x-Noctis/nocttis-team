@@ -11,6 +11,7 @@ use tracing::info;
 
 use crate::config::Config;
 use ai_team::api::{self, AppError, RequestId, request_id};
+use ai_team::store::artifact::ArtifactStore;
 
 #[derive(Serialize)]
 struct Health {
@@ -32,10 +33,15 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("failed to connect to PostgreSQL")?;
     sqlx::migrate!().run(&database).await?;
+    let artifact_store = ArtifactStore::new(
+        &config.artifacts.root,
+        config.artifacts.max_tool_output_bytes as u64,
+    )?;
 
     let app = Router::new()
         .route("/api/v1/health", get(health))
         .merge(api::providers::router(database.clone()))
+        .merge(api::tasks::router(database.clone(), artifact_store))
         .fallback(api::error::not_found)
         .layer(Extension(database))
         .layer(TraceLayer::new_for_http())
