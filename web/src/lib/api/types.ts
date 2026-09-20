@@ -93,3 +93,88 @@ export type ProviderViewState =
       models: ModelResponse[];
       probes: ProbeResult[];
     };
+
+export const taskStatuses = [
+  'DRAFT',
+  'PLANNED',
+  'READY',
+  'ASSIGNED',
+  'RUNNING',
+  'SELF_CHECK',
+  'REVIEW',
+  'CHANGES_REQUESTED',
+  'VERIFY',
+  'FAILED',
+  'INTEGRATE',
+  'CONFLICT',
+  'NEEDS_HUMAN',
+  'DONE',
+  'CANCELLED'
+] as const;
+
+export type TaskStatus = (typeof taskStatuses)[number];
+
+export interface TaskContract {
+  id: string;
+  title: string;
+  description: string;
+  status: TaskStatus;
+  acceptance_criteria: string[];
+  allowed_paths: string[];
+  verification_commands: string[];
+  dependencies: string[];
+  attempt_limit: number;
+}
+
+export interface TaskTimelineEvent {
+  id: string;
+  status: TaskStatus;
+  label: string;
+  timestamp: string;
+  detail: string;
+}
+
+export type ArtifactKind = 'patch' | 'log' | 'report' | 'test_result';
+
+export interface TaskArtifact {
+  id: string;
+  name: string;
+  kind: ArtifactKind;
+  size_bytes: number;
+  download_url: string;
+}
+
+export type DiffLineKind = 'context' | 'addition' | 'deletion';
+
+export interface DiffLine {
+  kind: DiffLineKind;
+  old_line: number | null;
+  new_line: number | null;
+  content: string;
+}
+
+export interface TaskDiff {
+  file: string;
+  lines: DiffLine[];
+}
+
+export interface TaskUsage {
+  input_tokens: number;
+  cached_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  estimated: boolean;
+}
+
+export type TaskViewState =
+  | { state: 'loading' }
+  | { state: 'empty' }
+  | { state: 'error'; message: string }
+  | {
+      state: 'ready';
+      task: TaskContract;
+      timeline: TaskTimelineEvent[];
+      artifacts: TaskArtifact[];
+      diff: TaskDiff | null;
+      usage: TaskUsage;
+    };
