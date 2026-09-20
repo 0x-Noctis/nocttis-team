@@ -3,6 +3,7 @@ use std::{error::Error, fmt};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
+use uuid::Uuid;
 
 use crate::domain::{
     state_machine::{Actor, TransitionError, transition},
@@ -18,7 +19,7 @@ use super::event::{AgentAttempt, NumericError, TaskEvent, Usage};
 pub enum Conflict {
     TaskId,
     Attempt,
-    StaleTransition,
+    StaleVersion,
 }
 
 #[derive(Debug)]
@@ -28,6 +29,7 @@ pub enum StoreError {
     InvalidTransition(TransitionError),
     InvalidRow(ValidationError),
     InvalidNumeric(NumericError),
+    InvalidId(&'static str),
     InvalidJson(serde_json::Error),
     Database(sqlx::Error),
 }
@@ -42,6 +44,7 @@ impl fmt::Display for StoreError {
             Self::InvalidNumeric(error) => {
                 write!(formatter, "invalid numeric field: {}", error.field)
             }
+            Self::InvalidId(field) => write!(formatter, "{field} must be a UUID"),
             Self::InvalidJson(_) => formatter.write_str("invalid JSON in database row"),
             Self::Database(_) => formatter.write_str("database operation failed"),
         }
@@ -106,91 +109,100 @@ impl TaskRepository {
 
     pub async fn create(&self, contract: &TaskContract) -> Result<StoredTask, StoreError> {
         contract.validate_for_status(TaskStatus::Draft)?;
+        let project_id = uuid("project_id", contract.project_id.as_str())?;
+        let project_run_id = uuid("project_run_id", contract.project_run_id.as_str())?;
+        let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
         let result = sqlx::query(
-            "INSERT INTO runtime_tasks
-             (id, project_id, title, role, objective, status, depends_on, allowed_paths,
-              context_refs, acceptance_criteria, verification_commands, max_input_tokens,
-              max_output_tokens, max_tool_calls, max_attempts, timeout_seconds)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
+            "INSERT INTO tasks (id,project_run_id,role,title,objective,status,allowed_paths,
+             acceptance_criteria,verification_commands,max_input_tokens,max_output_tokens,
+             max_attempts,context_refs,max_tool_calls,timeout_seconds)
+             SELECT $1,pr.id,$2,$3,$4,'DRAFT',$5,$6,$7,$8,$9,$10,$11,$12,$13
+             FROM project_runs pr WHERE pr.id=$14 AND pr.project_id=$15",
         )
         .bind(contract.id.as_str())
-        .bind(contract.project_id.as_str())
-        .bind(contract.title.as_str())
         .bind(contract.role.as_str())
+        .bind(contract.title.as_str())
         .bind(contract.objective.as_str())
-        .bind(enum_text(&TaskStatus::Draft)?)
-        .bind(serde_json::to_value(&contract.depends_on)?)
         .bind(serde_json::to_value(&contract.allowed_paths)?)
-        .bind(serde_json::to_value(&contract.context_refs)?)
         .bind(serde_json::to_value(&contract.acceptance_criteria)?)
         .bind(serde_json::to_value(&contract.verification_commands)?)
         .bind(contract.limits.max_input_tokens.get())
         .bind(contract.limits.max_output_tokens.get())
+        .bind(
+            i16::try_from(contract.limits.max_attempts.get()).expect("max attempts is at most 10"),
+        )
+        .bind(serde_json::to_value(&contract.context_refs)?)
         .bind(contract.limits.max_tool_calls.get())
-        .bind(contract.limits.max_attempts.get())
         .bind(contract.limits.timeout_seconds.get())
-        .execute(&self.pool)
+        .bind(project_run_id)
+        .bind(project_id)
+        .execute(&mut *transaction)
         .await;
         match result {
-            Ok(_) => Ok(StoredTask {
-                contract: contract.clone(),
-                status: TaskStatus::Draft,
-                version: 0,
-            }),
-            Err(error) if constraint(&error) == Some("runtime_tasks_pkey") => {
-                Err(StoreError::Conflict(Conflict::TaskId))
+            Ok(result) if result.rows_affected() == 0 => return Err(StoreError::NotFound),
+            Ok(_) => {}
+            Err(error) if constraint(&error) == Some("tasks_pkey") => {
+                return Err(StoreError::Conflict(Conflict::TaskId));
             }
-            Err(error) => Err(StoreError::Database(error)),
+            Err(error) => return Err(StoreError::Database(error)),
         }
+        replace_dependencies(&mut transaction, contract).await?;
+        transaction.commit().await.map_err(StoreError::Database)?;
+        Ok(StoredTask {
+            contract: contract.clone(),
+            status: TaskStatus::Draft,
+            version: 0,
+        })
     }
 
     pub async fn get(&self, id: &str) -> Result<StoredTask, StoreError> {
-        let row = sqlx::query("SELECT * FROM runtime_tasks WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(StoreError::Database)?
-            .ok_or(StoreError::NotFound)?;
-        task_from_row(&row)
+        fetch_task(&self.pool, id).await
     }
 
-    pub async fn update(&self, contract: &TaskContract) -> Result<StoredTask, StoreError> {
-        let current = self.get(contract.id.as_str()).await?;
-        contract.validate_for_status(current.status)?;
+    pub async fn update(
+        &self,
+        contract: &TaskContract,
+        expected_version: i64,
+    ) -> Result<StoredTask, StoreError> {
+        let project_id = uuid("project_id", contract.project_id.as_str())?;
+        let project_run_id = uuid("project_run_id", contract.project_run_id.as_str())?;
+        let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
+        let status: Option<String> =
+            sqlx::query_scalar("SELECT status::text FROM tasks WHERE id=$1 FOR UPDATE")
+                .bind(contract.id.as_str())
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(StoreError::Database)?;
+        let status = status.ok_or(StoreError::NotFound).and_then(parse_enum)?;
+        contract.validate_for_status(status)?;
         let result = sqlx::query(
-            "UPDATE runtime_tasks SET project_id=$2,title=$3,role=$4,objective=$5,depends_on=$6,
-             allowed_paths=$7,context_refs=$8,acceptance_criteria=$9,verification_commands=$10,
-             max_input_tokens=$11,max_output_tokens=$12,max_tool_calls=$13,max_attempts=$14,
-             timeout_seconds=$15,version=version+1,updated_at=now() WHERE id=$1 AND version=$16",
+            "UPDATE tasks t SET project_run_id=pr.id,role=$2,title=$3,objective=$4,allowed_paths=$5,
+             acceptance_criteria=$6,verification_commands=$7,max_input_tokens=$8,max_output_tokens=$9,
+             max_attempts=$10,context_refs=$11,max_tool_calls=$12,timeout_seconds=$13,
+             version=version+1,updated_at=now() FROM project_runs pr
+             WHERE t.id=$1 AND t.version=$14 AND pr.id=$15 AND pr.project_id=$16",
         )
-        .bind(contract.id.as_str())
-        .bind(contract.project_id.as_str())
-        .bind(contract.title.as_str())
-        .bind(contract.role.as_str())
-        .bind(contract.objective.as_str())
-        .bind(serde_json::to_value(&contract.depends_on)?)
-        .bind(serde_json::to_value(&contract.allowed_paths)?)
-        .bind(serde_json::to_value(&contract.context_refs)?)
+        .bind(contract.id.as_str()).bind(contract.role.as_str()).bind(contract.title.as_str())
+        .bind(contract.objective.as_str()).bind(serde_json::to_value(&contract.allowed_paths)?)
         .bind(serde_json::to_value(&contract.acceptance_criteria)?)
         .bind(serde_json::to_value(&contract.verification_commands)?)
-        .bind(contract.limits.max_input_tokens.get())
-        .bind(contract.limits.max_output_tokens.get())
-        .bind(contract.limits.max_tool_calls.get())
-        .bind(contract.limits.max_attempts.get())
-        .bind(contract.limits.timeout_seconds.get())
-        .bind(current.version)
-        .execute(&self.pool)
-        .await
-        .map_err(StoreError::Database)?;
+        .bind(contract.limits.max_input_tokens.get()).bind(contract.limits.max_output_tokens.get())
+        .bind(i16::try_from(contract.limits.max_attempts.get()).expect("max attempts is at most 10"))
+        .bind(serde_json::to_value(&contract.context_refs)?)
+        .bind(contract.limits.max_tool_calls.get()).bind(contract.limits.timeout_seconds.get())
+        .bind(expected_version).bind(project_run_id).bind(project_id)
+        .execute(&mut *transaction).await.map_err(StoreError::Database)?;
         if result.rows_affected() == 0 {
-            return Err(StoreError::Conflict(Conflict::StaleTransition));
+            return Err(StoreError::Conflict(Conflict::StaleVersion));
         }
+        replace_dependencies(&mut transaction, contract).await?;
+        transaction.commit().await.map_err(StoreError::Database)?;
         self.get(contract.id.as_str()).await
     }
 
     pub async fn delete(&self, id: &str) -> Result<(), StoreError> {
-        let result = sqlx::query("DELETE FROM runtime_tasks WHERE id=$1")
-            .bind(id)
+        let result = sqlx::query("DELETE FROM tasks WHERE id=$1")
+            .bind(id.to_owned())
             .execute(&self.pool)
             .await
             .map_err(StoreError::Database)?;
@@ -212,28 +224,23 @@ impl TaskRepository {
             }));
         }
         let limit = limit.min(100);
-        let rows = sqlx::query(
-            "SELECT * FROM runtime_tasks WHERE ($1::text IS NULL OR id > $1)
-             ORDER BY id LIMIT $2",
+        let ids: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM tasks WHERE ($1::text IS NULL OR id>$1) ORDER BY id LIMIT $2",
         )
         .bind(cursor)
         .bind(limit + 1)
         .fetch_all(&self.pool)
         .await
         .map_err(StoreError::Database)?;
-        let has_more = rows.len() > limit as usize;
-        let visible = &rows[..rows.len().min(limit as usize)];
+        let has_more = ids.len() > limit as usize;
+        let visible = &ids[..ids.len().min(limit as usize)];
+        let mut items = Vec::with_capacity(visible.len());
+        for id in visible {
+            items.push(self.get(id).await?);
+        }
         Ok(Page {
-            items: visible
-                .iter()
-                .map(task_from_row)
-                .collect::<Result<_, _>>()?,
-            next_cursor: has_more.then(|| {
-                visible
-                    .last()
-                    .expect("page has item")
-                    .get::<String, _>("id")
-            }),
+            items,
+            next_cursor: has_more.then(|| visible.last().expect("page has item").clone()),
         })
     }
 
@@ -245,38 +252,25 @@ impl TaskRepository {
         actor: Actor,
     ) -> Result<StoredTask, StoreError> {
         let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
-        let row = sqlx::query("SELECT * FROM runtime_tasks WHERE id=$1 FOR UPDATE")
-            .bind(id)
+        let row = task_query("WHERE t.id=$1 FOR UPDATE")
+            .bind(id.to_owned())
             .fetch_optional(&mut *transaction)
             .await
             .map_err(StoreError::Database)?
             .ok_or(StoreError::NotFound)?;
         let current = task_from_row(&row)?;
         if current.version != expected_version {
-            return Err(StoreError::Conflict(Conflict::StaleTransition));
+            return Err(StoreError::Conflict(Conflict::StaleVersion));
         }
         transition(&current.contract, current.status, to, actor)?;
-        let result = sqlx::query(
-            "UPDATE runtime_tasks SET status=$2,version=version+1,updated_at=now()
-             WHERE id=$1 AND version=$3",
-        )
-        .bind(id)
-        .bind(enum_text(&to)?)
-        .bind(expected_version)
-        .execute(&mut *transaction)
-        .await
-        .map_err(StoreError::Database)?;
-        if result.rows_affected() == 0 {
-            return Err(StoreError::Conflict(Conflict::StaleTransition));
-        }
+        sqlx::query("UPDATE tasks SET status=$2,version=version+1,updated_at=now() WHERE id=$1 AND version=$3")
+            .bind(id).bind(enum_text(&to)?).bind(expected_version).execute(&mut *transaction).await.map_err(StoreError::Database)?;
         insert_event(
             &mut transaction,
-            id,
+            &current.contract,
             actor,
-            "status_transition",
-            Some(current.status),
-            Some(to),
-            &Value::Object(Default::default()),
+            current.status,
+            to,
         )
         .await?;
         transaction.commit().await.map_err(StoreError::Database)?;
@@ -288,57 +282,96 @@ impl TaskRepository {
     }
 
     pub async fn events(&self, task_id: &str) -> Result<Vec<TaskEvent>, StoreError> {
-        let rows = sqlx::query("SELECT id,task_id,actor,event_type,from_status,to_status,payload FROM task_events WHERE task_id=$1 ORDER BY id")
+        let rows = sqlx::query("SELECT id,task_id,actor_type,event_type,from_status::text,to_status::text,payload FROM events WHERE task_id=$1 ORDER BY id")
             .bind(task_id).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
         rows.iter().map(event_from_row).collect()
     }
 
     pub async fn create_attempt(&self, attempt: &AgentAttempt) -> Result<(), StoreError> {
         attempt.validate()?;
-        let result = sqlx::query("INSERT INTO agent_attempts (id,task_id,attempt,provider_id,model_id,status) VALUES ($1,$2,$3,$4,$5,$6)")
-            .bind(attempt.id).bind(attempt.task_id.as_str()).bind(attempt.attempt)
-            .bind(attempt.provider_id.as_str()).bind(attempt.model_id.as_str()).bind(attempt.status.as_str())
-            .execute(&self.pool).await;
+        let result = sqlx::query("INSERT INTO agent_runs (id,task_id,role,provider_id,model_id,attempt,status) VALUES ($1,$2,$3,$4,$5,$6,$7)")
+            .bind(attempt.id).bind(attempt.task_id.as_str()).bind(attempt.role.as_str())
+            .bind(attempt.provider_id.as_str()).bind(attempt.model_id.as_str()).bind(attempt.attempt)
+            .bind(attempt.status.as_str()).execute(&self.pool).await;
         match result {
             Ok(_) => Ok(()),
-            Err(error) if constraint(&error) == Some("agent_attempts_task_id_attempt_key") => {
+            Err(error) if constraint(&error) == Some("agent_runs_task_id_attempt_key") => {
                 Err(StoreError::Conflict(Conflict::Attempt))
             }
             Err(error) => Err(StoreError::Database(error)),
         }
     }
 
-    pub async fn record_usage(
-        &self,
-        attempt_id: uuid::Uuid,
-        usage: &Usage,
-    ) -> Result<(), StoreError> {
+    pub async fn record_usage(&self, attempt_id: Uuid, usage: &Usage) -> Result<i64, StoreError> {
         usage.validate()?;
-        sqlx::query("INSERT INTO task_usage (attempt_id,input_tokens,cached_tokens,output_tokens,tool_calls,latency_ms) VALUES ($1,$2,$3,$4,$5,$6)")
+        sqlx::query_scalar("INSERT INTO model_usage (agent_run_id,input_tokens,cached_tokens,output_tokens,tool_calls,latency_ms,estimated) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id")
             .bind(attempt_id).bind(usage.input_tokens).bind(usage.cached_tokens).bind(usage.output_tokens)
-            .bind(usage.tool_calls).bind(usage.latency_ms).execute(&self.pool).await.map_err(StoreError::Database)?;
-        Ok(())
+            .bind(usage.tool_calls).bind(usage.latency_ms).bind(usage.estimated)
+            .fetch_one(&self.pool).await.map_err(StoreError::Database)
     }
+
+    pub async fn usage(&self, id: i64) -> Result<Usage, StoreError> {
+        let row = sqlx::query("SELECT input_tokens,cached_tokens,output_tokens,tool_calls,latency_ms,estimated FROM model_usage WHERE id=$1")
+            .bind(id).fetch_optional(&self.pool).await.map_err(StoreError::Database)?.ok_or(StoreError::NotFound)?;
+        Ok(Usage {
+            input_tokens: row.get("input_tokens"),
+            cached_tokens: row.get("cached_tokens"),
+            output_tokens: row.get("output_tokens"),
+            tool_calls: row.get("tool_calls"),
+            latency_ms: row.get("latency_ms"),
+            estimated: row.get("estimated"),
+        })
+    }
+}
+
+async fn fetch_task(pool: &PgPool, id: &str) -> Result<StoredTask, StoreError> {
+    let row = task_query("WHERE t.id=$1")
+        .bind(id.to_owned())
+        .fetch_optional(pool)
+        .await
+        .map_err(StoreError::Database)?
+        .ok_or(StoreError::NotFound)?;
+    task_from_row(&row)
+}
+
+fn task_query(suffix: &str) -> sqlx::query::Query<'static, Postgres, sqlx::postgres::PgArguments> {
+    let sql = format!(
+        "SELECT t.*,pr.project_id::text AS project_id,COALESCE((SELECT jsonb_agg(td.dependency_id ORDER BY td.dependency_id) FROM task_dependencies td WHERE td.task_id=t.id),'[]') AS depends_on FROM tasks t JOIN project_runs pr ON pr.id=t.project_run_id {suffix}"
+    );
+    sqlx::query(Box::leak(sql.into_boxed_str()))
+}
+
+async fn replace_dependencies(
+    transaction: &mut Transaction<'_, Postgres>,
+    contract: &TaskContract,
+) -> Result<(), StoreError> {
+    sqlx::query("DELETE FROM task_dependencies WHERE task_id=$1")
+        .bind(contract.id.as_str())
+        .execute(&mut **transaction)
+        .await
+        .map_err(StoreError::Database)?;
+    for dependency in &contract.depends_on {
+        sqlx::query("INSERT INTO task_dependencies (task_id,dependency_id) VALUES ($1,$2)")
+            .bind(contract.id.as_str())
+            .bind(dependency.as_str())
+            .execute(&mut **transaction)
+            .await
+            .map_err(StoreError::Database)?;
+    }
+    Ok(())
 }
 
 async fn insert_event(
     transaction: &mut Transaction<'_, Postgres>,
-    task_id: &str,
+    contract: &TaskContract,
     actor: Actor,
-    event_type: &str,
-    from: Option<TaskStatus>,
-    to: Option<TaskStatus>,
-    payload: &Value,
+    from: TaskStatus,
+    to: TaskStatus,
 ) -> Result<(), StoreError> {
-    if !payload.is_object() {
-        return Err(StoreError::InvalidJson(serde_json::Error::io(
-            std::io::Error::other("event payload must be object"),
-        )));
-    }
-    sqlx::query("INSERT INTO task_events (task_id,actor,event_type,from_status,to_status,payload) VALUES ($1,$2,$3,$4,$5,$6)")
-        .bind(task_id).bind(enum_text(&actor)?).bind(event_type)
-        .bind(from.map(|value| enum_text(&value)).transpose()?).bind(to.map(|value| enum_text(&value)).transpose()?)
-        .bind(payload).execute(&mut **transaction).await.map_err(StoreError::Database)?;
+    sqlx::query("INSERT INTO events (project_run_id,task_id,actor_type,event_type,from_status,to_status,payload) VALUES ($1,$2,$3,'status_transition',$4,$5,'{}')")
+        .bind(uuid("project_run_id", contract.project_run_id.as_str())?).bind(contract.id.as_str())
+        .bind(enum_text(&actor)?).bind(enum_text(&from)?).bind(enum_text(&to)?)
+        .execute(&mut **transaction).await.map_err(StoreError::Database)?;
     Ok(())
 }
 
@@ -346,6 +379,12 @@ fn task_from_row(row: &PgRow) -> Result<StoredTask, StoreError> {
     let contract = TaskContract {
         id: text(row, "id", "id")?,
         project_id: text(row, "project_id", "project_id")?,
+        project_run_id: NonEmptyString::parse(
+            "project_run_id",
+            row.try_get::<Uuid, _>("project_run_id")
+                .map_err(StoreError::Database)?
+                .to_string(),
+        )?,
         title: text(row, "title", "title")?,
         role: text(row, "role", "role")?,
         objective: text(row, "objective", "objective")?,
@@ -381,7 +420,10 @@ fn task_from_row(row: &PgRow) -> Result<StoredTask, StoreError> {
             )?,
         },
     };
-    let status = parse_enum(row.try_get("status").map_err(StoreError::Database)?)?;
+    let status = parse_enum(
+        row.try_get::<String, _>("status")
+            .map_err(StoreError::Database)?,
+    )?;
     contract.validate_for_status(status)?;
     Ok(StoredTask {
         contract,
@@ -392,21 +434,19 @@ fn task_from_row(row: &PgRow) -> Result<StoredTask, StoreError> {
 
 fn event_from_row(row: &PgRow) -> Result<TaskEvent, StoreError> {
     Ok(TaskEvent {
-        id: row.try_get("id").map_err(StoreError::Database)?,
+        id: row.get("id"),
         task_id: text(row, "task_id", "task_id")?,
-        actor: parse_enum(row.try_get("actor").map_err(StoreError::Database)?)?,
+        actor: parse_enum(row.get("actor_type"))?,
         event_type: text(row, "event_type", "event_type")?,
         from_status: row
-            .try_get::<Option<String>, _>("from_status")
-            .map_err(StoreError::Database)?
+            .get::<Option<String>, _>("from_status")
             .map(parse_enum)
             .transpose()?,
         to_status: row
-            .try_get::<Option<String>, _>("to_status")
-            .map_err(StoreError::Database)?
+            .get::<Option<String>, _>("to_status")
             .map(parse_enum)
             .transpose()?,
-        payload: row.try_get("payload").map_err(StoreError::Database)?,
+        payload: row.get("payload"),
     })
 }
 
@@ -436,6 +476,9 @@ fn enum_text(value: &impl Serialize) -> Result<String, StoreError> {
 }
 fn parse_enum<T: DeserializeOwned>(value: String) -> Result<T, StoreError> {
     Ok(serde_json::from_value(Value::String(value))?)
+}
+fn uuid(field: &'static str, value: &str) -> Result<Uuid, StoreError> {
+    Uuid::parse_str(value).map_err(|_| StoreError::InvalidId(field))
 }
 fn constraint(error: &sqlx::Error) -> Option<&str> {
     error

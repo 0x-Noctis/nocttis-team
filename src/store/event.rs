@@ -21,6 +21,7 @@ pub struct TaskEvent {
 pub struct AgentAttempt {
     pub id: Uuid,
     pub task_id: NonEmptyString,
+    pub role: NonEmptyString,
     pub attempt: i64,
     pub provider_id: NonEmptyString,
     pub model_id: NonEmptyString,
@@ -40,6 +41,7 @@ pub struct Usage {
     pub output_tokens: i64,
     pub tool_calls: i64,
     pub latency_ms: i64,
+    pub estimated: bool,
 }
 
 impl Usage {
