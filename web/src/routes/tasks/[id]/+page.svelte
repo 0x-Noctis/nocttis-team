@@ -33,11 +33,14 @@
     return { error: { code: 'NETWORK_ERROR', message: reason instanceof Error ? reason.message : 'Request failed.', details: {}, request_id: 'unavailable' } };
   }
 
-  function mergeEvent(event: TaskEventResponse) {
+  function mergeEvent(event: TaskEventResponse, isDisposed: () => boolean) {
+    if (isDisposed()) return;
     if (events.some(({ id }) => id === event.id)) return;
     events = [...events, event].sort((left, right) => left.id - right.id);
     liveError = '';
-    if (event.to_status) void taskApi.get(taskId).then((current) => task = current).catch((reason) => error = asError(reason));
+    if (event.to_status) void taskApi.get(taskId)
+      .then((current) => { if (!isDisposed()) task = current; })
+      .catch((reason) => { if (!isDisposed()) error = asError(reason); });
   }
 
   async function load() {
@@ -79,11 +82,23 @@
   };
 
   onMount(() => {
+    let disposed = false;
     let close = () => {};
     void load().then(() => {
-      if (!error) close = taskEventStream(taskId, mergeEvent, () => liveError = 'Live connection interrupted. Browser is reconnecting.', events.map(({ id }) => id));
+      if (disposed || error) return;
+      const closeStream = taskEventStream(
+        taskId,
+        (event) => mergeEvent(event, () => disposed),
+        () => { if (!disposed) liveError = 'Live connection interrupted. Browser is reconnecting.'; },
+        events.map(({ id }) => id)
+      );
+      if (disposed) closeStream();
+      else close = closeStream;
     });
-    return () => close();
+    return () => {
+      disposed = true;
+      close();
+    };
   });
 </script>
 
