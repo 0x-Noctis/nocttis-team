@@ -421,7 +421,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: status lulus berdasarkan exit code; timeout/output limit diterapkan; verifier tidak mengubah source.
   - Verify: fixture pass, fail, timeout, dan attempted mutation.
 
-- [ ] **M2-013 — Halaman task dan live events** · Lane C
+- [x] **M2-013 — Halaman task dan live events** · Lane C
   - Depends On: M2-004, M2-010
   - Parallel With: M2-011, M2-012
   - Allowed Paths: `web/src/routes/tasks/**`, `web/src/lib/api/client.ts`, `web/src/lib/realtime/**`
@@ -870,3 +870,4 @@ Tambahkan satu baris saat task selesai atau diblokir.
 | 2026-09-20 | M2-012 | Verifier deterministik terintegrasi ke production crate | `cargo test --test verifier -- --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo fmt --check`; `git diff --check` | Verdict berdasarkan exit code; mutasi source menghasilkan policy failure |
 | 2026-09-20 | M2-010 | Task/artifact HTTP API terintegrasi dengan versioned delete dan live SSE bounded | `cargo test --test task_store --test task_api -- --test-threads=1 --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo fmt --check`; `git diff --check` | SSE mendukung heartbeat dan reconnect `Last-Event-ID` tanpa duplikat; CORS mengekspos `x-request-id` |
 | 2026-09-20 | M2-011 | Reviewer read-only terintegrasi dengan bounded mutation snapshot | `cargo test --test reviewer -- --test-threads=1 --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo fmt --check`; `git diff --check` | Test memakai production crate; tracked dan untracked mutation menghasilkan typed policy failure |
+| 2026-09-20 | M2-013 | Halaman task dan live events terintegrasi dengan lifecycle SSE aman | `npm run check`; `npm run build`; `git diff --check` | Native `EventSource` mengejar event tertinggal dan ditutup saat navigasi; destructive cancel wajib konfirmasi |
