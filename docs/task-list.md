@@ -335,7 +335,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: traversal dan symlink escape ditolak; partial write dibersihkan; DB metadata dibuat setelah file aman.
   - Verify: temp-directory integration tests.
 
-- [ ] **M2-003 — Git worktree manager** · Lane B
+- [x] **M2-003 — Git worktree manager** · Lane B
   - Depends On: M1 exit gate, M0-002
   - Parallel With: M2-001, M2-002, M2-004
   - Allowed Paths: `src/runner/git.rs`, `tests/git_worktree.rs`
@@ -343,7 +343,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: hanya repository Git valid; path shell-safe; tidak ada push; cleanup idempotent.
   - Verify: fixture repository integration test.
 
-- [ ] **M2-004 — Web task components berbasis fixture** · Lane C
+- [x] **M2-004 — Web task components berbasis fixture** · Lane C
   - Depends On: M1 exit gate
   - Parallel With: M2-001, M2-002, M2-003
   - Allowed Paths: `web/src/lib/components/task/**`, `web/src/lib/fixtures/task.ts`, `web/src/lib/api/types.ts`
@@ -863,3 +863,4 @@ Tambahkan satu baris saat task selesai atau diblokir.
 | 2026-09-20 | M1-009, M1-010, M1-011A | Provider HTTP API dan halaman Providers terintegrasi; compatibility suite model-level tersedia | `cargo test --test provider_api -- --test-threads=1 --nocapture`; `cargo test --test provider_compatibility -- --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `npm run check`; `npm run build` | Kontrak list memakai page envelope; M1-011 menunggu verifikasi API/persistence |
 | 2026-09-20 | M1-011, Exit Gate M1 | Compatibility API/persistence, SSRF guard, CORS preflight, dan error envelope final lulus | `cargo test --test provider_api -- --test-threads=1 --nocapture`; `cargo test --test provider_compatibility -- --test-threads=1 --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `npm run check`; `npm run build` | Milestone M1 selesai; private provider wajib masuk `NOCTIS_PROVIDER_HOST_ALLOWLIST` |
 | 2026-09-20 | M2-001, M2-002 | Task state machine dan filesystem artifact store terintegrasi ke production crate | `cargo test --test artifact_store -- --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo fmt --check`; `git diff --check` | Migration task runtime memakai nomor `0004` karena `0003` sudah dipakai idempotency |
+| 2026-09-20 | M2-003, M2-004 | Git worktree manager aman dan komponen task fixture terintegrasi | `cargo test --test git_worktree -- --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `npm run check`; `npm run build`; `git diff --check` | M2-005 dan M2-006 menunggu revisi review |
