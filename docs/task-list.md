@@ -279,7 +279,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: multiple calls dapat diparse; invalid JSON argument menghasilkan typed error; tool tidak dieksekusi oleh probe.
   - Verify: mock test single, multiple, malformed argument, dan provider tanpa tools.
 
-- [ ] **M1-009 — Provider HTTP API** · Lane A
+- [x] **M1-009 — Provider HTTP API** · Lane A
   - Depends On: M1-004, M1-005, M1-006
   - Parallel With: M1-008
   - Allowed Paths: `src/api/providers.rs`, `src/api/mod.rs`, `src/main.rs`, `tests/provider_api.rs`
@@ -289,7 +289,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
 
 ## Gelombang M1-D — Integrasi UI dan Quality Gate
 
-- [ ] **M1-010 — Halaman Providers** · Lane C
+- [x] **M1-010 — Halaman Providers** · Lane C
   - Depends On: M1-007, M1-009
   - Parallel With: M1-011
   - Allowed Paths: `web/src/routes/providers/**`, `web/src/lib/api/client.ts`, `web/src/routes/+page.svelte`
@@ -860,3 +860,4 @@ Tambahkan satu baris saat task selesai atau diblokir.
 | 2026-09-19 | M1-A | Cross-contract provider foundation lulus; test commit `6651bb1` | `cargo test --test provider_contract -- --test-threads=1 --nocapture`; `cargo fmt --check`; `cargo test`; `cargo clippy --all-targets --all-features -- -D warnings`; `git diff --check` | PostgreSQL aktif dari instance sehat; roundtrip domain, capability, probe, ID, dan bigint lossless |
 | 2026-09-20 | M1-004, M1-005, M1-007 | Provider store, non-streaming chat client, dan UI provider foundation terintegrasi | `cargo test --test provider_store -- --test-threads=1 --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `npm run check`; `npm run build` | M1-006 tetap terbuka; milestone M1 belum selesai |
 | 2026-09-20 | M1-006, M1-008 | Streaming SSE dan tool-call probe terintegrasi; tool client ter-wire ke production crate | `cargo test --test model_stream --test model_tools`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo fmt --check`; `git diff --check` | `M1-009` kini dapat dimulai; milestone M1 belum selesai |
+| 2026-09-20 | M1-009, M1-010, M1-011A | Provider HTTP API dan halaman Providers terintegrasi; compatibility suite model-level tersedia | `cargo test --test provider_api -- --test-threads=1 --nocapture`; `cargo test --test provider_compatibility -- --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `npm run check`; `npm run build` | Kontrak list memakai page envelope; M1-011 menunggu verifikasi API/persistence |

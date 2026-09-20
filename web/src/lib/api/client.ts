@@ -14,6 +14,11 @@ export class ApiRequestError extends Error {
   }
 }
 
+interface Page<T> {
+  items: T[];
+  next_cursor: string | null;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init);
   const body: unknown = response.status === 204 ? undefined : await response.json();
@@ -33,7 +38,7 @@ function mutation(method: string, body?: unknown): RequestInit {
 }
 
 export const providerApi = {
-  list: () => request<ProviderResponse[]>('/api/v1/providers'),
+  list: () => request<Page<ProviderResponse>>('/api/v1/providers').then(({ items }) => items),
   get: (providerId: string) =>
     request<ProviderResponse>(`/api/v1/providers/${encodeURIComponent(providerId)}`),
   create: (provider: ProviderInput) =>
@@ -43,7 +48,9 @@ export const providerApi = {
   delete: (providerId: string) =>
     request<void>(`/api/v1/providers/${encodeURIComponent(providerId)}`, mutation('DELETE')),
   models: (providerId: string) =>
-    request<ModelResponse[]>(`/api/v1/providers/${encodeURIComponent(providerId)}/models`),
+    request<Page<ModelResponse>>(`/api/v1/providers/${encodeURIComponent(providerId)}/models`).then(
+      ({ items }) => items
+    ),
   createModel: (providerId: string, model: ModelInput) =>
     request<ModelResponse>(`/api/v1/providers/${encodeURIComponent(providerId)}/models`, mutation('POST', model)),
   getModel: (modelId: string) =>
