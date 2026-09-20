@@ -5,7 +5,9 @@ import type {
   ProbeKind,
   ProbeResponse,
   ProviderInput,
-  ProviderResponse
+  ProviderResponse,
+  TaskContract,
+  TaskStatus
 } from './types';
 
 export class ApiRequestError extends Error {
@@ -36,6 +38,59 @@ function mutation(method: string, body?: unknown): RequestInit {
     body: body === undefined ? undefined : JSON.stringify(body)
   };
 }
+
+export interface TaskResponse {
+  contract: TaskContract;
+  status: TaskStatus;
+  version: number;
+}
+
+export interface TaskEventResponse {
+  id: number;
+  task_id: string;
+  actor: string;
+  event_type: string;
+  from_status: TaskStatus | null;
+  to_status: TaskStatus | null;
+  payload: Record<string, unknown>;
+}
+
+export interface ArtifactResponse {
+  id: string;
+  kind: string;
+  size_bytes: number;
+  sha256: string;
+}
+
+export const taskApi = {
+  list: () => request<Page<TaskResponse>>('/api/v1/tasks'),
+  get: (taskId: string) => request<TaskResponse>(`/api/v1/tasks/${encodeURIComponent(taskId)}`),
+  create: (contract: TaskContract) =>
+    request<TaskResponse>('/api/v1/tasks', mutation('POST', contract)),
+  action: (taskId: string, action: 'start' | 'cancel' | 'retry', expectedVersion: number) =>
+    request<TaskResponse>(
+      `/api/v1/tasks/${encodeURIComponent(taskId)}/${action}`,
+      mutation('POST', { expected_version: expectedVersion })
+    ),
+  events: (taskId: string) =>
+    request<Page<TaskEventResponse>>(`/api/v1/tasks/${encodeURIComponent(taskId)}/events`).then(
+      ({ items }) => items
+    ),
+  artifacts: (taskId: string) =>
+    request<Page<ArtifactResponse>>(`/api/v1/tasks/${encodeURIComponent(taskId)}/artifacts`).then(
+      ({ items }) => items
+    ),
+  diff: async (taskId: string) => {
+    const response = await fetch(`/api/v1/tasks/${encodeURIComponent(taskId)}/diff`);
+    if (!response.ok) {
+      const body = (await response.json()) as ApiError;
+      throw new ApiRequestError(body);
+    }
+    return response.text();
+  },
+  artifactUrl: (taskId: string, artifactId: string) =>
+    `/api/v1/tasks/${encodeURIComponent(taskId)}/artifacts/${encodeURIComponent(artifactId)}`
+};
 
 export const providerApi = {
   list: () => request<Page<ProviderResponse>>('/api/v1/providers').then(({ items }) => items),
