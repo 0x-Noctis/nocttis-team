@@ -12,6 +12,9 @@ const OUTPUT_LIMIT: usize = 1024 * 1024;
 pub enum GitOperation {
     ValidateRepository,
     ValidateBaseCommit,
+    ValidateWorktree,
+    ValidateBranch,
+    ValidateAncestry,
     CreateWorktree,
     ReadHead,
     ReadStatus,
@@ -27,6 +30,9 @@ impl fmt::Display for GitOperation {
         formatter.write_str(match self {
             Self::ValidateRepository => "repository validation",
             Self::ValidateBaseCommit => "base commit validation",
+            Self::ValidateWorktree => "worktree validation",
+            Self::ValidateBranch => "worktree branch validation",
+            Self::ValidateAncestry => "worktree ancestry validation",
             Self::CreateWorktree => "worktree creation",
             Self::ReadHead => "HEAD read",
             Self::ReadStatus => "status read",
@@ -206,6 +212,61 @@ impl GitWorktreeManager {
         })
     }
 
+    pub fn open(
+        &self,
+        task_id: &str,
+        branch: &str,
+        base_commit: &str,
+    ) -> Result<Worktree, GitError> {
+        validate_component(task_id, "task ID")?;
+        validate_component(branch, "branch")?;
+        validate_component(base_commit, "base commit")?;
+        let base_commit = self.resolve_commit(base_commit)?;
+        let path = fs::canonicalize(self.worktree_root.join(task_id))
+            .map_err(|_| GitError::InvalidInput("worktree does not exist"))?;
+        if path.parent() != Some(self.worktree_root.as_path()) {
+            return Err(GitError::InvalidInput("worktree escaped configured root"));
+        }
+        self.validate_registered_worktree(&path)?;
+
+        let actual_branch = text_output(&run(
+            Command::new("git").arg("-C").arg(&path).args([
+                "symbolic-ref",
+                "--quiet",
+                "--short",
+                "HEAD",
+            ]),
+            None,
+            GitOperation::ValidateBranch,
+        )?)?;
+        if actual_branch != branch {
+            return Err(GitError::InvalidInput("worktree branch does not match"));
+        }
+        if let Err(error) = run(
+            Command::new("git")
+                .arg("-C")
+                .arg(&path)
+                .args(["merge-base", "--is-ancestor"])
+                .arg(&base_commit)
+                .arg("HEAD"),
+            None,
+            GitOperation::ValidateAncestry,
+        ) {
+            return match error {
+                GitError::CommandFailed { .. } => {
+                    Err(GitError::InvalidInput("base commit is not an ancestor"))
+                }
+                error => Err(error),
+            };
+        }
+
+        Ok(Worktree {
+            path,
+            branch: branch.to_owned(),
+            base_commit,
+        })
+    }
+
     pub fn head(&self, worktree: &Worktree) -> Result<String, GitError> {
         self.ensure_worktree(worktree)?;
         let output = run(
@@ -321,6 +382,60 @@ impl GitWorktreeManager {
             GitOperation::ValidateBaseCommit,
         )?;
         text_output(&output)
+    }
+
+    fn validate_registered_worktree(&self, path: &Path) -> Result<(), GitError> {
+        let output = run(
+            Command::new("git")
+                .arg("-C")
+                .arg(&self.repository_root)
+                .args(["worktree", "list", "--porcelain", "-z"]),
+            None,
+            GitOperation::ValidateWorktree,
+        )?;
+        let registered = output
+            .split(|byte| *byte == 0)
+            .filter_map(|field| field.strip_prefix(b"worktree "))
+            .filter_map(|value| std::str::from_utf8(value).ok())
+            .filter_map(|value| fs::canonicalize(value).ok())
+            .any(|registered| registered == path);
+        if !registered {
+            return Err(GitError::InvalidInput("worktree is not registered"));
+        }
+
+        let root = path_output(&run(
+            Command::new("git")
+                .arg("-C")
+                .arg(path)
+                .args(["rev-parse", "--show-toplevel"]),
+            None,
+            GitOperation::ValidateWorktree,
+        )?)?;
+        if fs::canonicalize(root).map_err(|_| GitError::InvalidInput("worktree root is invalid"))?
+            != path
+        {
+            return Err(GitError::InvalidInput("worktree root does not match"));
+        }
+
+        let repository_common = self.common_git_directory(&self.repository_root)?;
+        let worktree_common = self.common_git_directory(path)?;
+        if repository_common != worktree_common {
+            return Err(GitError::InvalidInput("worktree repository does not match"));
+        }
+        Ok(())
+    }
+
+    fn common_git_directory(&self, path: &Path) -> Result<PathBuf, GitError> {
+        let common = path_output(&run(
+            Command::new("git").arg("-C").arg(path).args([
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-common-dir",
+            ]),
+            None,
+            GitOperation::ValidateWorktree,
+        )?)?;
+        fs::canonicalize(common).map_err(|_| GitError::InvalidInput("git directory is invalid"))
     }
 
     fn ensure_worktree(&self, worktree: &Worktree) -> Result<(), GitError> {

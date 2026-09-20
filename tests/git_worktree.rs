@@ -1,6 +1,3 @@
-#[path = "../src/runner/git.rs"]
-mod git;
-
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -8,7 +5,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use git::{GitError, GitWorktreeManager};
+use ai_team::runner::git::{GitError, GitWorktreeManager};
 
 struct Fixture {
     root: PathBuf,
@@ -89,6 +86,116 @@ fn create_status_binary_diff_and_base_are_exact() {
     let diff = String::from_utf8_lossy(&diff);
     assert!(diff.contains("GIT binary patch"));
     assert!(diff.contains("tracked.txt"));
+}
+
+#[test]
+fn reopens_dirty_retained_worktree_without_changing_it() {
+    let fixture = Fixture::new();
+    let manager = fixture.manager();
+    let created = manager
+        .create("retained", "retained-branch", &fixture.base)
+        .unwrap();
+    fs::write(created.path().join("tracked.txt"), "dirty\n").unwrap();
+    fs::write(created.path().join("untracked.txt"), "retained\n").unwrap();
+    let head_before = git_output(created.path(), &["rev-parse", "HEAD"]);
+
+    let reopened = manager
+        .open("retained", "retained-branch", &fixture.base)
+        .unwrap();
+
+    assert_eq!(reopened.path(), created.path());
+    assert_eq!(reopened.branch(), "retained-branch");
+    assert_eq!(reopened.base_commit(), fixture.base);
+    assert_eq!(
+        git_output(reopened.path(), &["rev-parse", "HEAD"]),
+        head_before
+    );
+    assert_eq!(
+        fs::read_to_string(reopened.path().join("tracked.txt")).unwrap(),
+        "dirty\n"
+    );
+    assert_eq!(
+        fs::read_to_string(reopened.path().join("untracked.txt")).unwrap(),
+        "retained\n"
+    );
+}
+
+#[test]
+fn reopen_rejects_branch_and_base_mismatch() {
+    let fixture = Fixture::new();
+    let manager = fixture.manager();
+    manager
+        .create("retained", "retained-branch", &fixture.base)
+        .unwrap();
+
+    assert!(matches!(
+        manager.open("retained", "other-branch", &fixture.base),
+        Err(GitError::InvalidInput("worktree branch does not match"))
+    ));
+
+    fs::write(fixture.repository.join("later.txt"), "later\n").unwrap();
+    git(&fixture.repository, &["add", "later.txt"]);
+    git(&fixture.repository, &["commit", "-m", "later"]);
+    let later = git_output(&fixture.repository, &["rev-parse", "HEAD"]);
+    assert!(matches!(
+        manager.open("retained", "retained-branch", &later),
+        Err(GitError::InvalidInput("base commit is not an ancestor"))
+    ));
+}
+
+#[test]
+fn reopen_rejects_missing_unregistered_and_escaped_paths() {
+    let fixture = Fixture::new();
+    let manager = fixture.manager();
+    assert!(matches!(
+        manager.open("missing", "safe-branch", &fixture.base),
+        Err(GitError::InvalidInput("worktree does not exist"))
+    ));
+
+    fs::create_dir_all(fixture.worktrees.join("unregistered")).unwrap();
+    assert!(matches!(
+        manager.open("unregistered", "safe-branch", &fixture.base),
+        Err(GitError::InvalidInput("worktree is not registered"))
+    ));
+
+    #[cfg(unix)]
+    {
+        let outside = fixture.root.join("outside");
+        fs::create_dir(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, fixture.worktrees.join("escaped")).unwrap();
+        assert!(matches!(
+            manager.open("escaped", "safe-branch", &fixture.base),
+            Err(GitError::InvalidInput("worktree escaped configured root"))
+        ));
+    }
+}
+
+#[test]
+fn reopen_errors_redact_paths_branch_and_input_markers() {
+    let fixture = Fixture::new();
+    let manager = fixture.manager();
+    manager
+        .create("private-task", "private-branch-marker", &fixture.base)
+        .unwrap();
+    let error = manager
+        .open(
+            "private-task",
+            "NOCTIS_PRIVATE_BRANCH_MARKER",
+            &fixture.base,
+        )
+        .unwrap_err();
+    let display = error.to_string();
+    let debug = format!("{error:?}");
+
+    for private in [
+        fixture.repository.to_string_lossy().as_ref(),
+        fixture.worktrees.to_string_lossy().as_ref(),
+        "private-branch-marker",
+        "NOCTIS_PRIVATE_BRANCH_MARKER",
+    ] {
+        assert!(!display.contains(private), "Display leaked private input");
+        assert!(!debug.contains(private), "Debug leaked private input");
+    }
 }
 
 #[test]
