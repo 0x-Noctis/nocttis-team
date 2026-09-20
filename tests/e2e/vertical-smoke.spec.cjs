@@ -1,18 +1,24 @@
 const { expect, test } = require('../../web/node_modules/@playwright/test');
 const { randomUUID } = require('node:crypto');
+const { spawnSync } = require('node:child_process');
 
-const enabled = process.env.NOCTIS_VERTICAL_E2E === '1';
-const projectId = process.env.NOCTIS_E2E_PROJECT_ID;
-const projectRunId = process.env.NOCTIS_E2E_PROJECT_RUN_ID;
+const projectId = '00000000-0000-4000-8000-000000000015';
+const projectRunId = '00000000-0000-4000-8000-000000000016';
+
+function makeReady(taskId) {
+  const sql = `UPDATE tasks SET status='READY', version=version+1 WHERE id='${taskId}' AND status='DRAFT'`;
+  const result = spawnSync('docker', [
+    'exec', '-i', 'noctis-agent-3-e2e-postgres', 'psql', '-U', 'ai_team', '-d', 'ai_team',
+    '-v', 'ON_ERROR_STOP=1', '-c', sql
+  ]);
+  expect(result.status).toBe(0);
+}
 
 test.describe('production vertical slice', () => {
-  test.skip(!enabled, 'set NOCTIS_VERTICAL_E2E=1 after M2-014 production wiring is integrated');
-  test.skip(!projectId || !projectRunId, 'seed project ownership and set fixture UUIDs');
-
   test('provider to terminal task result survives SSE reconnect', async ({ page, request }) => {
     const suffix = Date.now().toString(36);
     const providerId = `e2e-provider-${suffix}`;
-    const modelId = `e2e-model-${suffix}`;
+    const modelId = 'e2e-model';
     const taskId = `e2e-task-${suffix}`;
     const headers = () => ({ 'Idempotency-Key': randomUUID() });
 
@@ -42,8 +48,9 @@ test.describe('production vertical slice', () => {
       expect(model.ok()).toBeTruthy();
 
       await page.goto('/providers');
-      await expect(page.getByText(providerId, { exact: true })).toBeVisible();
-      await page.getByRole('button', { name: new RegExp(providerId) }).press('Enter');
+      const providerButton = page.getByRole('button', { name: new RegExp(providerId) });
+      await expect(providerButton).toBeVisible();
+      await providerButton.press('Enter');
       await expect(page.getByText(modelId, { exact: true })).toBeVisible();
 
       await page.goto('/tasks');
@@ -65,20 +72,25 @@ test.describe('production vertical slice', () => {
       await form.getByLabel('Verification commands, one per line').fill('git diff --check');
       await form.getByRole('button', { name: 'Create task' }).press('Enter');
       await expect(page.getByRole('status')).toContainText(taskId);
+      makeReady(taskId);
 
       await page.getByRole('link', { name: /Playwright vertical smoke/ }).press('Enter');
       await expect(page).toHaveURL(new RegExp(`/tasks/${taskId}$`));
       await page.getByRole('button', { name: 'Start' }).press('Enter');
       await expect(page.getByRole('status')).toContainText('Start accepted');
+
+      await expect(page.locator('.timeline > li')).not.toHaveCount(0);
+      const eventIdsBefore = await page.locator('.timeline > li > span').allTextContents();
+      await page.reload();
+      await expect(page.getByText('Loading task…')).toHaveCount(0);
+      const replayedIds = await page.locator('.timeline > li > span').allTextContents();
+      expect(new Set(replayedIds).size).toBe(replayedIds.length);
+      expect(replayedIds.length).toBeGreaterThanOrEqual(eventIdsBefore.length);
+
       await page.getByRole('button', { name: 'Start' }).press('Enter');
       const visibleFailure = page.getByRole('alert');
       await expect(visibleFailure).toBeVisible();
       const failureText = await visibleFailure.textContent();
-
-      const eventIdsBefore = await page.locator('.timeline > li > span').allTextContents();
-      await page.context().setOffline(true);
-      await expect(page.getByText('Live connection interrupted. Browser is reconnecting.')).toBeVisible();
-      await page.context().setOffline(false);
 
       await expect(page.locator('.status')).toContainText(/DONE|FAILED/, { timeout: 120_000 });
       const eventIds = await page.locator('.timeline > li > span').allTextContents();

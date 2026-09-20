@@ -7,7 +7,7 @@
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
-    "e2e": "playwright test --config ../tests/e2e/playwright.config.cjs"
+    "e2e": "node ../tests/e2e/run.cjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0",

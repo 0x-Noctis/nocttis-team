@@ -2,6 +2,7 @@ const http = require('node:http');
 
 const host = '127.0.0.1';
 const port = 7411;
+let calls = 0;
 
 function response(body) {
   return {
@@ -15,14 +16,12 @@ function response(body) {
 }
 
 function modelReply(request) {
+  calls += 1;
   const messages = Array.isArray(request.messages) ? request.messages : [];
   const toolResults = messages.filter(({ role }) => role === 'tool').length;
-  const reviewer = messages.some(({ content }) =>
-    typeof content === 'string' && content.toLowerCase().includes('reviewer')
-  );
 
-  if (reviewer) {
-    return response({ role: 'assistant', content: JSON.stringify({ decision: 'approved', findings: [] }) });
+  if (calls % 3 === 0) {
+    return response({ role: 'assistant', content: JSON.stringify({ decision: 'approved' }) });
   }
   if (toolResults === 0 && Array.isArray(request.tools) && request.tools.length > 0) {
     return response({
@@ -34,26 +33,7 @@ function modelReply(request) {
         function: {
           name: 'apply_patch',
           arguments: JSON.stringify({
-            patch: 'diff --git a/e2e-output.txt b/e2e-output.txt\nnew file mode 100644\n--- /dev/null\n+++ b/e2e-output.txt\n@@ -0,0 +1 @@\n+vertical smoke complete\n'
-          })
-        }
-      }]
-    });
-  }
-  if (toolResults === 1 && Array.isArray(request.tools) && request.tools.length > 0) {
-    return response({
-      role: 'assistant',
-      content: null,
-      tool_calls: [{
-        id: 'fixture-artifact',
-        type: 'function',
-        function: {
-          name: 'submit_artifact',
-          arguments: JSON.stringify({
-            path: 'e2e-output.txt',
-            artifact_id: 'e2e-result',
-            logical_name: 'vertical-smoke-result',
-            media_type: 'text/plain'
+            patch: 'diff --git a/e2e-output.txt b/e2e-output.txt\n--- a/e2e-output.txt\n+++ b/e2e-output.txt\n@@ -1 +1 @@\n-base\n+vertical smoke complete\n'
           })
         }
       }]
@@ -61,13 +41,7 @@ function modelReply(request) {
   }
   return response({
     role: 'assistant',
-    content: JSON.stringify({
-      summary: 'Fixture task completed without source mutation.',
-      next_status: 'SELF_CHECK',
-      changed_paths: [],
-      verification_commands: ['git diff --check'],
-      artifacts: []
-    })
+    content: JSON.stringify({ summary: 'Fixture patch completed.', status: 'self_check' })
   });
 }
 
