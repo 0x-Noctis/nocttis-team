@@ -61,6 +61,7 @@ fn contract(allowed_paths: &[&str], context_refs: &[&str]) -> TaskContract {
     TaskContract {
         id: text("id", "M2-006"),
         project_id: text("project_id", "noctis"),
+        project_run_id: text("project_run_id", "run-1"),
         title: text("title", "Context builder"),
         role: text("role", "worker"),
         objective: text("objective", "Build relevant context"),
@@ -351,6 +352,32 @@ fn oversized_artifact_is_rejected_from_metadata_before_content_read() {
 }
 
 #[test]
+fn bounded_artifact_read_rejects_large_file_even_when_metadata_claims_small_size() {
+    let repository = TestDirectory::new("forged-artifact-repo");
+    let artifacts = TestDirectory::new("forged-artifact-data");
+    let artifact_store = ArtifactStore::new(&artifacts.0, 16_000).unwrap();
+    artifact_store
+        .write("forged", "forged.txt", "text/plain", &[b'x'; 8_000], |_| {
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+    let metadata_path = artifacts.0.join("forged.metadata.json");
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+    metadata["size"] = 1.into();
+    fs::write(metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+    let builder = ContextBuilder::new(&repository.0, &artifact_store, limits()).unwrap();
+
+    assert_eq!(
+        builder.build(
+            &contract(&["src/**"], &["artifact://forged"]),
+            &ContextRequest::default()
+        ),
+        Err(ContextError::FileTooLarge)
+    );
+}
+
+#[test]
 fn additional_secret_paths_are_rejected() {
     let repository = TestDirectory::new("secrets-repo");
     let artifacts = TestDirectory::new("secrets-artifacts");
@@ -448,6 +475,55 @@ fn request_counts_and_pattern_lengths_are_bounded() {
 }
 
 #[test]
+fn task_contract_is_bounded_before_serialization() {
+    let repository = TestDirectory::new("contract-cap-repo");
+    let artifacts = TestDirectory::new("contract-cap-artifacts");
+    let artifact_store = stores(&repository, &artifacts);
+    let builder = ContextBuilder::new(&repository.0, &artifact_store, limits()).unwrap();
+
+    let mut oversized_objective = contract(&["**"], &[]);
+    oversized_objective.objective = text("objective", &"x".repeat(4_097));
+    assert_eq!(
+        builder.build(&oversized_objective, &ContextRequest::default()),
+        Err(ContextError::InputLimitExceeded)
+    );
+
+    let mut oversized_list = contract(&["**"], &[]);
+    oversized_list.acceptance_criteria = vec![text("acceptance_criteria", "item"); 129];
+    assert_eq!(
+        builder.build(&oversized_list, &ContextRequest::default()),
+        Err(ContextError::InputLimitExceeded)
+    );
+
+    let mut oversized_serialized = contract(&["**"], &[]);
+    oversized_serialized.acceptance_criteria =
+        vec![text("acceptance_criteria", &"x".repeat(4_000)); 20];
+    assert_eq!(
+        builder.build(&oversized_serialized, &ContextRequest::default()),
+        Err(ContextError::InputLimitExceeded)
+    );
+}
+
+#[test]
+fn project_run_id_obeys_contract_boundary() {
+    let repository = TestDirectory::new("run-id-repo");
+    let artifacts = TestDirectory::new("run-id-artifacts");
+    let artifact_store = stores(&repository, &artifacts);
+    let builder = ContextBuilder::new(&repository.0, &artifact_store, limits()).unwrap();
+
+    let mut oversized = contract(&["**"], &[]);
+    oversized.project_run_id = text("project_run_id", &"x".repeat(4_097));
+    assert_eq!(
+        builder.build(&oversized, &ContextRequest::default()),
+        Err(ContextError::InputLimitExceeded)
+    );
+
+    let mut serialized = serde_json::to_value(contract(&["**"], &[])).unwrap();
+    serialized["project_run_id"] = "".into();
+    assert!(serde_json::from_value::<TaskContract>(serialized).is_err());
+}
+
+#[test]
 fn unicode_truncation_remains_valid_utf8_and_within_budgets() {
     let repository = TestDirectory::new("unicode-repo");
     let artifacts = TestDirectory::new("unicode-artifacts");
@@ -469,6 +545,22 @@ fn unicode_truncation_remains_valid_utf8_and_within_budgets() {
 
     assert!(result.bytes <= small.max_bytes);
     assert!(result.estimated_tokens <= small.max_tokens);
+    assert_eq!(
+        result.bytes,
+        result
+            .entries
+            .iter()
+            .map(|entry| entry.content.len())
+            .sum::<usize>()
+    );
+    assert_eq!(
+        result.estimated_tokens,
+        result
+            .entries
+            .iter()
+            .map(|entry| context::estimate_tokens(entry.content.len()))
+            .sum::<usize>()
+    );
     assert_eq!(result.entries.last().unwrap().content, "éé");
 }
 

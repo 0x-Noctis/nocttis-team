@@ -1,12 +1,15 @@
 use std::{
     fmt,
     fs::{self, File},
-    io::Read,
+    io::{Read, Write},
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
 };
 
-use crate::{domain::task::TaskContract, store::artifact::ArtifactStore};
+use crate::{
+    domain::task::TaskContract,
+    store::artifact::{ArtifactError, ArtifactStore},
+};
 
 const MAX_SEARCH_TERMS: usize = 32;
 const MAX_EXCERPTS: usize = 128;
@@ -16,6 +19,9 @@ const MAX_SEARCH_LENGTH: usize = 256;
 const MAX_PATH_LENGTH: usize = 1_024;
 const MAX_GLOB_LENGTH: usize = 512;
 const MAX_ARTIFACT_REFERENCE_LENGTH: usize = 512;
+const MAX_CONTRACT_SCALAR_LENGTH: usize = 4_096;
+const MAX_CONTRACT_LIST_ITEMS: usize = 128;
+const MAX_CONTRACT_BYTES: usize = 64 * 1_024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ContextSourceKind {
@@ -144,6 +150,7 @@ impl<'a> ContextBuilder<'a> {
         request: &ContextRequest,
     ) -> Result<BuiltContext, ContextError> {
         validate_inputs(contract, request)?;
+        validate_contract(contract)?;
         let task_token_limit =
             usize::try_from(contract.limits.max_input_tokens.get()).unwrap_or(usize::MAX);
         let mut budget = Budget::new(
@@ -151,6 +158,9 @@ impl<'a> ContextBuilder<'a> {
             self.limits.max_tokens.min(task_token_limit),
         );
         let mut entries = Vec::new();
+        let mut contract_size = LimitedWriter::new(MAX_CONTRACT_BYTES);
+        serde_json::to_writer(&mut contract_size, contract)
+            .map_err(|_| ContextError::InputLimitExceeded)?;
         let task = serde_json::to_string(contract)
             .map_err(|_| ContextError::Io("serialize task contract"))?;
         budget.push(
@@ -173,17 +183,13 @@ impl<'a> ContextBuilder<'a> {
                 .strip_prefix("artifact://")
                 .filter(|id| valid_artifact_id(id))
                 .ok_or(ContextError::InvalidArtifactReference)?;
-            let metadata = self
-                .artifact_store
-                .metadata(artifact_id)
-                .map_err(|_| ContextError::ArtifactUnavailable)?;
-            if metadata.size > self.limits.max_file_bytes as u64 {
-                return Err(ContextError::FileTooLarge);
-            }
             let bytes = self
                 .artifact_store
-                .read(artifact_id)
-                .map_err(|_| ContextError::ArtifactUnavailable)?;
+                .read_bounded(artifact_id, self.limits.max_file_bytes as u64)
+                .map_err(|error| match error {
+                    ArtifactError::TooLarge => ContextError::FileTooLarge,
+                    _ => ContextError::ArtifactUnavailable,
+                })?;
             let content = text(bytes, self.limits.max_file_bytes)?;
             budget.push(
                 &mut entries,
@@ -456,6 +462,74 @@ fn validate_inputs(contract: &TaskContract, request: &ContextRequest) -> Result<
         return Err(ContextError::InputLimitExceeded);
     }
     Ok(())
+}
+
+fn validate_contract(contract: &TaskContract) -> Result<(), ContextError> {
+    for value in [
+        contract.id.as_str(),
+        contract.project_id.as_str(),
+        contract.project_run_id.as_str(),
+        contract.title.as_str(),
+        contract.role.as_str(),
+        contract.objective.as_str(),
+    ] {
+        validate_contract_text(value, MAX_CONTRACT_SCALAR_LENGTH)?;
+    }
+    for values in [
+        contract.depends_on.as_slice(),
+        contract.acceptance_criteria.as_slice(),
+        contract.verification_commands.as_slice(),
+    ] {
+        if values.len() > MAX_CONTRACT_LIST_ITEMS {
+            return Err(ContextError::InputLimitExceeded);
+        }
+        for value in values {
+            validate_contract_text(value.as_str(), MAX_CONTRACT_SCALAR_LENGTH)?;
+        }
+    }
+    for path in &contract.allowed_paths {
+        validate_contract_text(path.as_str(), MAX_GLOB_LENGTH)?;
+    }
+    for reference in &contract.context_refs {
+        validate_contract_text(reference.as_str(), MAX_ARTIFACT_REFERENCE_LENGTH)?;
+    }
+    Ok(())
+}
+
+fn validate_contract_text(value: &str, maximum: usize) -> Result<(), ContextError> {
+    if value.trim().is_empty()
+        || value.len() > maximum
+        || value
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
+        return Err(ContextError::InputLimitExceeded);
+    }
+    Ok(())
+}
+
+struct LimitedWriter {
+    remaining: usize,
+}
+
+impl LimitedWriter {
+    fn new(limit: usize) -> Self {
+        Self { remaining: limit }
+    }
+}
+
+impl Write for LimitedWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.remaining {
+            return Err(std::io::Error::other("contract exceeds size limit"));
+        }
+        self.remaining -= bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn validate_search(value: &str) -> Result<(), ContextError> {
