@@ -1,4 +1,10 @@
-use std::{fmt, path::Component};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    fs::{self, File},
+    io::Read,
+    path::{Component, Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -20,6 +26,10 @@ const MAX_FINDINGS: usize = 64;
 const MAX_MESSAGE_BYTES: usize = 1_024;
 const MAX_SOURCE_BYTES: usize = 64 * 1024;
 const MAX_EVIDENCE_BYTES: u64 = 64 * 1024;
+const MAX_UNTRACKED_FILES: usize = 1_024;
+const MAX_UNTRACKED_FILE_BYTES: u64 = 1024 * 1024;
+const MAX_UNTRACKED_TOTAL_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_UNTRACKED_PATH_BYTES: usize = 4 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -83,6 +93,7 @@ pub enum ReviewerError {
     ResponseTooLarge,
     InvalidResponse,
     InvalidFinding,
+    MutationInspection,
     PolicyViolation,
     InvalidTransition,
 }
@@ -97,6 +108,7 @@ impl fmt::Display for ReviewerError {
             Self::ResponseTooLarge => "review response exceeds limit",
             Self::InvalidResponse => "review response is invalid",
             Self::InvalidFinding => "review finding is invalid",
+            Self::MutationInspection => "worktree mutation inspection failed",
             Self::PolicyViolation => "reviewer modified worktree",
             Self::InvalidTransition => "review transition is invalid",
         })
@@ -197,11 +209,13 @@ impl<'a, M: ReviewerModel> Reviewer<'a, M> {
     }
 
     fn snapshot(&self) -> Result<GitSnapshot, ReviewerError> {
+        let status = self
+            .git
+            .status(self.worktree)
+            .map_err(|_| ReviewerError::Git)?;
         Ok(GitSnapshot {
-            status: self
-                .git
-                .status(self.worktree)
-                .map_err(|_| ReviewerError::Git)?,
+            untracked: snapshot_untracked(self.worktree.path(), &status)?,
+            status,
             diff: self
                 .git
                 .diff_binary(self.worktree)
@@ -418,6 +432,107 @@ impl<'de> Deserialize<'de> for Severity {
 struct GitSnapshot {
     status: String,
     diff: Vec<u8>,
+    untracked: BTreeMap<String, UntrackedFile>,
+}
+
+#[derive(Eq, PartialEq)]
+struct UntrackedFile {
+    size: u64,
+    checksum: [u8; 32],
+}
+
+fn snapshot_untracked(
+    worktree: &Path,
+    status: &str,
+) -> Result<BTreeMap<String, UntrackedFile>, ReviewerError> {
+    let root = worktree
+        .canonicalize()
+        .map_err(|_| ReviewerError::MutationInspection)?;
+    if !root.is_dir() {
+        return Err(ReviewerError::MutationInspection);
+    }
+    let mut paths = status
+        .lines()
+        .filter_map(|line| line.strip_prefix("?? "))
+        .collect::<Vec<_>>();
+    paths.sort_unstable();
+    paths.dedup();
+    if paths.len() > MAX_UNTRACKED_FILES {
+        return Err(ReviewerError::MutationInspection);
+    }
+    let mut total = 0_u64;
+    let mut files = BTreeMap::new();
+    for relative in paths {
+        validate_untracked_path(relative)?;
+        let path = safe_untracked_path(&root, relative)?;
+        let metadata = fs::metadata(&path).map_err(|_| ReviewerError::MutationInspection)?;
+        if !metadata.is_file() || metadata.len() > MAX_UNTRACKED_FILE_BYTES {
+            return Err(ReviewerError::MutationInspection);
+        }
+        total = total
+            .checked_add(metadata.len())
+            .ok_or(ReviewerError::MutationInspection)?;
+        if total > MAX_UNTRACKED_TOTAL_BYTES {
+            return Err(ReviewerError::MutationInspection);
+        }
+        let mut file = File::open(&path).map_err(|_| ReviewerError::MutationInspection)?;
+        let mut bytes = Vec::with_capacity(metadata.len().try_into().unwrap_or(0));
+        file.by_ref()
+            .take(MAX_UNTRACKED_FILE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| ReviewerError::MutationInspection)?;
+        if bytes.len() as u64 != metadata.len() {
+            return Err(ReviewerError::MutationInspection);
+        }
+        files.insert(
+            relative.to_owned(),
+            UntrackedFile {
+                size: metadata.len(),
+                checksum: Sha256::digest(bytes).into(),
+            },
+        );
+    }
+    Ok(files)
+}
+
+fn validate_untracked_path(value: &str) -> Result<(), ReviewerError> {
+    if value.is_empty()
+        || value.len() > MAX_UNTRACKED_PATH_BYTES
+        || value.starts_with('"')
+        || value.starts_with('-')
+        || value.starts_with('/')
+        || value.starts_with("//")
+        || value.as_bytes().get(1) == Some(&b':')
+        || value.chars().any(char::is_control)
+        || Path::new(value)
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(ReviewerError::MutationInspection);
+    }
+    Ok(())
+}
+
+fn safe_untracked_path(root: &Path, relative: &str) -> Result<PathBuf, ReviewerError> {
+    let mut current = root.to_path_buf();
+    for component in Path::new(relative).components() {
+        let Component::Normal(component) = component else {
+            return Err(ReviewerError::MutationInspection);
+        };
+        current.push(component);
+        let metadata =
+            fs::symlink_metadata(&current).map_err(|_| ReviewerError::MutationInspection)?;
+        if metadata.file_type().is_symlink() {
+            return Err(ReviewerError::MutationInspection);
+        }
+    }
+    let canonical = current
+        .canonicalize()
+        .map_err(|_| ReviewerError::MutationInspection)?;
+    if !canonical.starts_with(root) {
+        return Err(ReviewerError::MutationInspection);
+    }
+    Ok(canonical)
 }
 
 fn validate_path(contract: &TaskContract, value: &str) -> Result<(), ReviewerError> {

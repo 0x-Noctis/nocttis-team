@@ -42,8 +42,13 @@ use reviewer::{
 
 struct ScriptedModel {
     response: Option<Result<ModelResponse, ()>>,
-    mutation: Option<(PathBuf, String)>,
+    mutation: Option<Mutation>,
     request: Option<ModelRequest>,
+}
+
+enum Mutation {
+    Write(PathBuf, String),
+    Delete(PathBuf),
 }
 
 impl ReviewerModel for ScriptedModel {
@@ -51,8 +56,10 @@ impl ReviewerModel for ScriptedModel {
 
     fn complete(&mut self, request: &ModelRequest) -> Result<ModelResponse, Self::Error> {
         self.request = Some(request.clone());
-        if let Some((path, content)) = &self.mutation {
-            fs::write(path, content).unwrap();
+        match &self.mutation {
+            Some(Mutation::Write(path, content)) => fs::write(path, content).unwrap(),
+            Some(Mutation::Delete(path)) => fs::remove_file(path).unwrap(),
+            None => {}
         }
         self.response.take().unwrap_or(Err(()))
     }
@@ -325,7 +332,10 @@ fn attempted_mutation_is_policy_violation_even_with_approval() {
     let marker = "MUTATION_SECRET";
     let run = fixture.review_with_model(ScriptedModel {
         response: Some(Ok(response(r#"{"decision":"approved","findings":[]}"#))),
-        mutation: Some((fixture.worktree.path().join("src/file.rs"), marker.into())),
+        mutation: Some(Mutation::Write(
+            fixture.worktree.path().join("src/file.rs"),
+            marker.into(),
+        )),
         request: None,
     });
 
@@ -335,6 +345,83 @@ fn attempted_mutation_is_policy_violation_even_with_approval() {
     let rendered = format!("{error:?} {error}");
     assert!(!rendered.contains(marker));
     assert!(!rendered.contains(fixture.root.to_string_lossy().as_ref()));
+}
+
+#[test]
+fn existing_untracked_content_change_is_detected_with_unchanged_status() {
+    let fixture = Fixture::new();
+    let path = fixture.worktree.path().join("src/untracked.txt");
+    fs::write(&path, "same-size-a").unwrap();
+    let run = fixture.review_with_model(ScriptedModel {
+        response: Some(Ok(response(r#"{"decision":"approved","findings":[]}"#))),
+        mutation: Some(Mutation::Write(path, "same-size-b".into())),
+        request: None,
+    });
+
+    assert_eq!(run.error, Some(ReviewerError::PolicyViolation));
+}
+
+#[test]
+fn deleted_and_new_untracked_files_are_detected() {
+    let fixture = Fixture::new();
+    let existing = fixture.worktree.path().join("src/existing.txt");
+    fs::write(&existing, "existing").unwrap();
+    let deleted = fixture.review_with_model(ScriptedModel {
+        response: Some(Ok(response(r#"{"decision":"approved","findings":[]}"#))),
+        mutation: Some(Mutation::Delete(existing)),
+        request: None,
+    });
+    assert_eq!(deleted.error, Some(ReviewerError::PolicyViolation));
+
+    let created = fixture.review_with_model(ScriptedModel {
+        response: Some(Ok(response(r#"{"decision":"approved","findings":[]}"#))),
+        mutation: Some(Mutation::Write(
+            fixture.worktree.path().join("src/new.txt"),
+            "new".into(),
+        )),
+        request: None,
+    });
+    assert_eq!(created.error, Some(ReviewerError::PolicyViolation));
+}
+
+#[cfg(unix)]
+#[test]
+fn untracked_symlink_is_rejected_without_exposing_target() {
+    let fixture = Fixture::new();
+    let target = fixture.root.join("SECRET_TARGET");
+    fs::write(&target, "SECRET_CONTENT").unwrap();
+    std::os::unix::fs::symlink(&target, fixture.worktree.path().join("src/link")).unwrap();
+
+    let run = fixture.review(r#"{"decision":"approved","findings":[]}"#);
+    assert_eq!(run.error, Some(ReviewerError::MutationInspection));
+    let error = run.error.as_ref().unwrap();
+    let rendered = format!("{error:?} {error}");
+    assert!(!rendered.contains("SECRET_TARGET"));
+    assert!(!rendered.contains("SECRET_CONTENT"));
+    assert!(!rendered.contains(fixture.root.to_string_lossy().as_ref()));
+}
+
+#[test]
+fn oversized_and_excessive_untracked_files_are_typed_errors() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.worktree.path().join("src/large.bin"),
+        vec![b'x'; 1024 * 1024 + 1],
+    )
+    .unwrap();
+    let oversized = fixture.review(r#"{"decision":"approved","findings":[]}"#);
+    assert_eq!(oversized.error, Some(ReviewerError::MutationInspection));
+
+    fs::remove_file(fixture.worktree.path().join("src/large.bin")).unwrap();
+    for index in 0..1025 {
+        fs::write(
+            fixture.worktree.path().join(format!("src/file-{index}")),
+            "x",
+        )
+        .unwrap();
+    }
+    let excessive = fixture.review(r#"{"decision":"approved","findings":[]}"#);
+    assert_eq!(excessive.error, Some(ReviewerError::MutationInspection));
 }
 
 fn git(repository: &Path, arguments: &[&str]) {
