@@ -14,7 +14,8 @@ use crate::{
         task::{TaskContract, TaskStatus},
     },
     model::{
-        Message, MessageRole, ModelLimits, ModelRequest, ModelResponse, ToolCall, ToolDefinition,
+        Message, MessageRole, ModelError, ModelErrorKind, ModelLimits, ModelRequest, ModelResponse,
+        ToolCall, ToolDefinition,
     },
     runner::tools::{StructuredTools, ToolErrorCode, ToolRequest, ToolResult},
 };
@@ -72,7 +73,7 @@ pub enum CheckpointReservation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorkerError {
     Context,
-    Model,
+    Model(ModelErrorKind),
     InvalidModelResponse,
     Tool(ToolErrorCode),
     CheckpointReservation,
@@ -86,7 +87,7 @@ impl fmt::Display for WorkerError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Context => "worker context build failed",
-            Self::Model => "worker model call failed",
+            Self::Model(_) => "worker model call failed",
             Self::InvalidModelResponse => "worker model response is invalid",
             Self::Tool(_) => "worker tool call failed",
             Self::CheckpointReservation => "worker checkpoint reservation failed",
@@ -99,9 +100,15 @@ impl fmt::Display for WorkerError {
 }
 impl std::error::Error for WorkerError {}
 
+impl WorkerModel for crate::openai::OpenAiToolsClient {
+    async fn complete(&mut self, request: &ModelRequest) -> Result<ModelResponse, ModelError> {
+        crate::openai::OpenAiToolsClient::complete(self, request).await
+    }
+}
+
+#[allow(async_fn_in_trait)]
 pub trait WorkerModel {
-    type Error;
-    fn complete(&mut self, request: &ModelRequest) -> Result<ModelResponse, Self::Error>;
+    async fn complete(&mut self, request: &ModelRequest) -> Result<ModelResponse, ModelError>;
 }
 
 pub trait CheckpointStore {
@@ -186,7 +193,7 @@ impl<'a, M: WorkerModel, C: CheckpointStore> Worker<'a, M, C> {
         }
     }
 
-    pub fn run(mut self) -> WorkerRun<M, C> {
+    pub async fn run(mut self) -> WorkerRun<M, C> {
         let deadline = self.config.deadline.min(Duration::from_secs(
             self.contract.limits.timeout_seconds.get() as u64,
         ));
@@ -257,18 +264,30 @@ impl<'a, M: WorkerModel, C: CheckpointStore> Worker<'a, M, C> {
                 self.contract.limits.max_attempts.get() as usize,
                 self.clock.as_ref(),
                 deadline,
-            ) {
+            )
+            .await
+            {
                 Ok(response) => response,
-                Err(stop) => {
-                    let error = (stop == StopReason::ModelError).then_some(WorkerError::Model);
+                Err(CallModelError::Timeout) => {
                     return self.finish(
                         summary,
                         None,
                         usage,
                         artifacts,
                         changed_paths,
-                        stop,
-                        error,
+                        StopReason::Timeout,
+                        None,
+                    );
+                }
+                Err(CallModelError::Model(kind)) => {
+                    return self.finish(
+                        summary,
+                        None,
+                        usage,
+                        artifacts,
+                        changed_paths,
+                        StopReason::ModelError,
+                        Some(WorkerError::Model(kind)),
                     );
                 }
             };
@@ -632,26 +651,33 @@ fn tool_definitions() -> Vec<ToolDefinition> {
     .collect()
 }
 
-fn call_model<M: WorkerModel>(
+enum CallModelError {
+    Timeout,
+    Model(ModelErrorKind),
+}
+
+async fn call_model<M: WorkerModel>(
     model: &mut M,
     request: &ModelRequest,
     attempts: usize,
     clock: &dyn WorkerClock,
     deadline: Duration,
-) -> Result<ModelResponse, StopReason> {
+) -> Result<ModelResponse, CallModelError> {
+    let mut last_error = ModelErrorKind::ProviderUnavailable;
     for _ in 0..attempts {
         if clock.elapsed() >= deadline {
-            return Err(StopReason::Timeout);
+            return Err(CallModelError::Timeout);
         }
-        let response = model.complete(request);
+        let response = model.complete(request).await;
         if clock.elapsed() >= deadline {
-            return Err(StopReason::Timeout);
+            return Err(CallModelError::Timeout);
         }
-        if let Ok(response) = response {
-            return Ok(response);
+        match response {
+            Ok(response) => return Ok(response),
+            Err(error) => last_error = error.kind(),
         }
     }
-    Err(StopReason::ModelError)
+    Err(CallModelError::Model(last_error))
 }
 
 fn add_usage(

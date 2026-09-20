@@ -18,7 +18,9 @@ use ai_team::{
         AllowedPath, MaxAttempts, NonEmptyString, PositiveLimit, TaskContract, TaskLimits,
         TaskStatus,
     },
-    model::{FinishReason, ModelRequest, ModelResponse, ToolCall, Usage},
+    model::{
+        FinishReason, ModelError, ModelErrorKind, ModelRequest, ModelResponse, ToolCall, Usage,
+    },
     runner::{
         git::{GitWorktreeManager, Worktree},
         policy::{ToolPolicy, ToolRole},
@@ -44,21 +46,21 @@ impl WorkerClock for TestClock {
 }
 
 struct ScriptedModel {
-    responses: VecDeque<Result<ModelResponse, ()>>,
+    responses: VecDeque<Result<ModelResponse, ModelError>>,
     advances: VecDeque<Duration>,
     clock: Option<TestClock>,
     calls: usize,
 }
 
 impl WorkerModel for ScriptedModel {
-    type Error = ();
-
-    fn complete(&mut self, _: &ModelRequest) -> Result<ModelResponse, Self::Error> {
+    async fn complete(&mut self, _: &ModelRequest) -> Result<ModelResponse, ModelError> {
         self.calls += 1;
         if let (Some(clock), Some(duration)) = (&self.clock, self.advances.pop_front()) {
             clock.advance(duration);
         }
-        self.responses.pop_front().unwrap_or(Err(()))
+        self.responses
+            .pop_front()
+            .unwrap_or_else(|| Err(ModelError::new(ModelErrorKind::ProviderUnavailable)))
     }
 }
 
@@ -241,7 +243,7 @@ fn call(id: &str, name: &str, arguments: serde_json::Value) -> ToolCall {
     }
 }
 
-fn model(responses: Vec<Result<ModelResponse, ()>>) -> ScriptedModel {
+fn model(responses: Vec<Result<ModelResponse, ModelError>>) -> ScriptedModel {
     ScriptedModel {
         responses: responses.into(),
         advances: VecDeque::new(),
@@ -251,7 +253,7 @@ fn model(responses: Vec<Result<ModelResponse, ()>>) -> ScriptedModel {
 }
 
 fn timed_model(
-    responses: Vec<Result<ModelResponse, ()>>,
+    responses: Vec<Result<ModelResponse, ModelError>>,
     clock: TestClock,
     advances: Vec<Duration>,
 ) -> ScriptedModel {
@@ -272,7 +274,7 @@ fn config(max_turns: u32, deadline: Duration) -> WorkerConfig {
     }
 }
 
-fn run(
+async fn run(
     fixture: &Fixture,
     task: &TaskContract,
     scripted: ScriptedModel,
@@ -292,9 +294,10 @@ fn run(
         config(max_turns, deadline),
     )
     .run()
+    .await
 }
 
-fn run_with_clock(
+async fn run_with_clock(
     fixture: &Fixture,
     task: &TaskContract,
     scripted: ScriptedModel,
@@ -316,10 +319,11 @@ fn run_with_clock(
         clock,
     )
     .run()
+    .await
 }
 
-#[test]
-fn edit_multiple_calls_checkpoint_and_complete_handoff() {
+#[tokio::test]
+async fn edit_multiple_calls_checkpoint_and_complete_handoff() {
     let fixture = Fixture::new();
     let patch = "diff --git a/src/file.txt b/src/file.txt\n--- a/src/file.txt\n+++ b/src/file.txt\n@@ -1 +1 @@\n-old\n+new\n";
     let first = response(
@@ -344,7 +348,8 @@ fn edit_multiple_calls_checkpoint_and_complete_handoff() {
         MemoryCheckpoints::default(),
         4,
         Duration::from_secs(5),
-    );
+    )
+    .await;
 
     assert_eq!(result.handoff.stop_reason, StopReason::Completed);
     assert_eq!(result.handoff.next_status, Some(TaskStatus::SelfCheck));
@@ -359,8 +364,8 @@ fn edit_multiple_calls_checkpoint_and_complete_handoff() {
     );
 }
 
-#[test]
-fn duplicate_call_id_is_not_executed_again() {
+#[tokio::test]
+async fn duplicate_call_id_is_not_executed_again() {
     let fixture = Fixture::new();
     let request = call("same", "request_human", json!({"message":"first"}));
     let mut checkpoints = MemoryCheckpoints::default();
@@ -388,14 +393,15 @@ fn duplicate_call_id_is_not_executed_again() {
         checkpoints,
         3,
         Duration::from_secs(5),
-    );
+    )
+    .await;
     assert_eq!(result.handoff.stop_reason, StopReason::Completed);
     assert_eq!(result.handoff.token_usage.tool_calls, 0);
     assert_eq!(result.checkpoints.saves, 0);
 }
 
-#[test]
-fn budgets_and_turn_limit_stop_loop() {
+#[tokio::test]
+async fn budgets_and_turn_limit_stop_loop() {
     let fixture = Fixture::new();
     for (task, scripted) in [
         (
@@ -426,7 +432,8 @@ fn budgets_and_turn_limit_stop_loop() {
             MemoryCheckpoints::default(),
             2,
             Duration::from_secs(5),
-        );
+        )
+        .await;
         assert_eq!(result.handoff.stop_reason, StopReason::BudgetExhausted);
     }
     let turns = run(
@@ -441,12 +448,13 @@ fn budgets_and_turn_limit_stop_loop() {
         MemoryCheckpoints::default(),
         1,
         Duration::from_secs(5),
-    );
+    )
+    .await;
     assert_eq!(turns.handoff.stop_reason, StopReason::MaxTurns);
 }
 
-#[test]
-fn timeout_model_tool_and_human_stops_are_typed() {
+#[tokio::test]
+async fn timeout_model_tool_and_human_stops_are_typed() {
     let fixture = Fixture::new();
     let task = contract(100, 100, 10);
     let timeout = run(
@@ -456,19 +464,27 @@ fn timeout_model_tool_and_human_stops_are_typed() {
         MemoryCheckpoints::default(),
         2,
         Duration::ZERO,
-    );
+    )
+    .await;
     assert_eq!(timeout.handoff.stop_reason, StopReason::Timeout);
 
     let model_error = run(
         &fixture,
         &task,
-        model(vec![Err(()), Err(())]),
+        model(vec![
+            Err(ModelError::new(ModelErrorKind::RateLimited)),
+            Err(ModelError::new(ModelErrorKind::RateLimited)),
+        ]),
         MemoryCheckpoints::default(),
         2,
         Duration::from_secs(5),
-    );
+    )
+    .await;
     assert_eq!(model_error.handoff.stop_reason, StopReason::ModelError);
-    assert_eq!(model_error.error, Some(WorkerError::Model));
+    assert_eq!(
+        model_error.error,
+        Some(WorkerError::Model(ModelErrorKind::RateLimited))
+    );
 
     let tool_error = run(
         &fixture,
@@ -482,7 +498,8 @@ fn timeout_model_tool_and_human_stops_are_typed() {
         MemoryCheckpoints::default(),
         2,
         Duration::from_secs(5),
-    );
+    )
+    .await;
     assert_eq!(tool_error.handoff.stop_reason, StopReason::ToolError);
     assert!(matches!(tool_error.error, Some(WorkerError::Tool(_))));
 
@@ -498,13 +515,14 @@ fn timeout_model_tool_and_human_stops_are_typed() {
         MemoryCheckpoints::default(),
         2,
         Duration::from_secs(5),
-    );
+    )
+    .await;
     assert_eq!(human.handoff.stop_reason, StopReason::HumanRequested);
     assert_eq!(human.handoff.summary, "review");
 }
 
-#[test]
-fn checkpoint_failure_after_side_effect_is_fatal() {
+#[tokio::test]
+async fn checkpoint_failure_after_side_effect_is_fatal() {
     let fixture = Fixture::new();
     let patch = "diff --git a/src/file.txt b/src/file.txt\n--- a/src/file.txt\n+++ b/src/file.txt\n@@ -1 +1 @@\n-old\n+changed-once\n";
     let result = run(
@@ -522,7 +540,8 @@ fn checkpoint_failure_after_side_effect_is_fatal() {
         },
         3,
         Duration::from_secs(5),
-    );
+    )
+    .await;
     assert_eq!(result.handoff.stop_reason, StopReason::ToolError);
     assert_eq!(result.error, Some(WorkerError::CheckpointCompletion));
     assert_eq!(result.model.calls, 1);
@@ -532,8 +551,8 @@ fn checkpoint_failure_after_side_effect_is_fatal() {
     );
 }
 
-#[test]
-fn late_model_response_is_ignored_even_when_it_claims_completion() {
+#[tokio::test]
+async fn late_model_response_is_ignored_even_when_it_claims_completion() {
     let fixture = Fixture::new();
     let clock = TestClock::default();
     let secret = "LATE_SECRET /absolute/host/path patch-content";
@@ -557,7 +576,8 @@ fn late_model_response_is_ignored_even_when_it_claims_completion() {
         2,
         Duration::from_secs(1),
         clock,
-    );
+    )
+    .await;
 
     assert_eq!(result.handoff.stop_reason, StopReason::Timeout);
     assert_eq!(result.handoff.next_status, None);
@@ -568,8 +588,8 @@ fn late_model_response_is_ignored_even_when_it_claims_completion() {
     assert!(!rendered.contains(fixture.root.to_string_lossy().as_ref()));
 }
 
-#[test]
-fn late_model_tool_call_is_never_executed() {
+#[tokio::test]
+async fn late_model_tool_call_is_never_executed() {
     let fixture = Fixture::new();
     let clock = TestClock::default();
     let patch = "diff --git a/src/file.txt b/src/file.txt\n--- a/src/file.txt\n+++ b/src/file.txt\n@@ -1 +1 @@\n-old\n+must-not-change\n";
@@ -591,7 +611,8 @@ fn late_model_tool_call_is_never_executed() {
         2,
         Duration::from_secs(1),
         clock,
-    );
+    )
+    .await;
 
     assert_eq!(result.handoff.stop_reason, StopReason::Timeout);
     assert_eq!(result.handoff.token_usage.tool_calls, 0);
@@ -602,8 +623,8 @@ fn late_model_tool_call_is_never_executed() {
     );
 }
 
-#[test]
-fn late_tool_is_checkpointed_then_stops_before_second_tool() {
+#[tokio::test]
+async fn late_tool_is_checkpointed_then_stops_before_second_tool() {
     let fixture = Fixture::new();
     let clock = TestClock::default();
     let patch = "diff --git a/src/file.txt b/src/file.txt\n--- a/src/file.txt\n+++ b/src/file.txt\n@@ -1 +1 @@\n-old\n+late-change\n";
@@ -627,7 +648,8 @@ fn late_tool_is_checkpointed_then_stops_before_second_tool() {
         2,
         Duration::from_secs(1),
         clock,
-    );
+    )
+    .await;
 
     assert_eq!(result.handoff.stop_reason, StopReason::Timeout);
     assert_eq!(result.handoff.token_usage.tool_calls, 1);
@@ -640,8 +662,8 @@ fn late_tool_is_checkpointed_then_stops_before_second_tool() {
     );
 }
 
-#[test]
-fn late_human_request_becomes_timeout_after_checkpoint() {
+#[tokio::test]
+async fn late_human_request_becomes_timeout_after_checkpoint() {
     let fixture = Fixture::new();
     let clock = TestClock::default();
     let checkpoints = MemoryCheckpoints {
@@ -665,7 +687,8 @@ fn late_human_request_becomes_timeout_after_checkpoint() {
         2,
         Duration::from_secs(1),
         clock,
-    );
+    )
+    .await;
 
     assert_eq!(result.handoff.stop_reason, StopReason::Timeout);
     assert!(result.handoff.summary.is_empty());
@@ -673,8 +696,8 @@ fn late_human_request_becomes_timeout_after_checkpoint() {
     assert!(result.checkpoints.values.contains_key("late-human"));
 }
 
-#[test]
-fn done_and_sensitive_model_content_are_rejected_without_leak() {
+#[tokio::test]
+async fn done_and_sensitive_model_content_are_rejected_without_leak() {
     let fixture = Fixture::new();
     let secret = "SECRET_MARKER patch /absolute/host/path";
     let result = run(
@@ -689,7 +712,8 @@ fn done_and_sensitive_model_content_are_rejected_without_leak() {
         MemoryCheckpoints::default(),
         2,
         Duration::from_secs(5),
-    );
+    )
+    .await;
     assert_eq!(result.handoff.stop_reason, StopReason::ModelError);
     assert_eq!(result.error, Some(WorkerError::InvalidModelResponse));
     assert!(result.handoff.summary.is_empty());
@@ -722,8 +746,8 @@ fn git_output(repository: &Path, arguments: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().into()
 }
 
-#[test]
-fn in_progress_reservation_stops_without_repeating_side_effect() {
+#[tokio::test]
+async fn in_progress_reservation_stops_without_repeating_side_effect() {
     let fixture = Fixture::new();
     let patch = "diff --git a/src/file.txt b/src/file.txt\n--- a/src/file.txt\n+++ b/src/file.txt\n@@ -1 +1 @@\n-old\n+repeated\n";
     let mut checkpoints = MemoryCheckpoints::default();
@@ -743,7 +767,8 @@ fn in_progress_reservation_stops_without_repeating_side_effect() {
         checkpoints,
         2,
         Duration::from_secs(5),
-    );
+    )
+    .await;
 
     assert_eq!(result.handoff.stop_reason, StopReason::RecoveryRequired);
     assert_eq!(result.error, Some(WorkerError::AmbiguousToolCall));
@@ -754,8 +779,8 @@ fn in_progress_reservation_stops_without_repeating_side_effect() {
     );
 }
 
-#[test]
-fn reservation_is_persisted_before_side_effect() {
+#[tokio::test]
+async fn reservation_is_persisted_before_side_effect() {
     let fixture = Fixture::new();
     let path = fixture.worktree.path().join("src/file.txt");
     let patch = "diff --git a/src/file.txt b/src/file.txt\n--- a/src/file.txt\n+++ b/src/file.txt\n@@ -1 +1 @@\n-old\n+changed\n";
@@ -774,15 +799,16 @@ fn reservation_is_persisted_before_side_effect() {
         },
         1,
         Duration::from_secs(5),
-    );
+    )
+    .await;
 
     assert_eq!(result.checkpoints.reservations, 1);
     assert!(!result.checkpoints.side_effect_seen_at_reserve);
     assert_eq!(result.checkpoints.saves, 1);
 }
 
-#[test]
-fn reservation_failure_stops_before_side_effect() {
+#[tokio::test]
+async fn reservation_failure_stops_before_side_effect() {
     let fixture = Fixture::new();
     let patch = "diff --git a/src/file.txt b/src/file.txt\n--- a/src/file.txt\n+++ b/src/file.txt\n@@ -1 +1 @@\n-old\n+changed\n";
     let result = run(
@@ -800,7 +826,8 @@ fn reservation_failure_stops_before_side_effect() {
         },
         1,
         Duration::from_secs(5),
-    );
+    )
+    .await;
 
     assert_eq!(result.error, Some(WorkerError::CheckpointReservation));
     assert_eq!(result.checkpoints.saves, 0);
@@ -810,8 +837,8 @@ fn reservation_failure_stops_before_side_effect() {
     );
 }
 
-#[test]
-fn usage_is_aggregated_losslessly() {
+#[tokio::test]
+async fn usage_is_aggregated_losslessly() {
     let fixture = Fixture::new();
     let mut first = response(None, vec![call("status", "git_status", json!({}))], 10, 5);
     first.usage.cached_tokens = 3;
@@ -833,7 +860,8 @@ fn usage_is_aggregated_losslessly() {
         MemoryCheckpoints::default(),
         2,
         Duration::from_secs(5),
-    );
+    )
+    .await;
 
     assert_eq!(result.handoff.token_usage.input_tokens, 30);
     assert_eq!(result.handoff.token_usage.cached_tokens, 7);
@@ -843,8 +871,8 @@ fn usage_is_aggregated_losslessly() {
     assert!(result.handoff.token_usage.estimated);
 }
 
-#[test]
-fn usage_overflow_stops_typed() {
+#[tokio::test]
+async fn usage_overflow_stops_typed() {
     let fixture = Fixture::new();
     let mut first = response(None, vec![call("status", "git_status", json!({}))], 1, 1);
     first.latency_ms = u128::MAX;
@@ -862,7 +890,8 @@ fn usage_overflow_stops_typed() {
         MemoryCheckpoints::default(),
         2,
         Duration::from_secs(5),
-    );
+    )
+    .await;
 
     assert_eq!(result.handoff.stop_reason, StopReason::UsageOverflow);
     assert_eq!(result.error, Some(WorkerError::UsageOverflow));

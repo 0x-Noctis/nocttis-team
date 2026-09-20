@@ -16,7 +16,9 @@ use crate::{
         state_machine::{Actor, transition},
         task::{TaskContract, TaskStatus},
     },
-    model::{Message, MessageRole, ModelLimits, ModelRequest, ModelResponse},
+    model::{
+        Message, MessageRole, ModelError, ModelErrorKind, ModelLimits, ModelRequest, ModelResponse,
+    },
     runner::git::{GitWorktreeManager, Worktree},
     store::artifact::ArtifactStore,
 };
@@ -89,7 +91,7 @@ pub enum ReviewerError {
     Git,
     Artifact,
     InputTooLarge,
-    Model,
+    Model(ModelErrorKind),
     ResponseTooLarge,
     InvalidResponse,
     InvalidFinding,
@@ -105,7 +107,7 @@ impl fmt::Display for ReviewerError {
             Self::Git => "review git snapshot failed",
             Self::Artifact => "review evidence unavailable",
             Self::InputTooLarge => "review input exceeds limit",
-            Self::Model => "review model call failed",
+            Self::Model(_) => "review model call failed",
             Self::ResponseTooLarge => "review response exceeds limit",
             Self::InvalidResponse => "review response is invalid",
             Self::InvalidFinding => "review finding is invalid",
@@ -118,9 +120,15 @@ impl fmt::Display for ReviewerError {
 }
 impl std::error::Error for ReviewerError {}
 
+impl ReviewerModel for crate::openai::OpenAiToolsClient {
+    async fn complete(&mut self, request: &ModelRequest) -> Result<ModelResponse, ModelError> {
+        crate::openai::OpenAiToolsClient::complete(self, request).await
+    }
+}
+
+#[allow(async_fn_in_trait)]
 pub trait ReviewerModel {
-    type Error;
-    fn complete(&mut self, request: &ModelRequest) -> Result<ModelResponse, Self::Error>;
+    async fn complete(&mut self, request: &ModelRequest) -> Result<ModelResponse, ModelError>;
 }
 
 pub struct Reviewer<'a, M> {
@@ -158,7 +166,7 @@ impl<'a, M: ReviewerModel> Reviewer<'a, M> {
         }
     }
 
-    pub fn review(
+    pub async fn review(
         mut self,
         sources: &[SourceExcerpt],
         verification: &[VerificationEvidence],
@@ -171,7 +179,7 @@ impl<'a, M: ReviewerModel> Reviewer<'a, M> {
             Ok(request) => request,
             Err(error) => return self.finish(None, Some(error), TokenUsage::default()),
         };
-        let response = self.model.complete(&request);
+        let response = self.model.complete(&request).await;
         let usage = match response.as_ref() {
             Ok(response) => match response_usage(response) {
                 Ok(usage) => usage,
@@ -188,7 +196,13 @@ impl<'a, M: ReviewerModel> Reviewer<'a, M> {
         }
         let response = match response {
             Ok(response) => response,
-            Err(_) => return self.finish(None, Some(ReviewerError::Model), TokenUsage::default()),
+            Err(error) => {
+                return self.finish(
+                    None,
+                    Some(ReviewerError::Model(error.kind())),
+                    TokenUsage::default(),
+                );
+            }
         };
         let decision = match self.parse(response) {
             Ok(decision) => decision,

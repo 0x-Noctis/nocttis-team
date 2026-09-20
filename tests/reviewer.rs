@@ -15,13 +15,13 @@ use ai_team::{
         AllowedPath, MaxAttempts, NonEmptyString, PositiveLimit, TaskContract, TaskLimits,
         TaskStatus,
     },
-    model::{FinishReason, ModelRequest, ModelResponse, Usage},
+    model::{FinishReason, ModelError, ModelErrorKind, ModelRequest, ModelResponse, Usage},
     runner::git::{GitWorktreeManager, Worktree},
     store::artifact::ArtifactStore,
 };
 
 struct ScriptedModel {
-    response: Option<Result<ModelResponse, ()>>,
+    response: Option<Result<ModelResponse, ModelError>>,
     mutation: Option<Mutation>,
     request: Option<ModelRequest>,
 }
@@ -32,16 +32,16 @@ enum Mutation {
 }
 
 impl ReviewerModel for ScriptedModel {
-    type Error = ();
-
-    fn complete(&mut self, request: &ModelRequest) -> Result<ModelResponse, Self::Error> {
+    async fn complete(&mut self, request: &ModelRequest) -> Result<ModelResponse, ModelError> {
         self.request = Some(request.clone());
         match &self.mutation {
             Some(Mutation::Write(path, content)) => fs::write(path, content).unwrap(),
             Some(Mutation::Delete(path)) => fs::remove_file(path).unwrap(),
             None => {}
         }
-        self.response.take().unwrap_or(Err(()))
+        self.response
+            .take()
+            .unwrap_or_else(|| Err(ModelError::new(ModelErrorKind::ProviderUnavailable)))
     }
 }
 
@@ -99,15 +99,16 @@ impl Fixture {
         }
     }
 
-    fn review(&self, body: &str) -> reviewer::ReviewRun<ScriptedModel> {
+    async fn review(&self, body: &str) -> reviewer::ReviewRun<ScriptedModel> {
         self.review_with_model(ScriptedModel {
             response: Some(Ok(response(body))),
             mutation: None,
             request: None,
         })
+        .await
     }
 
-    fn review_with_model(&self, model: ScriptedModel) -> reviewer::ReviewRun<ScriptedModel> {
+    async fn review_with_model(&self, model: ScriptedModel) -> reviewer::ReviewRun<ScriptedModel> {
         Reviewer::new(
             &contract(),
             &handoff(),
@@ -119,6 +120,7 @@ impl Fixture {
             "reasoning",
         )
         .review(&sources(), &evidence())
+        .await
     }
 }
 
@@ -210,11 +212,13 @@ fn text(field: &'static str, value: &str) -> NonEmptyString {
     NonEmptyString::parse(field, value).unwrap()
 }
 
-#[test]
-fn valid_approval_is_read_only_and_moves_to_verify() {
+#[tokio::test]
+async fn valid_approval_is_read_only_and_moves_to_verify() {
     let fixture = Fixture::new();
     let before = fs::read(fixture.worktree.path().join("src/file.rs")).unwrap();
-    let run = fixture.review(r#"{"decision":"approved","findings":[]}"#);
+    let run = fixture
+        .review(r#"{"decision":"approved","findings":[]}"#)
+        .await;
 
     assert_eq!(run.error, None);
     let outcome = run.outcome.unwrap();
@@ -230,12 +234,12 @@ fn valid_approval_is_read_only_and_moves_to_verify() {
     assert!(request.messages[0].content.contains("checksum"));
 }
 
-#[test]
-fn missing_acceptance_criterion_requests_typed_change() {
+#[tokio::test]
+async fn missing_acceptance_criterion_requests_typed_change() {
     let fixture = Fixture::new();
     let run = fixture.review(
         r#"{"decision":"changes_requested","findings":[{"severity":"high","code":"MISSING_CRITERION","message":"Mutation guard lacks coverage","path":"src/file.rs","line":1}]}"#,
-    );
+    ).await;
 
     assert_eq!(run.error, None);
     let outcome = run.outcome.unwrap();
@@ -247,15 +251,15 @@ fn missing_acceptance_criterion_requests_typed_change() {
     ));
 }
 
-#[test]
-fn path_violations_empty_findings_and_approved_findings_are_rejected() {
+#[tokio::test]
+async fn path_violations_empty_findings_and_approved_findings_are_rejected() {
     let fixture = Fixture::new();
     for body in [
         r#"{"decision":"changes_requested","findings":[{"severity":"high","code":"BAD_PATH","message":"Invalid path","path":"../secret","line":1}]}"#,
         r#"{"decision":"changes_requested","findings":[]}"#,
         r#"{"decision":"approved","findings":[{"severity":"low","code":"EXTRA","message":"Unexpected finding","path":"src/file.rs","line":1}]}"#,
     ] {
-        let run = fixture.review(body);
+        let run = fixture.review(body).await;
         assert!(matches!(
             run.error,
             Some(ReviewerError::InvalidFinding | ReviewerError::InvalidResponse)
@@ -264,15 +268,15 @@ fn path_violations_empty_findings_and_approved_findings_are_rejected() {
     }
 }
 
-#[test]
-fn oversized_response_and_finding_count_are_rejected() {
+#[tokio::test]
+async fn oversized_response_and_finding_count_are_rejected() {
     let fixture = Fixture::new();
     let huge = format!(
         r#"{{"decision":"changes_requested","findings":[{{"severity":"high","code":"LARGE","message":"{}","path":"src/file.rs","line":1}}]}}"#,
         "x".repeat(70 * 1024)
     );
     assert_eq!(
-        fixture.review(&huge).error,
+        fixture.review(&huge).await.error,
         Some(ReviewerError::ResponseTooLarge)
     );
 
@@ -284,14 +288,16 @@ fn oversized_response_and_finding_count_are_rejected() {
         })
         .collect::<Vec<_>>()
         .join(",");
-    let run = fixture.review(&format!(
-        r#"{{"decision":"changes_requested","findings":[{findings}]}}"#
-    ));
+    let run = fixture
+        .review(&format!(
+            r#"{{"decision":"changes_requested","findings":[{findings}]}}"#
+        ))
+        .await;
     assert_eq!(run.error, Some(ReviewerError::InvalidResponse));
 }
 
-#[test]
-fn malformed_done_and_secret_body_fail_without_leaks() {
+#[tokio::test]
+async fn malformed_done_and_secret_body_fail_without_leaks() {
     let fixture = Fixture::new();
     let marker = "SECRET_MARKER /absolute/host/path";
     for body in [
@@ -299,7 +305,7 @@ fn malformed_done_and_secret_body_fail_without_leaks() {
         r#"{"decision":"done","findings":[]}"#.to_owned(),
         format!(r#"{{"decision":"approved","findings":[],"secret":"{marker}"}}"#),
     ] {
-        let run = fixture.review(&body);
+        let run = fixture.review(&body).await;
         assert_eq!(run.error, Some(ReviewerError::InvalidResponse));
         let error = run.error.as_ref().unwrap();
         let rendered = format!("{error:?} {error}");
@@ -309,18 +315,20 @@ fn malformed_done_and_secret_body_fail_without_leaks() {
     }
 }
 
-#[test]
-fn attempted_mutation_is_policy_violation_even_with_approval() {
+#[tokio::test]
+async fn attempted_mutation_is_policy_violation_even_with_approval() {
     let fixture = Fixture::new();
     let marker = "MUTATION_SECRET";
-    let run = fixture.review_with_model(ScriptedModel {
-        response: Some(Ok(response(r#"{"decision":"approved","findings":[]}"#))),
-        mutation: Some(Mutation::Write(
-            fixture.worktree.path().join("src/file.rs"),
-            marker.into(),
-        )),
-        request: None,
-    });
+    let run = fixture
+        .review_with_model(ScriptedModel {
+            response: Some(Ok(response(r#"{"decision":"approved","findings":[]}"#))),
+            mutation: Some(Mutation::Write(
+                fixture.worktree.path().join("src/file.rs"),
+                marker.into(),
+            )),
+            request: None,
+        })
+        .await;
 
     assert_eq!(run.error, Some(ReviewerError::PolicyViolation));
     assert!(run.outcome.is_none());
@@ -330,52 +338,60 @@ fn attempted_mutation_is_policy_violation_even_with_approval() {
     assert!(!rendered.contains(fixture.root.to_string_lossy().as_ref()));
 }
 
-#[test]
-fn existing_untracked_content_change_is_detected_with_unchanged_status() {
+#[tokio::test]
+async fn existing_untracked_content_change_is_detected_with_unchanged_status() {
     let fixture = Fixture::new();
     let path = fixture.worktree.path().join("src/untracked.txt");
     fs::write(&path, "same-size-a").unwrap();
-    let run = fixture.review_with_model(ScriptedModel {
-        response: Some(Ok(response(r#"{"decision":"approved","findings":[]}"#))),
-        mutation: Some(Mutation::Write(path, "same-size-b".into())),
-        request: None,
-    });
+    let run = fixture
+        .review_with_model(ScriptedModel {
+            response: Some(Ok(response(r#"{"decision":"approved","findings":[]}"#))),
+            mutation: Some(Mutation::Write(path, "same-size-b".into())),
+            request: None,
+        })
+        .await;
 
     assert_eq!(run.error, Some(ReviewerError::PolicyViolation));
 }
 
-#[test]
-fn deleted_and_new_untracked_files_are_detected() {
+#[tokio::test]
+async fn deleted_and_new_untracked_files_are_detected() {
     let fixture = Fixture::new();
     let existing = fixture.worktree.path().join("src/existing.txt");
     fs::write(&existing, "existing").unwrap();
-    let deleted = fixture.review_with_model(ScriptedModel {
-        response: Some(Ok(response(r#"{"decision":"approved","findings":[]}"#))),
-        mutation: Some(Mutation::Delete(existing)),
-        request: None,
-    });
+    let deleted = fixture
+        .review_with_model(ScriptedModel {
+            response: Some(Ok(response(r#"{"decision":"approved","findings":[]}"#))),
+            mutation: Some(Mutation::Delete(existing)),
+            request: None,
+        })
+        .await;
     assert_eq!(deleted.error, Some(ReviewerError::PolicyViolation));
 
-    let created = fixture.review_with_model(ScriptedModel {
-        response: Some(Ok(response(r#"{"decision":"approved","findings":[]}"#))),
-        mutation: Some(Mutation::Write(
-            fixture.worktree.path().join("src/new.txt"),
-            "new".into(),
-        )),
-        request: None,
-    });
+    let created = fixture
+        .review_with_model(ScriptedModel {
+            response: Some(Ok(response(r#"{"decision":"approved","findings":[]}"#))),
+            mutation: Some(Mutation::Write(
+                fixture.worktree.path().join("src/new.txt"),
+                "new".into(),
+            )),
+            request: None,
+        })
+        .await;
     assert_eq!(created.error, Some(ReviewerError::PolicyViolation));
 }
 
 #[cfg(unix)]
-#[test]
-fn untracked_symlink_is_rejected_without_exposing_target() {
+#[tokio::test]
+async fn untracked_symlink_is_rejected_without_exposing_target() {
     let fixture = Fixture::new();
     let target = fixture.root.join("SECRET_TARGET");
     fs::write(&target, "SECRET_CONTENT").unwrap();
     std::os::unix::fs::symlink(&target, fixture.worktree.path().join("src/link")).unwrap();
 
-    let run = fixture.review(r#"{"decision":"approved","findings":[]}"#);
+    let run = fixture
+        .review(r#"{"decision":"approved","findings":[]}"#)
+        .await;
     assert_eq!(run.error, Some(ReviewerError::MutationInspection));
     let error = run.error.as_ref().unwrap();
     let rendered = format!("{error:?} {error}");
@@ -384,15 +400,17 @@ fn untracked_symlink_is_rejected_without_exposing_target() {
     assert!(!rendered.contains(fixture.root.to_string_lossy().as_ref()));
 }
 
-#[test]
-fn oversized_and_excessive_untracked_files_are_typed_errors() {
+#[tokio::test]
+async fn oversized_and_excessive_untracked_files_are_typed_errors() {
     let fixture = Fixture::new();
     fs::write(
         fixture.worktree.path().join("src/large.bin"),
         vec![b'x'; 1024 * 1024 + 1],
     )
     .unwrap();
-    let oversized = fixture.review(r#"{"decision":"approved","findings":[]}"#);
+    let oversized = fixture
+        .review(r#"{"decision":"approved","findings":[]}"#)
+        .await;
     assert_eq!(oversized.error, Some(ReviewerError::MutationInspection));
 
     fs::remove_file(fixture.worktree.path().join("src/large.bin")).unwrap();
@@ -403,12 +421,14 @@ fn oversized_and_excessive_untracked_files_are_typed_errors() {
         )
         .unwrap();
     }
-    let excessive = fixture.review(r#"{"decision":"approved","findings":[]}"#);
+    let excessive = fixture
+        .review(r#"{"decision":"approved","findings":[]}"#)
+        .await;
     assert_eq!(excessive.error, Some(ReviewerError::MutationInspection));
 }
 
-#[test]
-fn total_untracked_content_over_limit_is_typed_and_sanitized() {
+#[tokio::test]
+async fn total_untracked_content_over_limit_is_typed_and_sanitized() {
     let fixture = Fixture::new();
     let secret = "TOTAL_SECRET_MARKER";
     for index in 0..9 {
@@ -426,7 +446,9 @@ fn total_untracked_content_over_limit_is_typed_and_sanitized() {
         .unwrap();
     }
 
-    let run = fixture.review(r#"{"decision":"approved","findings":[]}"#);
+    let run = fixture
+        .review(r#"{"decision":"approved","findings":[]}"#)
+        .await;
     assert_eq!(run.error, Some(ReviewerError::MutationInspection));
     let error = run.error.as_ref().unwrap();
     let rendered = format!("{error:?} {error}");
@@ -457,18 +479,20 @@ fn git_output(repository: &Path, arguments: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().into()
 }
 
-#[test]
-fn reviewer_run_preserves_usage_losslessly() {
+#[tokio::test]
+async fn reviewer_run_preserves_usage_losslessly() {
     let fixture = Fixture::new();
     let mut model_response = response(r#"{"decision":"approved","findings":[]}"#);
     model_response.usage.cached_tokens = 4;
     model_response.usage.estimated = true;
     model_response.latency_ms = 17;
-    let run = fixture.review_with_model(ScriptedModel {
-        response: Some(Ok(model_response)),
-        mutation: None,
-        request: None,
-    });
+    let run = fixture
+        .review_with_model(ScriptedModel {
+            response: Some(Ok(model_response)),
+            mutation: None,
+            request: None,
+        })
+        .await;
 
     assert_eq!(run.usage.input_tokens, 10);
     assert_eq!(run.usage.cached_tokens, 4);
