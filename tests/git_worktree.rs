@@ -121,6 +121,34 @@ fn valid_patch_applies_and_invalid_patch_leaves_base_branch_unchanged() {
 }
 
 #[test]
+fn command_errors_do_not_expose_paths_or_input_markers() {
+    let fixture = Fixture::new();
+    let manager = fixture.manager();
+    let worktree = manager
+        .create("private-task", "private-branch", &fixture.base)
+        .unwrap();
+    let secret = "NOCTIS_SECRET_PATCH_MARKER";
+    let patch = format!(
+        "diff --git a/{secret}.txt b/{secret}.txt\n--- a/{secret}.txt\n+++ b/{secret}.txt\n@@ -1 +1 @@\n-{secret}\n+changed\n"
+    );
+    let error = manager
+        .apply_patch(&worktree, patch.as_bytes())
+        .unwrap_err();
+    let display = error.to_string();
+    let debug = format!("{error:?}");
+
+    for private in [
+        fixture.repository.to_string_lossy().as_ref(),
+        worktree.path().to_string_lossy().as_ref(),
+        secret,
+        worktree.branch(),
+    ] {
+        assert!(!display.contains(private), "Display leaked {private}");
+        assert!(!debug.contains(private), "Debug leaked {private}");
+    }
+}
+
+#[test]
 fn rejects_invalid_repository_and_malicious_components() {
     let fixture = Fixture::new();
     let invalid = fixture.root.join("not-a-repository");

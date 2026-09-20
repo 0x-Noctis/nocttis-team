@@ -8,51 +8,101 @@ use std::{
 
 const OUTPUT_LIMIT: usize = 1024 * 1024;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GitOperation {
+    ValidateRepository,
+    ValidateBaseCommit,
+    CreateWorktree,
+    ReadHead,
+    ReadStatus,
+    ReadDiff,
+    ApplyPatch,
+    CleanupWorktree,
+    PruneWorktrees,
+    CleanupBranch,
+}
+
+impl fmt::Display for GitOperation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::ValidateRepository => "repository validation",
+            Self::ValidateBaseCommit => "base commit validation",
+            Self::CreateWorktree => "worktree creation",
+            Self::ReadHead => "HEAD read",
+            Self::ReadStatus => "status read",
+            Self::ReadDiff => "diff read",
+            Self::ApplyPatch => "patch application",
+            Self::CleanupWorktree => "worktree cleanup",
+            Self::PruneWorktrees => "worktree prune",
+            Self::CleanupBranch => "branch cleanup",
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommandStatus {
+    Code(i32),
+    Terminated,
+}
+
+impl fmt::Display for CommandStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Code(code) => write!(formatter, "{code}"),
+            Self::Terminated => formatter.write_str("terminated"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutputStream {
+    Stdout,
+    Stderr,
+}
+
+impl fmt::Display for OutputStream {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+        })
+    }
+}
+
 #[derive(Debug)]
 pub enum GitError {
     InvalidInput(&'static str),
-    Io(io::Error),
+    Io,
     CommandFailed {
-        operation: &'static str,
-        status: Option<i32>,
-        stderr: String,
+        operation: GitOperation,
+        status: CommandStatus,
     },
-    OutputTooLarge(&'static str),
+    OutputTooLarge {
+        operation: GitOperation,
+        stream: OutputStream,
+    },
 }
 
 impl fmt::Display for GitError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidInput(message) => write!(formatter, "invalid git input: {message}"),
-            Self::Io(_) => formatter.write_str("git operation failed due to an I/O error"),
-            Self::CommandFailed {
-                operation,
-                status,
-                stderr,
-            } => write!(
-                formatter,
-                "git {operation} failed (status {}): {stderr}",
-                status.map_or_else(|| "unknown".to_owned(), |code| code.to_string())
-            ),
-            Self::OutputTooLarge(operation) => {
-                write!(formatter, "git {operation} exceeded output limit")
+            Self::Io => formatter.write_str("git operation failed due to an I/O error"),
+            Self::CommandFailed { operation, status } => {
+                write!(formatter, "git {operation} failed (status {status})")
+            }
+            Self::OutputTooLarge { operation, stream } => {
+                write!(formatter, "git {operation} {stream} exceeded output limit")
             }
         }
     }
 }
 
-impl std::error::Error for GitError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io(error) => Some(error),
-            _ => None,
-        }
-    }
-}
+impl std::error::Error for GitError {}
 
 impl From<io::Error> for GitError {
-    fn from(error: io::Error) -> Self {
-        Self::Io(error)
+    fn from(_: io::Error) -> Self {
+        Self::Io
     }
 }
 
@@ -96,7 +146,7 @@ impl GitWorktreeManager {
                 .arg(&repository)
                 .args(["rev-parse", "--show-toplevel"]),
             None,
-            "repository validation",
+            GitOperation::ValidateRepository,
         )?;
         let reported_root = path_output(&output)?;
         let repository_root = fs::canonicalize(reported_root)
@@ -142,7 +192,7 @@ impl GitWorktreeManager {
                 .arg(&path)
                 .arg(&base_commit),
             None,
-            "worktree create",
+            GitOperation::CreateWorktree,
         )?;
         let path = fs::canonicalize(path)?;
         if path.parent() != Some(self.worktree_root.as_path()) {
@@ -164,7 +214,7 @@ impl GitWorktreeManager {
                 .arg(&worktree.path)
                 .args(["rev-parse", "HEAD"]),
             None,
-            "read HEAD",
+            GitOperation::ReadHead,
         )?;
         text_output(&output)
     }
@@ -178,7 +228,7 @@ impl GitWorktreeManager {
                 "--untracked-files=all",
             ]),
             None,
-            "status",
+            GitOperation::ReadStatus,
         )?;
         String::from_utf8(output).map_err(|_| GitError::InvalidInput("git status was not UTF-8"))
     }
@@ -193,7 +243,7 @@ impl GitWorktreeManager {
                 .arg(&worktree.base_commit)
                 .arg("--"),
             None,
-            "diff",
+            GitOperation::ReadDiff,
         )
     }
 
@@ -210,7 +260,7 @@ impl GitWorktreeManager {
                 "-",
             ]),
             Some(patch),
-            "apply patch",
+            GitOperation::ApplyPatch,
         )?;
         Ok(())
     }
@@ -228,7 +278,7 @@ impl GitWorktreeManager {
                     .args(["worktree", "remove", "--force"])
                     .arg(&worktree.path),
                 None,
-                "worktree cleanup",
+                GitOperation::CleanupWorktree,
             )?;
         } else {
             run(
@@ -237,7 +287,7 @@ impl GitWorktreeManager {
                     .arg(&self.repository_root)
                     .args(["worktree", "prune"]),
                 None,
-                "worktree prune",
+                GitOperation::PruneWorktrees,
             )?;
         }
         let branch_exists = Command::new("git")
@@ -254,7 +304,7 @@ impl GitWorktreeManager {
                     .args(["branch", "-D", "--"])
                     .arg(&worktree.branch),
                 None,
-                "branch cleanup",
+                GitOperation::CleanupBranch,
             )?;
         }
         Ok(())
@@ -268,7 +318,7 @@ impl GitWorktreeManager {
                 .args(["rev-parse", "--verify", "--end-of-options"])
                 .arg(format!("{commit}^{{commit}}")),
             None,
-            "base commit validation",
+            GitOperation::ValidateBaseCommit,
         )?;
         text_output(&output)
     }
@@ -300,7 +350,7 @@ fn validate_component(value: &str, name: &'static str) -> Result<(), GitError> {
 fn run(
     command: &mut Command,
     stdin: Option<&[u8]>,
-    operation: &'static str,
+    operation: GitOperation,
 ) -> Result<Vec<u8>, GitError> {
     command
         .stdin(if stdin.is_some() {
@@ -330,8 +380,8 @@ fn run(
     }
     let status = child.wait()?;
     let (stdout, stdout_overflow) = join_reader(stdout_reader)?;
-    let (stderr, _) = join_reader(stderr_reader)?;
-    command_result(status, stdout, stderr, stdout_overflow, operation)
+    let (_, stderr_overflow) = join_reader(stderr_reader)?;
+    command_result(status, stdout, stdout_overflow, stderr_overflow, operation)
 }
 
 fn read_limited(mut reader: impl Read) -> io::Result<(Vec<u8>, bool)> {
@@ -356,36 +406,37 @@ fn join_reader(
     reader
         .join()
         .map_err(|_| io::Error::other("git output reader panicked"))?
-        .map_err(GitError::Io)
+        .map_err(|_| GitError::Io)
 }
 
 fn command_result(
     status: ExitStatus,
     stdout: Vec<u8>,
-    stderr: Vec<u8>,
     stdout_overflow: bool,
-    operation: &'static str,
+    stderr_overflow: bool,
+    operation: GitOperation,
 ) -> Result<Vec<u8>, GitError> {
-    if !status.success() {
-        return Err(GitError::CommandFailed {
+    if stderr_overflow {
+        return Err(GitError::OutputTooLarge {
             operation,
-            status: status.code(),
-            stderr: sanitize(&stderr),
+            stream: OutputStream::Stderr,
         });
     }
     if stdout_overflow {
-        return Err(GitError::OutputTooLarge(operation));
+        return Err(GitError::OutputTooLarge {
+            operation,
+            stream: OutputStream::Stdout,
+        });
+    }
+    if !status.success() {
+        return Err(GitError::CommandFailed {
+            operation,
+            status: status
+                .code()
+                .map_or(CommandStatus::Terminated, CommandStatus::Code),
+        });
     }
     Ok(stdout)
-}
-
-fn sanitize(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes)
-        .chars()
-        .filter(|character| !character.is_control() || matches!(character, '\n' | '\r' | '\t'))
-        .collect::<String>()
-        .trim()
-        .to_owned()
 }
 
 fn text_output(output: &[u8]) -> Result<String, GitError> {
@@ -396,4 +447,37 @@ fn text_output(output: &[u8]) -> Result<String, GitError> {
 
 fn path_output(output: &[u8]) -> Result<PathBuf, GitError> {
     text_output(output).map(PathBuf::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stderr_overflow_has_typed_error_without_content() {
+        let (stderr, overflow) =
+            read_limited(io::Cursor::new(vec![b'x'; OUTPUT_LIMIT + 1])).unwrap();
+        assert_eq!(stderr.len(), OUTPUT_LIMIT);
+        assert!(overflow);
+        let status = Command::new("git").arg("--version").status().unwrap();
+        let error = command_result(
+            status,
+            Vec::new(),
+            false,
+            overflow,
+            GitOperation::ApplyPatch,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            GitError::OutputTooLarge {
+                operation: GitOperation::ApplyPatch,
+                stream: OutputStream::Stderr
+            }
+        ));
+        assert_eq!(
+            error.to_string(),
+            "git patch application stderr exceeded output limit"
+        );
+    }
 }
