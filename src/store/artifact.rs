@@ -154,16 +154,33 @@ impl ArtifactStore {
     }
 
     pub fn read(&self, artifact_id: &str) -> Result<Vec<u8>, ArtifactError> {
+        self.read_bounded(artifact_id, self.maximum_size)
+    }
+
+    pub fn read_bounded(
+        &self,
+        artifact_id: &str,
+        maximum_size: u64,
+    ) -> Result<Vec<u8>, ArtifactError> {
         validate_component(artifact_id).map_err(|_| ArtifactError::InvalidArtifactId)?;
         self.ensure_root()?;
         let path = self.artifact_path(artifact_id);
         ensure_regular_file(&path)?;
-        let file = File::open(path).map_err(|_| ArtifactError::Io("read artifact"))?;
+        let file = File::open(&path).map_err(|_| ArtifactError::Io("read artifact"))?;
+        let size_limit = maximum_size.min(self.maximum_size);
+        if file
+            .metadata()
+            .map_err(|_| ArtifactError::Io("read artifact"))?
+            .len()
+            > size_limit
+        {
+            return Err(ArtifactError::TooLarge);
+        }
         let mut bytes = Vec::new();
-        file.take(self.maximum_size.saturating_add(1))
+        file.take(size_limit.saturating_add(1))
             .read_to_end(&mut bytes)
             .map_err(|_| ArtifactError::Io("read artifact"))?;
-        if bytes.len() as u64 > self.maximum_size {
+        if bytes.len() as u64 > size_limit {
             return Err(ArtifactError::TooLarge);
         }
         Ok(bytes)

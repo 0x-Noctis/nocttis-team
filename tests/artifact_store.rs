@@ -55,6 +55,23 @@ fn writes_reads_and_returns_sha256_metadata() {
 }
 
 #[test]
+fn bounded_read_enforces_caller_limit_against_actual_file() {
+    let directory = TestDirectory::new();
+    let store = ArtifactStore::new(&directory.0, 1024).unwrap();
+    store
+        .write("bounded", "report.txt", "text/plain", b"12345", |_| {
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+
+    assert_eq!(
+        store.read_bounded("bounded", 4),
+        Err(ArtifactError::TooLarge)
+    );
+    assert_eq!(store.read_bounded("bounded", 5).unwrap(), b"12345");
+}
+
+#[test]
 fn rejects_oversized_and_unsafe_names_without_partial_files() {
     let directory = TestDirectory::new();
     let store = ArtifactStore::new(&directory.0, 4).unwrap();
