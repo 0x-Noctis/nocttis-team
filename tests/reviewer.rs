@@ -1,24 +1,3 @@
-mod agent {
-    pub mod worker {
-        pub use ai_team::agent::worker::*;
-    }
-}
-mod domain {
-    pub use ai_team::domain::*;
-}
-mod model {
-    pub use ai_team::model::*;
-}
-mod runner {
-    pub use ai_team::runner::*;
-}
-mod store {
-    pub use ai_team::store::*;
-}
-
-#[path = "../src/agent/reviewer.rs"]
-mod reviewer;
-
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -27,6 +6,10 @@ use std::{
 };
 
 use ai_team::{
+    agent::reviewer::{
+        self, ReviewDecision, Reviewer, ReviewerError, ReviewerModel, SourceExcerpt,
+        VerificationEvidence,
+    },
     agent::worker::{StopReason, TokenUsage, WorkerHandoff},
     domain::task::{
         AllowedPath, MaxAttempts, NonEmptyString, PositiveLimit, TaskContract, TaskLimits,
@@ -35,9 +18,6 @@ use ai_team::{
     model::{FinishReason, ModelRequest, ModelResponse, Usage},
     runner::git::{GitWorktreeManager, Worktree},
     store::artifact::ArtifactStore,
-};
-use reviewer::{
-    ReviewDecision, Reviewer, ReviewerError, ReviewerModel, SourceExcerpt, VerificationEvidence,
 };
 
 struct ScriptedModel {
@@ -449,19 +429,6 @@ fn total_untracked_content_over_limit_is_typed_and_sanitized() {
     let rendered = format!("{error:?} {error}");
     assert!(!rendered.contains(secret));
     assert!(!rendered.contains(fixture.root.to_string_lossy().as_ref()));
-}
-
-#[test]
-fn synthetic_overlong_untracked_path_is_typed_and_sanitized() {
-    let secret = "PATH_SECRET_MARKER";
-    let path = format!("{secret}{}", "x".repeat(4097));
-    let error = reviewer::validate_untracked_path(&path).unwrap_err();
-
-    assert_eq!(error, ReviewerError::MutationInspection);
-    let rendered = format!("{error:?} {error}");
-    assert!(!rendered.contains(secret));
-    assert!(!rendered.contains("/absolute/host/path"));
-    assert!(!rendered.contains(&path));
 }
 
 fn git(repository: &Path, arguments: &[&str]) {

@@ -405,7 +405,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
 
 ## Gelombang M2-D — Review, Verify, dan WebApp
 
-- [ ] **M2-011 — Reviewer agent** · Lane B
+- [x] **M2-011 — Reviewer agent** · Lane B
   - Depends On: M2-009
   - Parallel With: M2-012, M2-013
   - Allowed Paths: `src/agent/reviewer.rs`, `tests/reviewer.rs`
@@ -869,3 +869,4 @@ Tambahkan satu baris saat task selesai atau diblokir.
 | 2026-09-20 | M2-009 | Worker turn loop terintegrasi ke production crate dengan deadline pasca-model dan pasca-checkpoint | `cargo test --test worker_loop -- --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo fmt --check`; `git diff --check` | Deadline cooperative; hasil operasi yang kembali terlambat ditolak |
 | 2026-09-20 | M2-012 | Verifier deterministik terintegrasi ke production crate | `cargo test --test verifier -- --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo fmt --check`; `git diff --check` | Verdict berdasarkan exit code; mutasi source menghasilkan policy failure |
 | 2026-09-20 | M2-010 | Task/artifact HTTP API terintegrasi dengan versioned delete dan live SSE bounded | `cargo test --test task_store --test task_api -- --test-threads=1 --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo fmt --check`; `git diff --check` | SSE mendukung heartbeat dan reconnect `Last-Event-ID` tanpa duplikat; CORS mengekspos `x-request-id` |
+| 2026-09-20 | M2-011 | Reviewer read-only terintegrasi dengan bounded mutation snapshot | `cargo test --test reviewer -- --test-threads=1 --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo fmt --check`; `git diff --check` | Test memakai production crate; tracked dan untracked mutation menghasilkan typed policy failure |

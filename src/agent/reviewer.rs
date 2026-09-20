@@ -495,7 +495,7 @@ fn snapshot_untracked(
     Ok(files)
 }
 
-pub(crate) fn validate_untracked_path(value: &str) -> Result<(), ReviewerError> {
+fn validate_untracked_path(value: &str) -> Result<(), ReviewerError> {
     if value.is_empty()
         || value.len() > MAX_UNTRACKED_PATH_BYTES
         || value.starts_with('"')
@@ -592,4 +592,22 @@ fn hex(bytes: &[u8]) -> String {
         let _ = write!(value, "{byte:02x}");
     }
     value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ReviewerError, validate_untracked_path};
+
+    #[test]
+    fn synthetic_overlong_untracked_path_is_typed_and_sanitized() {
+        let secret = "PATH_SECRET_MARKER";
+        let path = format!("{secret}{}", "x".repeat(4097));
+        let error = validate_untracked_path(&path).unwrap_err();
+
+        assert_eq!(error, ReviewerError::MutationInspection);
+        let rendered = format!("{error:?} {error}");
+        assert!(!rendered.contains(secret));
+        assert!(!rendered.contains("/absolute/host/path"));
+        assert!(!rendered.contains(&path));
+    }
 }
