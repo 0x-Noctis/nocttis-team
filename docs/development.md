@@ -17,6 +17,8 @@ Integrator sendiri mengubah tracker, menggabungkan branch, dan menandai task sel
 
 Ikuti setup lokal di [`README.md`](../README.md). Gunakan `.env.example` sebagai daftar variable, simpan nilai lokal hanya di `.env`, dan jangan menyalin secret ke fixture, log, artifact, atau handoff.
 
+Probe memblokir alamat loopback, private, dan link-local secara default. Untuk provider internal tepercaya, set `NOCTIS_PROVIDER_HOST_ALLOWLIST` ke daftar hostname exact yang dipisahkan koma.
+
 ## Validasi
 
 Jalankan command `Verify` pada task. Gate repository lengkap:

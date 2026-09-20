@@ -297,7 +297,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: hasil normal/stream/tool terlihat per capability; secret hanya tampil `configured/missing`; error dapat dipahami.
   - Verify: `npm run check && npm run build`.
 
-- [ ] **M1-011 — Compatibility probe suite** · Lane D
+- [x] **M1-011 — Compatibility probe suite** · Lane D
   - Depends On: M1-006, M1-008, M1-009
   - Parallel With: M1-010
   - Allowed Paths: `tests/support/mock_openai.rs`, `tests/provider_compatibility.rs`, `docs/provider-compatibility.md`
@@ -307,11 +307,11 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
 
 ### Exit Gate M1
 
-- [ ] Provider dibuat dan diedit dari WebApp.
-- [ ] Secret dibaca dari environment dan tidak masuk DB/log/UI.
-- [ ] Probe normal, streaming, dan tool call tersimpan.
-- [ ] Capability verified terlihat di UI.
-- [ ] Full validation lulus.
+- [x] Provider dibuat dan diedit dari WebApp.
+- [x] Secret dibaca dari environment dan tidak masuk DB/log/UI.
+- [x] Probe normal, streaming, dan tool call tersimpan.
+- [x] Capability verified terlihat di UI.
+- [x] Full validation lulus.
 
 ---
 
@@ -861,3 +861,4 @@ Tambahkan satu baris saat task selesai atau diblokir.
 | 2026-09-20 | M1-004, M1-005, M1-007 | Provider store, non-streaming chat client, dan UI provider foundation terintegrasi | `cargo test --test provider_store -- --test-threads=1 --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `npm run check`; `npm run build` | M1-006 tetap terbuka; milestone M1 belum selesai |
 | 2026-09-20 | M1-006, M1-008 | Streaming SSE dan tool-call probe terintegrasi; tool client ter-wire ke production crate | `cargo test --test model_stream --test model_tools`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo fmt --check`; `git diff --check` | `M1-009` kini dapat dimulai; milestone M1 belum selesai |
 | 2026-09-20 | M1-009, M1-010, M1-011A | Provider HTTP API dan halaman Providers terintegrasi; compatibility suite model-level tersedia | `cargo test --test provider_api -- --test-threads=1 --nocapture`; `cargo test --test provider_compatibility -- --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `npm run check`; `npm run build` | Kontrak list memakai page envelope; M1-011 menunggu verifikasi API/persistence |
+| 2026-09-20 | M1-011, Exit Gate M1 | Compatibility API/persistence, SSRF guard, CORS preflight, dan error envelope final lulus | `cargo test --test provider_api -- --test-threads=1 --nocapture`; `cargo test --test provider_compatibility -- --test-threads=1 --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `npm run check`; `npm run build` | Milestone M1 selesai; private provider wajib masuk `NOCTIS_PROVIDER_HOST_ALLOWLIST` |
