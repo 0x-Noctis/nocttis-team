@@ -40,6 +40,7 @@
   <p class="eyebrow">CONTROL PLANE / FOUNDATION</p>
   <h1>AI Team</h1>
   <p class="intro">Validasi koneksi OpenAI-compatible sebelum worker, scheduler, dan Lead Agent dibuat.</p>
+  <a class="providers-link" href="/providers">Kelola providers</a>
 
   <section aria-labelledby="provider-title">
     <div>
@@ -85,6 +86,8 @@
   aside { margin-top: 16px; padding: 18px 22px; display: flex; flex-wrap: wrap; gap: 18px; border-left: 4px solid; }
   .success { background: #102217; border-color: #90e0a8; } .error { background: #291313; border-color: #ff7474; }
   code { color: #90e0a8; }
+  .providers-link { display: inline-block; margin-top: 18px; color: #90e0a8; font-weight: 800; }
+  .providers-link:focus-visible { outline: 3px solid #fff; outline-offset: 3px; }
   .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; margin-top: 72px; background: #303630; border: 1px solid #303630; }
   article { min-height: 190px; padding: 26px; background: #0b0d0c; } article span { color: #687068; font-family: ui-monospace, monospace; } h3 { margin: 36px 0 8px; }
   @media (max-width: 700px) { main { padding-top: 40px; } section { align-items: stretch; flex-direction: column; } .grid { grid-template-columns: 1fr; } }
