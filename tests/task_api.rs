@@ -1,12 +1,12 @@
 use std::{path::PathBuf, time::Duration};
 
-use ai_team::{api, store::artifact::ArtifactStore};
+use ai_team::{api, api::tasks::StartState, store::artifact::ArtifactStore};
 use axum::{Router, http::HeaderValue, middleware};
 use reqwest::{Client, Response, StatusCode};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
-use tokio::{net::TcpListener, task::JoinHandle};
+use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle};
 use uuid::Uuid;
 
 struct Server {
@@ -24,10 +24,23 @@ impl Drop for Server {
 }
 
 async fn server(pool: PgPool) -> Server {
+    sqlx::query("INSERT INTO providers (id,base_url,api_key_env,request_timeout_seconds) VALUES ('api-provider','http://127.0.0.1:1','TEST_API_KEY',1)")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO models (id,provider_id,remote_name,class,context_window,max_output_tokens,claimed_capabilities,verified_capabilities) VALUES ('api-model','api-provider','mock','coding',1000,1000,'{\"chat\":true,\"streaming\":false,\"tools\":true,\"parallel_tools\":false}','{\"chat\":\"unknown\",\"streaming\":\"unknown\",\"tools\":\"unknown\",\"parallel_tools\":\"unknown\"}')")
+        .execute(&pool).await.unwrap();
     let artifact_root = std::env::temp_dir().join(format!("noctis-task-api-{}", Uuid::new_v4()));
     let artifacts = ArtifactStore::new(&artifact_root, 1_048_576).unwrap();
+    let (wake, _receiver) = mpsc::channel(1);
     let app = Router::new()
-        .merge(api::tasks::router(pool, artifacts))
+        .merge(api::tasks::router_with_start(
+            pool,
+            artifacts,
+            Some(StartState {
+                model_id: "api-model".to_owned(),
+                retention_seconds: 60,
+                wake,
+            }),
+        ))
         .fallback(api::error::not_found)
         .layer(api::cors_layer(
             "http://127.0.0.1:5173".parse::<HeaderValue>().unwrap(),
@@ -47,9 +60,17 @@ async fn server(pool: PgPool) -> Server {
 async fn ownership(pool: &PgPool) -> (Uuid, Uuid) {
     let project_id = Uuid::new_v4();
     let run_id = Uuid::new_v4();
+    let repository = std::env::temp_dir().join(format!("noctis-task-repository-{project_id}"));
+    std::fs::create_dir_all(repository.join(".git/refs/heads")).unwrap();
+    std::fs::write(repository.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(
+        repository.join(".git/refs/heads/main"),
+        "0123456789012345678901234567890123456789\n",
+    )
+    .unwrap();
     sqlx::query("INSERT INTO projects (id,name,repository_path) VALUES ($1,'api',$2)")
         .bind(project_id)
-        .bind(format!("/repository/{project_id}"))
+        .bind(repository.to_string_lossy().as_ref())
         .execute(pool)
         .await
         .unwrap();
@@ -361,7 +382,7 @@ async fn canonical_uuid_and_transition_contract(pool: PgPool) {
     .await;
     assert_eq!(invalid.status(), StatusCode::CONFLICT);
 
-    sqlx::query("UPDATE tasks SET status='ASSIGNED' WHERE id='transition'")
+    sqlx::query("UPDATE tasks SET status='READY' WHERE id='transition'")
         .execute(&pool)
         .await
         .unwrap();
@@ -374,6 +395,7 @@ async fn canonical_uuid_and_transition_contract(pool: PgPool) {
     )
     .await;
     assert_eq!(started.status(), StatusCode::OK);
+    assert_eq!(started.json::<Value>().await.unwrap()["status"], "ASSIGNED");
     let cancelled = mutation(
         &server.client,
         reqwest::Method::POST,
@@ -420,7 +442,7 @@ async fn events_sse_reconnect_and_artifacts_redact_internal_paths(pool: PgPool) 
         Some(&task("evidence", project_id, run_id)),
     )
     .await;
-    sqlx::query("UPDATE tasks SET status='ASSIGNED' WHERE id='evidence'")
+    sqlx::query("UPDATE tasks SET status='READY' WHERE id='evidence'")
         .execute(&pool)
         .await
         .unwrap();

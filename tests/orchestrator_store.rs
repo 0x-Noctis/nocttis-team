@@ -1257,3 +1257,251 @@ fn chrono_cutoff() -> i64 {
         .unwrap()
         .as_millis() as i64
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn runtime_failure_recovery_is_legal_at_every_stage(pool: PgPool) {
+    let stages = [
+        (TaskStatus::Assigned, TaskStatus::Ready),
+        (TaskStatus::Running, TaskStatus::Ready),
+        (TaskStatus::SelfCheck, TaskStatus::Ready),
+        (TaskStatus::Review, TaskStatus::Ready),
+        (TaskStatus::Verify, TaskStatus::Ready),
+        (TaskStatus::Integrate, TaskStatus::Ready),
+    ];
+    let (project_id, run_id) = ownership(&pool).await;
+    let repository = TaskRepository::new(pool.clone());
+
+    for (index, (stage, expected)) in stages.into_iter().enumerate() {
+        let task = contract(&format!("failure-stage-{index}"), project_id, run_id, 2);
+        ready(&repository, &task).await;
+        let attempt = repository
+            .claim_ready(2, &claim(task.id.as_str()))
+            .await
+            .unwrap();
+        if stage != TaskStatus::Assigned {
+            repository.start_claimed(attempt.id).await.unwrap();
+        }
+        let path = match stage {
+            TaskStatus::SelfCheck => vec![(TaskStatus::SelfCheck, Actor::Worker)],
+            TaskStatus::Review => vec![
+                (TaskStatus::SelfCheck, Actor::Worker),
+                (TaskStatus::Review, Actor::Worker),
+            ],
+            TaskStatus::Verify => vec![
+                (TaskStatus::SelfCheck, Actor::Worker),
+                (TaskStatus::Review, Actor::Worker),
+                (TaskStatus::Verify, Actor::Reviewer),
+            ],
+            TaskStatus::Integrate => vec![
+                (TaskStatus::SelfCheck, Actor::Worker),
+                (TaskStatus::Review, Actor::Worker),
+                (TaskStatus::Verify, Actor::Reviewer),
+                (TaskStatus::Integrate, Actor::Verifier),
+            ],
+            _ => Vec::new(),
+        };
+        for (to, actor) in path {
+            let current = repository.get(task.id.as_str()).await.unwrap();
+            repository
+                .transition(task.id.as_str(), current.version, to, actor)
+                .await
+                .unwrap();
+        }
+        let before = repository.get(task.id.as_str()).await.unwrap();
+        assert_eq!(before.status, stage);
+        repository
+            .fail_runtime(attempt.id, "orchestrator.test")
+            .await
+            .unwrap();
+        let after = repository.get(task.id.as_str()).await.unwrap();
+        assert_eq!(
+            (after.status, after.version),
+            (expected, before.version + 1)
+        );
+        let event = repository
+            .events(task.id.as_str())
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(
+            (event.from_status, event.to_status),
+            (Some(stage), Some(expected))
+        );
+        assert_eq!(event.actor, Actor::System);
+        assert_eq!(
+            repository.get_attempt(attempt.id).await.unwrap().status,
+            AttemptStatus::Failed
+        );
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn concurrent_dispatch_start_has_exactly_one_owner(pool: PgPool) {
+    let (project_id, run_id) = ownership(&pool).await;
+    let repository = TaskRepository::new(pool.clone());
+    let task = contract("dispatch-owner", project_id, run_id, 2);
+    ready(&repository, &task).await;
+    let attempt = repository
+        .claim_ready(2, &claim(task.id.as_str()))
+        .await
+        .unwrap();
+
+    let (left, right) = tokio::join!(
+        repository.start_claimed(attempt.id),
+        repository.start_claimed(attempt.id)
+    );
+    assert!(matches!(
+        (&left, &right),
+        (Ok(_), Err(StoreError::Conflict(Conflict::Claim)))
+            | (Err(StoreError::Conflict(Conflict::Claim)), Ok(_))
+    ));
+    assert_eq!(
+        repository.get_attempt(attempt.id).await.unwrap().status,
+        AttemptStatus::Running
+    );
+    let stored = repository.get(task.id.as_str()).await.unwrap();
+    assert_eq!((stored.status, stored.version), (TaskStatus::Running, 4));
+    assert_eq!(repository.events(task.id.as_str()).await.unwrap().len(), 4);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn ambiguous_runtime_failure_requires_human_at_every_started_stage(pool: PgPool) {
+    let stages = [
+        TaskStatus::Running,
+        TaskStatus::SelfCheck,
+        TaskStatus::Review,
+        TaskStatus::Verify,
+        TaskStatus::Integrate,
+    ];
+    let (project_id, run_id) = ownership(&pool).await;
+    let repository = TaskRepository::new(pool.clone());
+    for (index, stage) in stages.into_iter().enumerate() {
+        let task = contract(&format!("ambiguous-stage-{index}"), project_id, run_id, 2);
+        ready(&repository, &task).await;
+        let attempt = repository
+            .claim_ready(2, &claim(task.id.as_str()))
+            .await
+            .unwrap();
+        repository.start_claimed(attempt.id).await.unwrap();
+        let path = match stage {
+            TaskStatus::SelfCheck => vec![(TaskStatus::SelfCheck, Actor::Worker)],
+            TaskStatus::Review => vec![
+                (TaskStatus::SelfCheck, Actor::Worker),
+                (TaskStatus::Review, Actor::Worker),
+            ],
+            TaskStatus::Verify => vec![
+                (TaskStatus::SelfCheck, Actor::Worker),
+                (TaskStatus::Review, Actor::Worker),
+                (TaskStatus::Verify, Actor::Reviewer),
+            ],
+            TaskStatus::Integrate => vec![
+                (TaskStatus::SelfCheck, Actor::Worker),
+                (TaskStatus::Review, Actor::Worker),
+                (TaskStatus::Verify, Actor::Reviewer),
+                (TaskStatus::Integrate, Actor::Verifier),
+            ],
+            TaskStatus::Running => Vec::new(),
+            _ => unreachable!(),
+        };
+        for (to, actor) in path {
+            let current = repository.get(task.id.as_str()).await.unwrap();
+            repository
+                .transition(task.id.as_str(), current.version, to, actor)
+                .await
+                .unwrap();
+        }
+        repository
+            .reserve_tool_call(attempt.id, "ambiguous", "apply_patch")
+            .await
+            .unwrap();
+        let before = repository.get(task.id.as_str()).await.unwrap();
+        repository
+            .fail_runtime(attempt.id, "orchestrator.test")
+            .await
+            .unwrap();
+        let after = repository.get(task.id.as_str()).await.unwrap();
+        assert_eq!(
+            (after.status, after.version),
+            (TaskStatus::NeedsHuman, before.version + 1)
+        );
+        let event = repository
+            .events(task.id.as_str())
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(
+            (event.from_status, event.to_status),
+            (Some(stage), Some(TaskStatus::NeedsHuman))
+        );
+        assert_eq!(
+            repository.get_attempt(attempt.id).await.unwrap().status,
+            AttemptStatus::RecoveryRequired
+        );
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn verifier_failure_and_changes_requested_close_attempt_legally(pool: PgPool) {
+    let (project_id, run_id) = ownership(&pool).await;
+    let repository = TaskRepository::new(pool.clone());
+    for (name, final_status, error_code) in [
+        ("verify-failed", TaskStatus::Failed, "verification.failed"),
+        (
+            "changes-ready",
+            TaskStatus::Ready,
+            "review.changes_requested",
+        ),
+    ] {
+        let task = contract(name, project_id, run_id, 2);
+        ready(&repository, &task).await;
+        let attempt = repository.claim_ready(2, &claim(name)).await.unwrap();
+        repository.start_claimed(attempt.id).await.unwrap();
+        for (to, actor) in [
+            (TaskStatus::SelfCheck, Actor::Worker),
+            (TaskStatus::Review, Actor::Worker),
+        ] {
+            let current = repository.get(name).await.unwrap();
+            repository
+                .transition(name, current.version, to, actor)
+                .await
+                .unwrap();
+        }
+        let current = repository.get(name).await.unwrap();
+        if final_status == TaskStatus::Failed {
+            let verify = repository
+                .transition(name, current.version, TaskStatus::Verify, Actor::Reviewer)
+                .await
+                .unwrap();
+            repository
+                .transition(name, verify.version, TaskStatus::Failed, Actor::Verifier)
+                .await
+                .unwrap();
+        } else {
+            let changes = repository
+                .transition(
+                    name,
+                    current.version,
+                    TaskStatus::ChangesRequested,
+                    Actor::Reviewer,
+                )
+                .await
+                .unwrap();
+            repository
+                .transition(name, changes.version, TaskStatus::Ready, Actor::System)
+                .await
+                .unwrap();
+        }
+        let before = repository.get(name).await.unwrap();
+        repository
+            .close_failed_attempt(attempt.id, error_code)
+            .await
+            .unwrap();
+        assert_eq!(repository.get(name).await.unwrap(), before);
+        assert_eq!(
+            repository.get_attempt(attempt.id).await.unwrap().status,
+            AttemptStatus::Failed
+        );
+    }
+}

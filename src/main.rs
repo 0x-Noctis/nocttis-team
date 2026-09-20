@@ -6,12 +6,16 @@ use anyhow::Context;
 use axum::{Json, Router, extract::Extension, http::HeaderValue, middleware, routing::get};
 use serde::Serialize;
 use sqlx::{PgPool, postgres::PgPoolOptions};
+use tokio::sync::mpsc;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
 use crate::config::Config;
+use ai_team::api::tasks::StartState;
 use ai_team::api::{self, AppError, RequestId, request_id};
+use ai_team::orchestrator::{Orchestrator, OrchestratorConfig};
 use ai_team::store::artifact::ArtifactStore;
+use ai_team::store::{provider::ProviderRepository, task::TaskRepository};
 
 #[derive(Serialize)]
 struct Health {
@@ -37,11 +41,37 @@ async fn main() -> anyhow::Result<()> {
         &config.artifacts.root,
         config.artifacts.max_tool_output_bytes as u64,
     )?;
+    let orchestrator_artifacts = ArtifactStore::new(
+        &config.artifacts.root,
+        config.artifacts.max_tool_output_bytes as u64,
+    )?;
+    let (wake, wake_receiver) = mpsc::channel(1);
+    let orchestrator = Orchestrator::new(
+        TaskRepository::new(database.clone()),
+        ProviderRepository::new(database.clone()),
+        orchestrator_artifacts,
+        OrchestratorConfig {
+            worktree_root: config.git.worktree_root.clone(),
+            stale_after_seconds: config.scheduler.stale_after_seconds as i64,
+            retention_lease_seconds: config.scheduler.heartbeat_seconds.max(1) as i64,
+        },
+    );
+    orchestrator.startup_recovery().await?;
 
     let app = Router::new()
         .route("/api/v1/health", get(health))
         .merge(api::providers::router(database.clone()))
-        .merge(api::tasks::router(database.clone(), artifact_store))
+        .merge(api::tasks::router_with_start(
+            database.clone(),
+            artifact_store,
+            Some(StartState {
+                model_id: config.provider.model.clone(),
+                retention_seconds: i64::try_from(config.git.retention_hours)
+                    .unwrap_or(i64::MAX / 3_600)
+                    .saturating_mul(3_600),
+                wake,
+            }),
+        ))
         .fallback(api::error::not_found)
         .layer(Extension(database))
         .layer(TraceLayer::new_for_http())
@@ -53,9 +83,10 @@ async fn main() -> anyhow::Result<()> {
     let address = config.server.bind;
     let listener = tokio::net::TcpListener::bind(address).await?;
     info!(%address, "server listening");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    tokio::select! {
+        result = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal()) => result?,
+        () = orchestrator.run(wake_receiver) => {}
+    }
     Ok(())
 }
 

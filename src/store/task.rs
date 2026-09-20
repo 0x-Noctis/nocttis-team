@@ -503,6 +503,29 @@ impl TaskRepository {
         rows.iter().map(runtime_attempt_from_row).collect()
     }
 
+    pub async fn next_assigned(&self) -> Result<Option<RuntimeAttempt>, StoreError> {
+        let row = attempt_query(
+            "WHERE status='assigned' AND finished_at IS NULL ORDER BY started_at,id LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        row.as_ref().map(runtime_attempt_from_row).transpose()
+    }
+
+    pub async fn project_repository(&self, task_id: &str) -> Result<String, StoreError> {
+        sqlx::query_scalar(
+            "SELECT p.repository_path FROM tasks t
+             JOIN project_runs pr ON pr.id=t.project_run_id
+             JOIN projects p ON p.id=pr.project_id WHERE t.id=$1",
+        )
+        .bind(task_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::Database)?
+        .ok_or(StoreError::NotFound)
+    }
+
     pub async fn update_attempt(
         &self,
         id: Uuid,
@@ -671,6 +694,87 @@ impl TaskRepository {
         .await?;
         transaction.commit().await.map_err(StoreError::Database)?;
         self.get_attempt(attempt_id).await
+    }
+
+    pub async fn fail_runtime(&self, attempt_id: Uuid, error_code: &str) -> Result<(), StoreError> {
+        validate_error_code(Some(error_code))?;
+        let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
+        let row = sqlx::query(
+            "SELECT ar.task_id,ar.status AS attempt_status,t.status::text AS task_status,t.project_run_id
+             FROM agent_runs ar JOIN tasks t ON t.id=ar.task_id
+             WHERE ar.id=$1 FOR UPDATE OF ar,t",
+        )
+        .bind(attempt_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(StoreError::Database)?
+        .ok_or(StoreError::NotFound)?;
+        let task_id = row.get::<String, _>("task_id");
+        let from = row.get::<String, _>("task_status");
+        if matches!(
+            row.get::<String, _>("attempt_status").as_str(),
+            "completed" | "failed" | "recovery_required"
+        ) {
+            transaction.commit().await.map_err(StoreError::Database)?;
+            return Ok(());
+        }
+        let ambiguous: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tool_call_reservations WHERE agent_run_id=$1 AND status='in_progress')")
+            .bind(attempt_id).fetch_one(&mut *transaction).await.map_err(StoreError::Database)?;
+        sqlx::query("UPDATE agent_runs SET status=$2,error_code=$3,heartbeat_at=now(),finished_at=now() WHERE id=$1")
+            .bind(attempt_id)
+            .bind(if ambiguous { "recovery_required" } else { "failed" })
+            .bind(error_code)
+            .execute(&mut *transaction).await.map_err(StoreError::Database)?;
+        if matches!(
+            from.as_str(),
+            "ASSIGNED" | "RUNNING" | "SELF_CHECK" | "REVIEW" | "VERIFY" | "INTEGRATE"
+        ) {
+            let task = task_query("WHERE t.id=$1 FOR UPDATE OF t")
+                .bind(task_id.clone())
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(StoreError::Database)?;
+            let stored = task_from_row(&task)?;
+            let to = recovery_transition(&stored.contract, stored.status, ambiguous)?;
+            sqlx::query(
+                "UPDATE tasks SET status=$2,version=version+1,updated_at=now() WHERE id=$1",
+            )
+            .bind(&task_id)
+            .bind(enum_text(&to)?)
+            .execute(&mut *transaction)
+            .await
+            .map_err(StoreError::Database)?;
+            insert_event(
+                &mut transaction,
+                &stored.contract,
+                Actor::System,
+                stored.status,
+                to,
+            )
+            .await?;
+        }
+        transaction.commit().await.map_err(StoreError::Database)
+    }
+
+    pub async fn close_failed_attempt(
+        &self,
+        attempt_id: Uuid,
+        error_code: &str,
+    ) -> Result<(), StoreError> {
+        validate_error_code(Some(error_code))?;
+        let result = sqlx::query(
+            "UPDATE agent_runs SET status='failed',error_code=$2,heartbeat_at=now(),finished_at=now()
+             WHERE id=$1 AND finished_at IS NULL",
+        )
+        .bind(attempt_id)
+        .bind(error_code)
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::Conflict(Conflict::Claim));
+        }
+        Ok(())
     }
 
     pub async fn recover_stale(

@@ -15,6 +15,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
+use tokio::sync::mpsc;
+use uuid::Uuid;
 
 use crate::{
     api::contracts::task::TaskContractInput,
@@ -22,9 +24,11 @@ use crate::{
         state_machine::Actor,
         task::{TaskContract, TaskStatus},
     },
+    orchestrator::{StartRequest, claim_task},
     store::{
         artifact::ArtifactStore,
         idempotency::{IdempotencyRepository, Reservation},
+        provider::ProviderRepository,
         task::{Conflict, StoreError, StoredTask, TaskRepository},
     },
 };
@@ -39,6 +43,15 @@ pub(crate) struct TaskApiState {
     pub idempotency: IdempotencyRepository,
     pub pool: PgPool,
     pub artifacts: Arc<ArtifactStore>,
+    pub start: Option<StartState>,
+    pub providers: ProviderRepository,
+}
+
+#[derive(Clone)]
+pub struct StartState {
+    pub model_id: String,
+    pub retention_seconds: i64,
+    pub wake: mpsc::Sender<()>,
 }
 
 #[derive(Deserialize)]
@@ -85,11 +98,21 @@ fn default_limit() -> i64 {
 }
 
 pub fn router(pool: PgPool, artifacts: ArtifactStore) -> Router {
+    router_with_start(pool, artifacts, None)
+}
+
+pub fn router_with_start(
+    pool: PgPool,
+    artifacts: ArtifactStore,
+    start: Option<StartState>,
+) -> Router {
     let state = TaskApiState {
         tasks: TaskRepository::new(pool.clone()),
         idempotency: IdempotencyRepository::new(pool.clone()),
-        pool,
+        pool: pool.clone(),
         artifacts: Arc::new(artifacts),
+        start,
+        providers: ProviderRepository::new(pool.clone()),
     };
     Router::new()
         .route("/api/v1/tasks", get(list_tasks).post(create_task))
@@ -240,14 +263,39 @@ async fn start_task(
     headers: HeaderMap,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    transition_task(
-        state,
+    let State(state) = state;
+    let Extension(request_id) = request_id;
+    let Path(id) = path;
+    let body = body(payload, request_id)?;
+    let route = format!("/api/v1/tasks/{id}/start");
+    mutate(
+        &state,
+        &headers,
+        Method::POST,
+        &route,
+        &body,
         request_id,
-        path,
-        headers,
-        payload,
-        "start",
-        TaskStatus::Running,
+        || async {
+            let input: VersionInput = parse(&body, request_id)?;
+            let start = state.start.as_ref().ok_or_else(|| {
+                AppError::conflict(request_id, json!({"task":"orchestrator unavailable"}))
+            })?;
+            let task = claim_task(
+                &state.tasks,
+                &state.providers,
+                StartRequest {
+                    task_id: &id,
+                    expected_version: input.expected_version,
+                    model_id: &start.model_id,
+                    retention_seconds: start.retention_seconds,
+                    attempt_id: Uuid::new_v4(),
+                },
+            )
+            .await
+            .map_err(|error| store_error(error, request_id))?;
+            let _ = start.wake.try_send(());
+            Ok((StatusCode::OK, TaskResponse::from(task)))
+        },
     )
     .await
 }
