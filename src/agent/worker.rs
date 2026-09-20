@@ -6,6 +6,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use crate::{
     context::{BuiltContext, ContextBuilder, ContextError, ContextRequest},
@@ -58,9 +59,16 @@ pub struct TokenUsage {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolCheckpoint {
     pub call_id: String,
-    pub tool: String,
-    pub succeeded: bool,
-    pub error_code: Option<ToolErrorCode>,
+    pub outcome: CheckpointOutcome,
+    pub duration_ms: u64,
+    pub artifact_id: Option<Uuid>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CheckpointOutcome {
+    Succeeded,
+    Failed,
+    TimedOut,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -111,10 +119,20 @@ pub trait WorkerModel {
     async fn complete(&mut self, request: &ModelRequest) -> Result<ModelResponse, ModelError>;
 }
 
+#[allow(async_fn_in_trait)]
 pub trait CheckpointStore {
     type Error;
-    fn reserve(&mut self, call_id: &str, tool: &str) -> Result<CheckpointReservation, Self::Error>;
-    fn complete(&mut self, checkpoint: &ToolCheckpoint) -> Result<(), Self::Error>;
+    async fn reserve(
+        &mut self,
+        agent_run_id: &str,
+        call_id: &str,
+        tool: &str,
+    ) -> Result<CheckpointReservation, Self::Error>;
+    async fn complete(
+        &mut self,
+        agent_run_id: &str,
+        checkpoint: &ToolCheckpoint,
+    ) -> Result<(), Self::Error>;
 }
 
 pub trait WorkerClock {
@@ -406,12 +424,20 @@ impl<'a, M: WorkerModel, C: CheckpointStore> Worker<'a, M, C> {
                         );
                     }
                 };
-                match self.checkpoints.reserve(&call.id, &call.name) {
+                match self
+                    .checkpoints
+                    .reserve(&self.config.agent_run_id, &call.id, &call.name)
+                    .await
+                {
                     Ok(CheckpointReservation::Completed(checkpoint)) => {
                         messages.push(tool_message(
                             &call.id,
-                            checkpoint.succeeded,
-                            checkpoint.error_code,
+                            checkpoint.outcome == CheckpointOutcome::Succeeded,
+                            match checkpoint.outcome {
+                                CheckpointOutcome::Succeeded => None,
+                                CheckpointOutcome::Failed => Some(ToolErrorCode::OperationFailed),
+                                CheckpointOutcome::TimedOut => Some(ToolErrorCode::Timeout),
+                            },
                         ));
                         continue;
                     }
@@ -453,17 +479,32 @@ impl<'a, M: WorkerModel, C: CheckpointStore> Worker<'a, M, C> {
                         );
                     }
                 };
+                let artifact_id = match &request {
+                    ToolRequest::SubmitArtifact { artifact_id, .. } => {
+                        Uuid::parse_str(artifact_id).ok()
+                    }
+                    _ => None,
+                };
                 let execution = self.tools.execute(request);
                 let checkpoint = ToolCheckpoint {
                     call_id: call.id.clone(),
-                    tool: call.name.clone(),
-                    succeeded: execution.result.is_ok(),
-                    error_code: execution.result.as_ref().err().map(|error| error.code),
+                    outcome: match execution.result.as_ref().err().map(|error| error.code) {
+                        None => CheckpointOutcome::Succeeded,
+                        Some(ToolErrorCode::Timeout) => CheckpointOutcome::TimedOut,
+                        Some(_) => CheckpointOutcome::Failed,
+                    },
+                    duration_ms: execution.audit.duration_ms,
+                    artifact_id,
                 };
                 if let Ok(result) = &execution.result {
                     collect_result(result, &mut artifacts, &mut changed_paths);
                 }
-                if self.checkpoints.complete(&checkpoint).is_err() {
+                if self
+                    .checkpoints
+                    .complete(&self.config.agent_run_id, &checkpoint)
+                    .await
+                    .is_err()
+                {
                     return self.finish(
                         summary,
                         None,
@@ -493,8 +534,8 @@ impl<'a, M: WorkerModel, C: CheckpointStore> Worker<'a, M, C> {
                 }
                 messages.push(tool_message(
                     &call.id,
-                    checkpoint.succeeded,
-                    checkpoint.error_code,
+                    checkpoint.outcome == CheckpointOutcome::Succeeded,
+                    execution.result.as_ref().err().map(|error| error.code),
                 ));
                 context_dirty = true;
                 match execution.result {

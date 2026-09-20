@@ -10,8 +10,8 @@ use std::{
 
 use ai_team::{
     agent::worker::{
-        CheckpointReservation, CheckpointStore, StopReason, ToolCheckpoint, Worker, WorkerClock,
-        WorkerConfig, WorkerError, WorkerModel, WorkerRun,
+        CheckpointOutcome, CheckpointReservation, CheckpointStore, StopReason, ToolCheckpoint,
+        Worker, WorkerClock, WorkerConfig, WorkerError, WorkerModel, WorkerRun,
     },
     context::{ContextBuilder, ContextLimits},
     domain::task::{
@@ -80,7 +80,12 @@ struct MemoryCheckpoints {
 impl CheckpointStore for MemoryCheckpoints {
     type Error = ();
 
-    fn reserve(&mut self, call_id: &str, tool: &str) -> Result<CheckpointReservation, Self::Error> {
+    async fn reserve(
+        &mut self,
+        _: &str,
+        call_id: &str,
+        tool: &str,
+    ) -> Result<CheckpointReservation, Self::Error> {
         self.reservations += 1;
         if let Some(path) = &self.observe_path {
             self.side_effect_seen_at_reserve =
@@ -99,7 +104,7 @@ impl CheckpointStore for MemoryCheckpoints {
         Ok(CheckpointReservation::New)
     }
 
-    fn complete(&mut self, checkpoint: &ToolCheckpoint) -> Result<(), Self::Error> {
+    async fn complete(&mut self, _: &str, checkpoint: &ToolCheckpoint) -> Result<(), Self::Error> {
         self.saves += 1;
         if self.fail_complete {
             return Err(());
@@ -373,9 +378,9 @@ async fn duplicate_call_id_is_not_executed_again() {
         "same".into(),
         ToolCheckpoint {
             call_id: "same".into(),
-            tool: "request_human".into(),
-            succeeded: true,
-            error_code: None,
+            outcome: CheckpointOutcome::Succeeded,
+            duration_ms: 0,
+            artifact_id: None,
         },
     );
     let result = run(

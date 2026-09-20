@@ -5,6 +5,9 @@ use serde_json::Value;
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
 use uuid::Uuid;
 
+use crate::agent::worker::{
+    CheckpointOutcome, CheckpointReservation, CheckpointStore, ToolCheckpoint,
+};
 use crate::domain::{
     state_machine::{Actor, TransitionError, recovery_transition, transition},
     task::{
@@ -113,6 +116,85 @@ pub struct Page<T> {
 #[derive(Clone)]
 pub struct TaskRepository {
     pool: PgPool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckpointPersistenceError {
+    Conflict,
+    Failure,
+}
+
+impl CheckpointStore for TaskRepository {
+    type Error = CheckpointPersistenceError;
+
+    async fn reserve(
+        &mut self,
+        agent_run_id: &str,
+        call_id: &str,
+        _tool: &str,
+    ) -> Result<CheckpointReservation, Self::Error> {
+        let agent_run_id =
+            Uuid::parse_str(agent_run_id).map_err(|_| CheckpointPersistenceError::Failure)?;
+        match self
+            .reserve_tool_call(agent_run_id, call_id)
+            .await
+            .map_err(map_checkpoint_error)?
+        {
+            ToolCallReservation::New => Ok(CheckpointReservation::New),
+            ToolCallReservation::InProgress => Ok(CheckpointReservation::InProgress),
+            ToolCallReservation::Completed(metadata) => Ok(CheckpointReservation::Completed(
+                checkpoint_from_metadata(call_id, metadata)?,
+            )),
+        }
+    }
+
+    async fn complete(
+        &mut self,
+        agent_run_id: &str,
+        checkpoint: &ToolCheckpoint,
+    ) -> Result<(), Self::Error> {
+        let agent_run_id =
+            Uuid::parse_str(agent_run_id).map_err(|_| CheckpointPersistenceError::Failure)?;
+        let duration_ms = i64::try_from(checkpoint.duration_ms)
+            .map_err(|_| CheckpointPersistenceError::Failure)?;
+        let metadata = ToolCallMetadata {
+            outcome: match checkpoint.outcome {
+                CheckpointOutcome::Succeeded => ToolOutcome::Succeeded,
+                CheckpointOutcome::Failed => ToolOutcome::Failed,
+                CheckpointOutcome::TimedOut => ToolOutcome::TimedOut,
+            },
+            duration_ms,
+            artifact_id: checkpoint.artifact_id,
+        };
+        self.complete_tool_call(agent_run_id, &checkpoint.call_id, &metadata)
+            .await
+            .map_err(map_checkpoint_error)?;
+        Ok(())
+    }
+}
+
+fn checkpoint_from_metadata(
+    call_id: &str,
+    metadata: ToolCallMetadata,
+) -> Result<ToolCheckpoint, CheckpointPersistenceError> {
+    Ok(ToolCheckpoint {
+        call_id: call_id.to_owned(),
+        outcome: match metadata.outcome {
+            ToolOutcome::Succeeded => CheckpointOutcome::Succeeded,
+            ToolOutcome::Failed => CheckpointOutcome::Failed,
+            ToolOutcome::TimedOut => CheckpointOutcome::TimedOut,
+        },
+        duration_ms: u64::try_from(metadata.duration_ms)
+            .map_err(|_| CheckpointPersistenceError::Failure)?,
+        artifact_id: metadata.artifact_id,
+    })
+}
+
+fn map_checkpoint_error(error: StoreError) -> CheckpointPersistenceError {
+    match error {
+        StoreError::Conflict(Conflict::ToolCall) => CheckpointPersistenceError::Conflict,
+        _ => CheckpointPersistenceError::Failure,
+    }
 }
 
 impl TaskRepository {

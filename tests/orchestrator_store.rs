@@ -4,6 +4,7 @@ use std::{
 };
 
 use ai_team::{
+    agent::worker::{CheckpointOutcome, CheckpointReservation, CheckpointStore, ToolCheckpoint},
     domain::{
         state_machine::Actor,
         task::{
@@ -18,7 +19,7 @@ use ai_team::{
             RecoveryDisposition, RuntimeAttempt, ToolCallMetadata, ToolCallReservation,
             ToolOutcome, Usage,
         },
-        task::{Conflict, StoreError, TaskRepository},
+        task::{CheckpointPersistenceError, Conflict, StoreError, TaskRepository},
     },
 };
 use sqlx::{PgPool, Row};
@@ -283,6 +284,80 @@ async fn tool_reservation_is_new_in_progress_completed_and_idempotent(pool: PgPo
             .unwrap(),
         ToolCallReservation::Completed(metadata)
     );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn production_checkpoint_adapter_is_lossless_concurrent_and_typed(pool: PgPool) {
+    let (project_id, run_id) = ownership(&pool).await;
+    let repository = TaskRepository::new(pool.clone());
+    let task = contract("checkpoint-adapter", project_id, run_id, 2);
+    ready(&repository, &task).await;
+    let attempt = repository
+        .claim_ready(2, &claim(task.id.as_str()))
+        .await
+        .unwrap();
+    let agent_run_id = attempt.id.to_string();
+
+    let mut first = repository.clone();
+    let mut second = repository.clone();
+    let first_id = agent_run_id.clone();
+    let second_id = agent_run_id.clone();
+    let (first_result, second_result) = tokio::join!(
+        first.reserve(&first_id, "concurrent", "apply_patch"),
+        second.reserve(&second_id, "concurrent", "apply_patch")
+    );
+    let reservations = [first_result.unwrap(), second_result.unwrap()];
+    assert_eq!(
+        reservations
+            .iter()
+            .filter(|value| **value == CheckpointReservation::New)
+            .count(),
+        1
+    );
+    assert_eq!(
+        reservations
+            .iter()
+            .filter(|value| **value == CheckpointReservation::InProgress)
+            .count(),
+        1
+    );
+
+    let artifact_id = Uuid::new_v4();
+    let checkpoint = ToolCheckpoint {
+        call_id: "concurrent".to_owned(),
+        outcome: CheckpointOutcome::TimedOut,
+        duration_ms: 42,
+        artifact_id: Some(artifact_id),
+    };
+    let mut adapter = repository.clone();
+    adapter.complete(&agent_run_id, &checkpoint).await.unwrap();
+    adapter.complete(&agent_run_id, &checkpoint).await.unwrap();
+    assert_eq!(
+        adapter
+            .reserve(&agent_run_id, "concurrent", "different_tool")
+            .await
+            .unwrap(),
+        CheckpointReservation::Completed(checkpoint.clone())
+    );
+
+    let mismatch = ToolCheckpoint {
+        outcome: CheckpointOutcome::Failed,
+        ..checkpoint
+    };
+    assert_eq!(
+        adapter.complete(&agent_run_id, &mismatch).await,
+        Err(CheckpointPersistenceError::Conflict)
+    );
+    let row = sqlx::query(
+        "SELECT outcome,duration_ms,artifact_id FROM tool_call_reservations WHERE agent_run_id=$1 AND call_id='concurrent'",
+    )
+    .bind(attempt.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row.get::<String, _>("outcome"), "timed_out");
+    assert_eq!(row.get::<i64, _>("duration_ms"), 42);
+    assert_eq!(row.get::<Uuid, _>("artifact_id"), artifact_id);
 }
 
 #[sqlx::test(migrations = "./migrations")]
