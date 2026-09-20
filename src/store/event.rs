@@ -30,7 +30,9 @@ pub struct AgentAttempt {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AttemptStatus {
+    Assigned,
     Running,
+    RecoveryRequired,
     Completed,
     Failed,
 }
@@ -38,7 +40,9 @@ pub enum AttemptStatus {
 impl AttemptStatus {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
+            Self::Assigned => "assigned",
             Self::Running => "running",
+            Self::RecoveryRequired => "recovery_required",
             Self::Completed => "completed",
             Self::Failed => "failed",
         }
@@ -46,7 +50,9 @@ impl AttemptStatus {
 
     pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
+            "assigned" => Some(Self::Assigned),
             "running" => Some(Self::Running),
+            "recovery_required" => Some(Self::RecoveryRequired),
             "completed" => Some(Self::Completed),
             "failed" => Some(Self::Failed),
             _ => None,
@@ -81,6 +87,30 @@ pub struct ClaimAttempt {
     pub branch: String,
     pub base_commit: String,
     pub retention_seconds: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DispatchClaim {
+    pub id: Uuid,
+    pub role: NonEmptyString,
+    pub provider_id: NonEmptyString,
+    pub model_id: NonEmptyString,
+    pub branch: String,
+    pub base_commit: String,
+    pub retention_seconds: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecoveryDisposition {
+    Requeued,
+    RecoveryRequired,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecoveryResult {
+    pub attempt_id: Uuid,
+    pub task_id: NonEmptyString,
+    pub disposition: RecoveryDisposition,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -14,8 +14,9 @@ use ai_team::{
     store::{
         artifact::ArtifactStore,
         event::{
-            ArtifactRecord, AttemptStatus, AttemptUpdate, ClaimAttempt, RuntimeAttempt,
-            ToolCallMetadata, ToolCallReservation, ToolOutcome, Usage,
+            ArtifactRecord, AttemptStatus, AttemptUpdate, ClaimAttempt, DispatchClaim,
+            RecoveryDisposition, RuntimeAttempt, ToolCallMetadata, ToolCallReservation,
+            ToolOutcome, Usage,
         },
         task::{Conflict, StoreError, TaskRepository},
     },
@@ -92,6 +93,18 @@ fn claim(task_id: &str) -> ClaimAttempt {
     }
 }
 
+fn dispatch(id: Uuid) -> DispatchClaim {
+    DispatchClaim {
+        id,
+        role: text("role", "worker"),
+        provider_id: text("provider_id", "provider"),
+        model_id: text("model_id", "registry-model-id"),
+        branch: "runtime-branch".to_owned(),
+        base_commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+        retention_seconds: 3600,
+    }
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn concurrent_ready_claim_has_one_winner(pool: PgPool) {
     let (project_id, run_id) = ownership(&pool).await;
@@ -112,7 +125,7 @@ async fn concurrent_ready_claim_has_one_winner(pool: PgPool) {
     ));
     assert_eq!(
         repository.get(task.id.as_str()).await.unwrap().status,
-        TaskStatus::Running
+        TaskStatus::Assigned
     );
     assert_eq!(
         repository
@@ -123,7 +136,7 @@ async fn concurrent_ready_claim_has_one_winner(pool: PgPool) {
         1
     );
     let events = repository.events(task.id.as_str()).await.unwrap();
-    assert_eq!(events.last().unwrap().to_status, Some(TaskStatus::Running));
+    assert_eq!(events.last().unwrap().to_status, Some(TaskStatus::Assigned));
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -417,7 +430,7 @@ async fn max_attempt_atomic_rollback_and_cascade(pool: PgPool) {
         TaskStatus::Ready
     );
 
-    sqlx::query("ALTER TABLE agent_runs ADD CONSTRAINT reject_claim_test CHECK (status <> 'running') NOT VALID").execute(&pool).await.unwrap();
+    sqlx::query("ALTER TABLE agent_runs ADD CONSTRAINT reject_claim_test CHECK (status <> 'assigned') NOT VALID").execute(&pool).await.unwrap();
     let other = contract("rollback", project_id, run_id, 1);
     ready(&repository, &other).await;
     assert!(matches!(
@@ -448,4 +461,263 @@ async fn max_attempt_atomic_rollback_and_cascade(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!((attempts, reservations, usage), (0, 0, 0));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn assigned_start_has_exact_events_versions_and_registry_model(pool: PgPool) {
+    let (project_id, run_id) = ownership(&pool).await;
+    let repository = TaskRepository::new(pool.clone());
+    let task = contract("start", project_id, run_id, 2);
+    ready(&repository, &task).await;
+    let attempt = repository
+        .claim_ready(2, &claim(task.id.as_str()))
+        .await
+        .unwrap();
+    assert_eq!(attempt.status, AttemptStatus::Assigned);
+    assert_eq!(repository.get(task.id.as_str()).await.unwrap().version, 3);
+
+    let started = repository.start_claimed(attempt.id).await.unwrap();
+    assert_eq!(started.status, AttemptStatus::Running);
+    let stored = repository.get(task.id.as_str()).await.unwrap();
+    assert_eq!((stored.status, stored.version), (TaskStatus::Running, 4));
+    let events = repository.events(task.id.as_str()).await.unwrap();
+    assert_eq!(events[2].to_status, Some(TaskStatus::Assigned));
+    assert_eq!(events[3].to_status, Some(TaskStatus::Running));
+
+    let rollback_task = contract("start-rollback", project_id, run_id, 2);
+    ready(&repository, &rollback_task).await;
+    let rollback_attempt = repository
+        .claim_ready(2, &claim(rollback_task.id.as_str()))
+        .await
+        .unwrap();
+    sqlx::query("ALTER TABLE agent_runs ADD CONSTRAINT reject_start_test CHECK (status <> 'running') NOT VALID")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        repository.start_claimed(rollback_attempt.id).await,
+        Err(StoreError::Database(_))
+    ));
+    assert_eq!(
+        repository
+            .get_attempt(rollback_attempt.id)
+            .await
+            .unwrap()
+            .status,
+        AttemptStatus::Assigned
+    );
+    let rollback = repository.get(rollback_task.id.as_str()).await.unwrap();
+    assert_eq!(
+        (rollback.status, rollback.version),
+        (TaskStatus::Assigned, 3)
+    );
+    assert_eq!(
+        repository
+            .events(rollback_task.id.as_str())
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn concurrent_claim_next_has_one_winner_and_priority_order(pool: PgPool) {
+    let (project_id, run_id) = ownership(&pool).await;
+    let repository = TaskRepository::new(pool.clone());
+    let low = contract("low-priority", project_id, run_id, 2);
+    let high = contract("high-priority", project_id, run_id, 2);
+    ready(&repository, &low).await;
+    ready(&repository, &high).await;
+    sqlx::query("UPDATE tasks SET priority=10 WHERE id=$1")
+        .bind(high.id.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let high_attempt = repository
+        .claim_next_ready(&dispatch(Uuid::new_v4()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(high_attempt.task_id, high.id);
+    let high_attempt = repository.list_attempts(high.id.as_str()).await.unwrap();
+    assert_eq!(high_attempt[0].model_id.as_str(), "registry-model-id");
+
+    let left_claim = dispatch(Uuid::new_v4());
+    let right_claim = dispatch(Uuid::new_v4());
+    let (left, right) = tokio::join!(
+        repository.claim_next_ready(&left_claim),
+        repository.claim_next_ready(&right_claim)
+    );
+    let winners = [left.unwrap(), right.unwrap()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    assert_eq!(winners.len(), 1);
+    assert_eq!(winners[0].task_id, low.id);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn selector_skips_task_at_max_attempts(pool: PgPool) {
+    let (project_id, run_id) = ownership(&pool).await;
+    let repository = TaskRepository::new(pool.clone());
+    let exhausted = contract("exhausted", project_id, run_id, 1);
+    let eligible = contract("eligible", project_id, run_id, 1);
+    ready(&repository, &exhausted).await;
+    ready(&repository, &eligible).await;
+    sqlx::query("UPDATE tasks SET priority=10 WHERE id=$1")
+        .bind(exhausted.id.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+    repository
+        .claim_ready(2, &claim(exhausted.id.as_str()))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tasks SET status='READY',version=version+1 WHERE id=$1")
+        .bind(exhausted.id.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let selected = repository
+        .claim_next_ready(&dispatch(Uuid::new_v4()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(selected.task_id, eligible.id);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn stale_assigned_and_running_recover_once(pool: PgPool) {
+    let (project_id, run_id) = ownership(&pool).await;
+    let repository = TaskRepository::new(pool.clone());
+    let assigned_task = contract("stale-assigned", project_id, run_id, 2);
+    ready(&repository, &assigned_task).await;
+    let assigned = repository
+        .claim_ready(2, &claim(assigned_task.id.as_str()))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE agent_runs SET heartbeat_at=now()-interval '1 hour' WHERE id=$1")
+        .bind(assigned.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let cutoff = chrono_cutoff();
+    let left_repository = repository.clone();
+    let right_repository = repository.clone();
+    let (left, right) = tokio::join!(
+        left_repository.recover_stale(cutoff),
+        right_repository.recover_stale(cutoff)
+    );
+    let recovered = [left.unwrap(), right.unwrap()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    assert_eq!(recovered.len(), 1);
+    let recovered = &recovered[0];
+    assert_eq!(recovered.disposition, RecoveryDisposition::Requeued);
+    assert_eq!(
+        repository
+            .get(assigned_task.id.as_str())
+            .await
+            .unwrap()
+            .status,
+        TaskStatus::Ready
+    );
+    assert!(repository.recover_stale(cutoff).await.unwrap().is_none());
+
+    let running_task = contract("stale-running", project_id, run_id, 2);
+    ready(&repository, &running_task).await;
+    let running = repository
+        .claim_ready(2, &claim(running_task.id.as_str()))
+        .await
+        .unwrap();
+    repository.start_claimed(running.id).await.unwrap();
+    sqlx::query("UPDATE agent_runs SET heartbeat_at=now()-interval '1 hour' WHERE id=$1")
+        .bind(running.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    repository.recover_stale(cutoff).await.unwrap().unwrap();
+    let events = repository.events(running_task.id.as_str()).await.unwrap();
+    assert_eq!(events[4].to_status, Some(TaskStatus::Failed));
+    assert_eq!(events[5].to_status, Some(TaskStatus::Ready));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn ambiguous_reservation_is_not_replayed_and_retention_is_idempotent(pool: PgPool) {
+    let (project_id, run_id) = ownership(&pool).await;
+    let repository = TaskRepository::new(pool.clone());
+    let task = contract("ambiguous", project_id, run_id, 2);
+    ready(&repository, &task).await;
+    let attempt = repository
+        .claim_ready(2, &claim(task.id.as_str()))
+        .await
+        .unwrap();
+    repository.start_claimed(attempt.id).await.unwrap();
+    repository
+        .reserve_tool_call(attempt.id, "call")
+        .await
+        .unwrap();
+    sqlx::query("UPDATE agent_runs SET heartbeat_at=now()-interval '1 hour' WHERE id=$1")
+        .bind(attempt.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let recovered = repository
+        .recover_stale(chrono_cutoff())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.disposition, RecoveryDisposition::RecoveryRequired);
+    assert_eq!(
+        (
+            repository.get_attempt(attempt.id).await.unwrap().status,
+            repository
+                .get_attempt(attempt.id)
+                .await
+                .unwrap()
+                .finished_unix_ms
+                .is_some()
+        ),
+        (AttemptStatus::RecoveryRequired, true)
+    );
+    assert!(
+        repository
+            .recover_stale(chrono_cutoff())
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    sqlx::query(
+        "UPDATE agent_runs SET status='failed',finished_at=now(),retain_until=now() WHERE id=$1",
+    )
+    .bind(attempt.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(repository.retention_due().await.unwrap().len(), 1);
+    assert!(
+        repository
+            .complete_retention_cleanup(attempt.id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repository
+            .complete_retention_cleanup(attempt.id)
+            .await
+            .unwrap()
+    );
+    assert!(repository.retention_due().await.unwrap().is_empty());
+}
+
+fn chrono_cutoff() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
 }
