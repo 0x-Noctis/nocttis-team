@@ -93,6 +93,18 @@ pub trait CheckpointStore {
     fn save(&mut self, checkpoint: &ToolCheckpoint) -> Result<(), Self::Error>;
 }
 
+pub trait WorkerClock {
+    fn elapsed(&self) -> Duration;
+}
+
+struct SystemClock(Instant);
+
+impl WorkerClock for SystemClock {
+    fn elapsed(&self) -> Duration {
+        self.0.elapsed()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct WorkerConfig {
     pub agent_run_id: String,
@@ -109,6 +121,7 @@ pub struct Worker<'a, M, C> {
     model: M,
     checkpoints: C,
     config: WorkerConfig,
+    clock: Box<dyn WorkerClock + 'a>,
 }
 
 impl<'a, M: WorkerModel, C: CheckpointStore> Worker<'a, M, C> {
@@ -121,6 +134,29 @@ impl<'a, M: WorkerModel, C: CheckpointStore> Worker<'a, M, C> {
         checkpoints: C,
         config: WorkerConfig,
     ) -> Self {
+        Self::with_clock(
+            contract,
+            status,
+            context,
+            tools,
+            model,
+            checkpoints,
+            config,
+            SystemClock(Instant::now()),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_clock(
+        contract: &'a TaskContract,
+        status: TaskStatus,
+        context: &'a ContextBuilder<'a>,
+        tools: &'a StructuredTools<'a>,
+        model: M,
+        checkpoints: C,
+        config: WorkerConfig,
+        clock: impl WorkerClock + 'a,
+    ) -> Self {
         Self {
             contract,
             status,
@@ -129,11 +165,11 @@ impl<'a, M: WorkerModel, C: CheckpointStore> Worker<'a, M, C> {
             model,
             checkpoints,
             config,
+            clock: Box::new(clock),
         }
     }
 
     pub fn run(mut self) -> WorkerRun<M, C> {
-        let started = Instant::now();
         let deadline = self.config.deadline.min(Duration::from_secs(
             self.contract.limits.timeout_seconds.get() as u64,
         ));
@@ -145,7 +181,7 @@ impl<'a, M: WorkerModel, C: CheckpointStore> Worker<'a, M, C> {
         let mut summary = String::new();
 
         for _ in 0..self.config.max_turns {
-            if started.elapsed() >= deadline {
+            if self.deadline_reached(deadline) {
                 return self.finish(
                     summary,
                     None,
@@ -202,11 +238,12 @@ impl<'a, M: WorkerModel, C: CheckpointStore> Worker<'a, M, C> {
                 &mut self.model,
                 &request,
                 self.contract.limits.max_attempts.get() as usize,
-                started,
+                self.clock.as_ref(),
                 deadline,
             ) {
                 Ok(response) => response,
                 Err(stop) => {
+                    let error = (stop == StopReason::ModelError).then_some(WorkerError::Model);
                     return self.finish(
                         summary,
                         None,
@@ -214,7 +251,7 @@ impl<'a, M: WorkerModel, C: CheckpointStore> Worker<'a, M, C> {
                         artifacts,
                         changed_paths,
                         stop,
-                        Some(WorkerError::Model),
+                        error,
                     );
                 }
             };
@@ -294,7 +331,7 @@ impl<'a, M: WorkerModel, C: CheckpointStore> Worker<'a, M, C> {
                         None,
                     );
                 }
-                if started.elapsed() >= deadline {
+                if self.deadline_reached(deadline) {
                     return self.finish(
                         summary,
                         None,
@@ -349,6 +386,17 @@ impl<'a, M: WorkerModel, C: CheckpointStore> Worker<'a, M, C> {
                         Some(WorkerError::Checkpoint),
                     );
                 }
+                if self.deadline_reached(deadline) {
+                    return self.finish(
+                        summary,
+                        None,
+                        usage,
+                        artifacts,
+                        changed_paths,
+                        StopReason::Timeout,
+                        None,
+                    );
+                }
                 if matches!(execution.result, Ok(ToolResult::PatchApplied)) {
                     let status = self.tools.execute(ToolRequest::GitStatus);
                     if let Ok(result) = &status.result {
@@ -397,6 +445,10 @@ impl<'a, M: WorkerModel, C: CheckpointStore> Worker<'a, M, C> {
             StopReason::MaxTurns,
             None,
         )
+    }
+
+    fn deadline_reached(&self, deadline: Duration) -> bool {
+        self.clock.elapsed() >= deadline
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -515,14 +567,18 @@ fn call_model<M: WorkerModel>(
     model: &mut M,
     request: &ModelRequest,
     attempts: usize,
-    started: Instant,
+    clock: &dyn WorkerClock,
     deadline: Duration,
 ) -> Result<ModelResponse, StopReason> {
     for _ in 0..attempts {
-        if started.elapsed() >= deadline {
+        if clock.elapsed() >= deadline {
             return Err(StopReason::Timeout);
         }
-        if let Ok(response) = model.complete(request) {
+        let response = model.complete(request);
+        if clock.elapsed() >= deadline {
+            return Err(StopReason::Timeout);
+        }
+        if let Ok(response) = response {
             return Ok(response);
         }
     }
