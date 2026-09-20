@@ -387,7 +387,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: command arbitrary ditolak; kill process tree saat timeout; stdout/stderr dibatasi dan disimpan sebagai artifact.
   - Verify: timeout, memory/command denial, network denial, dan successful check.
 
-- [ ] **M2-009 — Worker turn loop** · Lane B
+- [x] **M2-009 — Worker turn loop** · Lane B
   - Depends On: M1-008, M2-003, M2-006, M2-007
   - Parallel With: M2-008, M2-010
   - Allowed Paths: `src/agent/worker.rs`, `src/agent/mod.rs`, `tests/worker_loop.rs`
@@ -866,3 +866,4 @@ Tambahkan satu baris saat task selesai atau diblokir.
 | 2026-09-20 | M2-003, M2-004 | Git worktree manager aman dan komponen task fixture terintegrasi | `cargo test --test git_worktree -- --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `npm run check`; `npm run build`; `git diff --check` | M2-005 dan M2-006 menunggu revisi review |
 | 2026-09-20 | M2-006, M2-007 | Context builder bounded dan structured tools terintegrasi ke production crate | `cargo test --test context_builder --test tool_policy -- --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo fmt --check`; `git diff --check` | Timeout filesystem cooperative; M2-005 menunggu dua revisi review |
 | 2026-09-20 | M2-005, M2-008 | Canonical task store dan Docker process runner terintegrasi ke production crate | `cargo test --test task_store -- --test-threads=1 --nocapture`; `cargo test --test process_runner -- --test-threads=1 --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `docker compose config --quiet`; `git diff --check` | Legacy `FAILED_FINAL` dimigrasikan ke `FAILED`; verification runner tidak memiliki host fallback |
+| 2026-09-20 | M2-009 | Worker turn loop terintegrasi ke production crate dengan deadline pasca-model dan pasca-checkpoint | `cargo test --test worker_loop -- --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo fmt --check`; `git diff --check` | Deadline cooperative; hasil operasi yang kembali terlambat ditolak |

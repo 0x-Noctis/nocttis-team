@@ -1,19 +1,3 @@
-mod context {
-    pub use ai_team::context::*;
-}
-mod domain {
-    pub use ai_team::domain::*;
-}
-mod model {
-    pub use ai_team::model::*;
-}
-mod runner {
-    pub use ai_team::runner::*;
-}
-
-#[path = "../src/agent/worker.rs"]
-mod worker;
-
 use std::{
     cell::Cell,
     collections::{HashMap, VecDeque},
@@ -25,6 +9,10 @@ use std::{
 };
 
 use ai_team::{
+    agent::worker::{
+        CheckpointStore, StopReason, ToolCheckpoint, Worker, WorkerClock, WorkerConfig,
+        WorkerError, WorkerModel, WorkerRun,
+    },
     context::{ContextBuilder, ContextLimits},
     domain::task::{
         AllowedPath, MaxAttempts, NonEmptyString, PositiveLimit, TaskContract, TaskLimits,
@@ -39,10 +27,6 @@ use ai_team::{
     store::artifact::ArtifactStore,
 };
 use serde_json::json;
-use worker::{
-    CheckpointStore, StopReason, ToolCheckpoint, Worker, WorkerClock, WorkerConfig, WorkerError,
-    WorkerModel,
-};
 
 #[derive(Clone, Default)]
 struct TestClock(Rc<Cell<Duration>>);
@@ -274,7 +258,7 @@ fn run(
     checkpoints: MemoryCheckpoints,
     max_turns: u32,
     deadline: Duration,
-) -> worker::WorkerRun<ScriptedModel, MemoryCheckpoints> {
+) -> WorkerRun<ScriptedModel, MemoryCheckpoints> {
     let context = fixture.context();
     let tools = fixture.tools();
     Worker::new(
@@ -297,7 +281,7 @@ fn run_with_clock(
     max_turns: u32,
     deadline: Duration,
     clock: TestClock,
-) -> worker::WorkerRun<ScriptedModel, MemoryCheckpoints> {
+) -> WorkerRun<ScriptedModel, MemoryCheckpoints> {
     let context = fixture.context();
     let tools = fixture.tools();
     Worker::with_clock(
