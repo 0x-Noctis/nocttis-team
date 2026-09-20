@@ -1,7 +1,4 @@
-pub mod api;
 mod config;
-pub mod domain;
-pub mod store;
 
 use std::time::Duration;
 
@@ -18,8 +15,8 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
 
-use crate::api::{AppError, RequestId, request_id};
 use crate::config::Config;
+use ai_team::api::{self, AppError, RequestId, request_id};
 
 #[derive(Serialize)]
 struct Health {

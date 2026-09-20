@@ -1,6 +1,6 @@
 use std::{env, future::Future, time::Duration};
 
-use ai_team::{
+use crate::{
     model::{Message, MessageRole, ModelErrorKind, ModelLimits, ModelRequest},
     openai::{OpenAiChatClient, OpenAiStreamClient, OpenAiToolsClient, ToolProbeResult},
 };

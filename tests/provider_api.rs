@@ -11,10 +11,7 @@ use reqwest::Client;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
-pub use ai_team::{domain, store};
-
-#[path = "../src/api/mod.rs"]
-mod api;
+use ai_team::api;
 
 struct Servers {
     api: String,
