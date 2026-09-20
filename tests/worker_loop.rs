@@ -842,6 +842,105 @@ async fn reservation_failure_stops_before_side_effect() {
     );
 }
 
+#[sqlx::test(migrations = "./migrations")]
+async fn production_tool_identity_mismatch_stops_before_execution(pool: sqlx::PgPool) {
+    use ai_team::{
+        domain::state_machine::Actor,
+        store::{event::ClaimAttempt, task::TaskRepository},
+    };
+    use uuid::Uuid;
+
+    let project_id = Uuid::new_v4();
+    let run_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO projects (id,name,repository_path) VALUES ($1,'worker','/repository')",
+    )
+    .bind(project_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO project_runs (id,project_id,objective,status,token_budget) VALUES ($1,$2,'worker','running',100)")
+        .bind(run_id).bind(project_id).execute(&pool).await.unwrap();
+    let mut task = contract(100, 100, 10);
+    task.project_id = text("project_id", &project_id.to_string());
+    task.project_run_id = text("project_run_id", &run_id.to_string());
+    let mut repository = TaskRepository::new(pool);
+    repository.create(&task).await.unwrap();
+    repository
+        .transition(task.id.as_str(), 0, TaskStatus::Planned, Actor::System)
+        .await
+        .unwrap();
+    repository
+        .transition(task.id.as_str(), 1, TaskStatus::Ready, Actor::System)
+        .await
+        .unwrap();
+    let attempt_id = Uuid::new_v4();
+    repository
+        .claim_ready(
+            2,
+            &ClaimAttempt {
+                id: attempt_id,
+                task_id: task.id.clone(),
+                role: task.role.clone(),
+                provider_id: text("provider_id", "provider"),
+                model_id: text("model_id", "model"),
+                branch: "worker-test".into(),
+                base_commit: "0123456789abcdef0123456789abcdef01234567".into(),
+                retention_seconds: 3600,
+            },
+        )
+        .await
+        .unwrap();
+    let agent_run_id = attempt_id.to_string();
+    repository
+        .reserve(&agent_run_id, "patch", "git_status")
+        .await
+        .unwrap();
+    let fixture = Fixture::new();
+    let context = fixture.context();
+    let tools = fixture.tools();
+    let patch = "diff --git a/src/file.txt b/src/file.txt\n--- a/src/file.txt\n+++ b/src/file.txt\n@@ -1 +1 @@\n-old\n+changed\n";
+    for completed in [false, true] {
+        if completed {
+            repository
+                .complete(
+                    &agent_run_id,
+                    &ToolCheckpoint {
+                        call_id: "patch".into(),
+                        outcome: CheckpointOutcome::Succeeded,
+                        duration_ms: 1,
+                        artifact_id: None,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let mut configuration = config(1, Duration::from_secs(5));
+        configuration.agent_run_id = agent_run_id.clone();
+        let result = Worker::new(
+            &task,
+            TaskStatus::Running,
+            &context,
+            &tools,
+            model(vec![Ok(response(
+                None,
+                vec![call("patch", "apply_patch", json!({"patch":patch}))],
+                1,
+                1,
+            ))]),
+            repository.clone(),
+            configuration,
+        )
+        .run()
+        .await;
+        assert_eq!(result.error, Some(WorkerError::CheckpointReservation));
+        assert_eq!(
+            fs::read_to_string(fixture.worktree.path().join("src/file.txt")).unwrap(),
+            "old\n"
+        );
+    }
+}
+
 #[tokio::test]
 async fn usage_is_aggregated_losslessly() {
     let fixture = Fixture::new();

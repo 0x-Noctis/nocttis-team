@@ -253,14 +253,14 @@ async fn tool_reservation_is_new_in_progress_completed_and_idempotent(pool: PgPo
 
     assert_eq!(
         repository
-            .reserve_tool_call(attempt.id, "call-1")
+            .reserve_tool_call(attempt.id, "call-1", "apply_patch")
             .await
             .unwrap(),
         ToolCallReservation::New
     );
     assert_eq!(
         repository
-            .reserve_tool_call(attempt.id, "call-1")
+            .reserve_tool_call(attempt.id, "call-1", "apply_patch")
             .await
             .unwrap(),
         ToolCallReservation::InProgress
@@ -323,6 +323,34 @@ async fn production_checkpoint_adapter_is_lossless_concurrent_and_typed(pool: Pg
     );
 
     let artifact_id = Uuid::new_v4();
+    let stored_tool: String = sqlx::query_scalar("SELECT tool_name FROM tool_call_reservations WHERE agent_run_id=$1 AND call_id='concurrent'")
+        .bind(attempt.id).fetch_one(&pool).await.unwrap();
+    assert_eq!(stored_tool, "apply_patch");
+    assert_eq!(
+        first
+            .reserve(&agent_run_id, "concurrent", "different_tool")
+            .await,
+        Err(CheckpointPersistenceError::ToolIdentityConflict)
+    );
+    let (first_result, second_result) = tokio::join!(
+        first.reserve(&agent_run_id, "different-tools", "apply_patch"),
+        second.reserve(&agent_run_id, "different-tools", "git_status")
+    );
+    let results = [first_result, second_result];
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| **result == Ok(CheckpointReservation::New))
+            .count(),
+        1
+    );
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| **result == Err(CheckpointPersistenceError::ToolIdentityConflict))
+            .count(),
+        1
+    );
     let checkpoint = ToolCheckpoint {
         call_id: "concurrent".to_owned(),
         outcome: CheckpointOutcome::TimedOut,
@@ -334,7 +362,7 @@ async fn production_checkpoint_adapter_is_lossless_concurrent_and_typed(pool: Pg
     adapter.complete(&agent_run_id, &checkpoint).await.unwrap();
     assert_eq!(
         adapter
-            .reserve(&agent_run_id, "concurrent", "different_tool")
+            .reserve(&agent_run_id, "concurrent", "apply_patch")
             .await
             .unwrap(),
         CheckpointReservation::Completed(checkpoint.clone())
@@ -344,6 +372,49 @@ async fn production_checkpoint_adapter_is_lossless_concurrent_and_typed(pool: Pg
         outcome: CheckpointOutcome::Failed,
         ..checkpoint
     };
+    assert_eq!(
+        adapter
+            .reserve(&agent_run_id, "concurrent", "different_tool")
+            .await,
+        Err(CheckpointPersistenceError::ToolIdentityConflict)
+    );
+    let error = repository
+        .reserve_tool_call(attempt.id, "concurrent", "private-tool")
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        StoreError::Conflict(Conflict::ToolIdentity)
+    ));
+    assert_eq!(format!("{error}"), "conflict: ToolIdentity");
+    assert_eq!(format!("{error:?}"), "conflict: ToolIdentity");
+    let error = CheckpointPersistenceError::ToolIdentityConflict;
+    assert_eq!(format!("{error}"), "checkpoint tool identity conflict");
+    assert_eq!(format!("{error:?}"), "ToolIdentityConflict");
+    for invalid in [
+        "".to_owned(),
+        "x".repeat(256),
+        "tool\n".to_owned(),
+        "tool\u{0085}".to_owned(),
+    ] {
+        assert!(
+            repository
+                .reserve_tool_call(attempt.id, "invalid", &invalid)
+                .await
+                .is_err()
+        );
+        assert!(sqlx::query("INSERT INTO tool_call_reservations (agent_run_id,call_id,tool_name) VALUES ($1,'invalid',$2)")
+            .bind(attempt.id).bind(invalid).execute(&pool).await.is_err());
+    }
+    assert!(
+        sqlx::query(
+            "INSERT INTO tool_call_reservations (agent_run_id,call_id) VALUES ($1,'missing-tool')"
+        )
+        .bind(attempt.id)
+        .execute(&pool)
+        .await
+        .is_err()
+    );
     assert_eq!(
         adapter.complete(&agent_run_id, &mismatch).await,
         Err(CheckpointPersistenceError::Conflict)
@@ -356,6 +427,47 @@ async fn production_checkpoint_adapter_is_lossless_concurrent_and_typed(pool: Pg
     .await
     .unwrap();
     assert_eq!(row.get::<String, _>("outcome"), "timed_out");
+    assert_eq!(row.get::<i64, _>("duration_ms"), 42);
+    assert_eq!(row.get::<Uuid, _>("artifact_id"), artifact_id);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn legacy_checkpoint_without_identity_fails_closed(pool: PgPool) {
+    let (project_id, run_id) = ownership(&pool).await;
+    let mut repository = TaskRepository::new(pool.clone());
+    let task = contract("legacy-checkpoint", project_id, run_id, 2);
+    ready(&repository, &task).await;
+    let attempt = repository
+        .claim_ready(2, &claim(task.id.as_str()))
+        .await
+        .unwrap();
+    sqlx::query("ALTER TABLE tool_call_reservations DROP COLUMN tool_name")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let artifact_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO tool_call_reservations (agent_run_id,call_id,status,outcome,duration_ms,artifact_id,completed_at) VALUES ($1,'legacy','completed','succeeded',42,$2,now())")
+        .bind(attempt.id).bind(artifact_id).execute(&pool).await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/0007_checkpoint_tool_identity.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        repository
+            .reserve(&attempt.id.to_string(), "legacy", "apply_patch")
+            .await,
+        Err(CheckpointPersistenceError::ToolIdentityConflict)
+    );
+    let row = sqlx::query(
+        "SELECT outcome,duration_ms,artifact_id FROM tool_call_reservations WHERE agent_run_id=$1",
+    )
+    .bind(attempt.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row.get::<String, _>("outcome"), "succeeded");
     assert_eq!(row.get::<i64, _>("duration_ms"), 42);
     assert_eq!(row.get::<Uuid, _>("artifact_id"), artifact_id);
 }
@@ -473,7 +585,7 @@ async fn max_attempt_atomic_rollback_and_cascade(pool: PgPool) {
         .await
         .unwrap();
     repository
-        .reserve_tool_call(first.id, "cascade-call")
+        .reserve_tool_call(first.id, "cascade-call", "apply_patch")
         .await
         .unwrap();
     repository

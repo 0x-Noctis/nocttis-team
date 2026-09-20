@@ -29,6 +29,7 @@ pub enum Conflict {
     Claim,
     ToolCall,
     RetentionLease,
+    ToolIdentity,
     Usage,
     StaleVersion,
 }
@@ -121,8 +122,21 @@ pub struct TaskRepository {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CheckpointPersistenceError {
     Conflict,
+    ToolIdentityConflict,
     Failure,
 }
+
+impl fmt::Display for CheckpointPersistenceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Conflict => "checkpoint conflict",
+            Self::ToolIdentityConflict => "checkpoint tool identity conflict",
+            Self::Failure => "checkpoint persistence failed",
+        })
+    }
+}
+
+impl Error for CheckpointPersistenceError {}
 
 impl CheckpointStore for TaskRepository {
     type Error = CheckpointPersistenceError;
@@ -131,12 +145,12 @@ impl CheckpointStore for TaskRepository {
         &mut self,
         agent_run_id: &str,
         call_id: &str,
-        _tool: &str,
+        tool: &str,
     ) -> Result<CheckpointReservation, Self::Error> {
         let agent_run_id =
             Uuid::parse_str(agent_run_id).map_err(|_| CheckpointPersistenceError::Failure)?;
         match self
-            .reserve_tool_call(agent_run_id, call_id)
+            .reserve_tool_call(agent_run_id, call_id, tool)
             .await
             .map_err(map_checkpoint_error)?
         {
@@ -192,6 +206,9 @@ fn checkpoint_from_metadata(
 
 fn map_checkpoint_error(error: StoreError) -> CheckpointPersistenceError {
     match error {
+        StoreError::Conflict(Conflict::ToolIdentity) => {
+            CheckpointPersistenceError::ToolIdentityConflict
+        }
         StoreError::Conflict(Conflict::ToolCall) => CheckpointPersistenceError::Conflict,
         _ => CheckpointPersistenceError::Failure,
     }
@@ -764,21 +781,23 @@ impl TaskRepository {
         &self,
         agent_run_id: Uuid,
         call_id: &str,
+        tool_name: &str,
     ) -> Result<ToolCallReservation, StoreError> {
         validate_key(call_id, "call ID")?;
+        validate_key(tool_name, "tool name")?;
         let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
         let active: bool = sqlx::query_scalar("SELECT finished_at IS NULL AND status IN ('assigned','running') FROM agent_runs WHERE id=$1 FOR UPDATE")
             .bind(agent_run_id).fetch_optional(&mut *transaction).await.map_err(StoreError::Database)?.ok_or(StoreError::NotFound)?;
         if !active {
             return Err(StoreError::Conflict(Conflict::ToolCall));
         }
-        let inserted = sqlx::query("INSERT INTO tool_call_reservations (agent_run_id,call_id) VALUES ($1,$2) ON CONFLICT DO NOTHING")
-            .bind(agent_run_id).bind(call_id).execute(&mut *transaction).await.map_err(StoreError::Database)?;
+        let inserted = sqlx::query("INSERT INTO tool_call_reservations (agent_run_id,call_id,tool_name) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING")
+            .bind(agent_run_id).bind(call_id).bind(tool_name).execute(&mut *transaction).await.map_err(StoreError::Database)?;
         transaction.commit().await.map_err(StoreError::Database)?;
         if inserted.rows_affected() == 1 {
             return Ok(ToolCallReservation::New);
         }
-        self.tool_call(agent_run_id, call_id).await
+        self.tool_call(agent_run_id, call_id, Some(tool_name)).await
     }
 
     pub async fn complete_tool_call(
@@ -798,7 +817,7 @@ impl TaskRepository {
         if result.rows_affected() == 1 {
             return Ok(ToolCallReservation::Completed(metadata.clone()));
         }
-        match self.tool_call(agent_run_id, call_id).await? {
+        match self.tool_call(agent_run_id, call_id, None).await? {
             ToolCallReservation::Completed(existing) if existing == *metadata => {
                 Ok(ToolCallReservation::Completed(existing))
             }
@@ -813,10 +832,16 @@ impl TaskRepository {
         &self,
         agent_run_id: Uuid,
         call_id: &str,
+        expected_tool: Option<&str>,
     ) -> Result<ToolCallReservation, StoreError> {
-        let row = sqlx::query("SELECT status,outcome,duration_ms,artifact_id FROM tool_call_reservations WHERE agent_run_id=$1 AND call_id=$2")
+        let row = sqlx::query("SELECT tool_name,status,outcome,duration_ms,artifact_id FROM tool_call_reservations WHERE agent_run_id=$1 AND call_id=$2")
             .bind(agent_run_id).bind(call_id).fetch_optional(&self.pool).await.map_err(StoreError::Database)?
             .ok_or(StoreError::NotFound)?;
+        if expected_tool.is_some()
+            && row.get::<Option<String>, _>("tool_name").as_deref() != expected_tool
+        {
+            return Err(StoreError::Conflict(Conflict::ToolIdentity));
+        }
         if row.get::<String, _>("status") == "in_progress" {
             return Ok(ToolCallReservation::InProgress);
         }
