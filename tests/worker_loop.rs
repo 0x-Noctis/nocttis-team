@@ -10,8 +10,8 @@ use std::{
 
 use ai_team::{
     agent::worker::{
-        CheckpointStore, StopReason, ToolCheckpoint, Worker, WorkerClock, WorkerConfig,
-        WorkerError, WorkerModel, WorkerRun,
+        CheckpointReservation, CheckpointStore, StopReason, ToolCheckpoint, Worker, WorkerClock,
+        WorkerConfig, WorkerError, WorkerModel, WorkerRun,
     },
     context::{ContextBuilder, ContextLimits},
     domain::task::{
@@ -65,26 +65,47 @@ impl WorkerModel for ScriptedModel {
 #[derive(Default)]
 struct MemoryCheckpoints {
     values: HashMap<String, ToolCheckpoint>,
-    fail_save: bool,
-    advance_on_save: Option<(TestClock, Duration)>,
+    in_progress: HashMap<String, String>,
+    fail_reserve: bool,
+    fail_complete: bool,
+    advance_on_complete: Option<(TestClock, Duration)>,
+    reservations: usize,
     saves: usize,
+    observe_path: Option<PathBuf>,
+    side_effect_seen_at_reserve: bool,
 }
 
 impl CheckpointStore for MemoryCheckpoints {
     type Error = ();
 
-    fn completed(&self, call_id: &str) -> Option<ToolCheckpoint> {
-        self.values.get(call_id).cloned()
-    }
-
-    fn save(&mut self, checkpoint: &ToolCheckpoint) -> Result<(), Self::Error> {
-        self.saves += 1;
-        if self.fail_save {
+    fn reserve(&mut self, call_id: &str, tool: &str) -> Result<CheckpointReservation, Self::Error> {
+        self.reservations += 1;
+        if let Some(path) = &self.observe_path {
+            self.side_effect_seen_at_reserve =
+                fs::read_to_string(path).is_ok_and(|content| content != "old\n");
+        }
+        if self.fail_reserve {
             return Err(());
         }
+        if let Some(checkpoint) = self.values.get(call_id) {
+            return Ok(CheckpointReservation::Completed(checkpoint.clone()));
+        }
+        if self.in_progress.contains_key(call_id) {
+            return Ok(CheckpointReservation::InProgress);
+        }
+        self.in_progress.insert(call_id.into(), tool.into());
+        Ok(CheckpointReservation::New)
+    }
+
+    fn complete(&mut self, checkpoint: &ToolCheckpoint) -> Result<(), Self::Error> {
+        self.saves += 1;
+        if self.fail_complete {
+            return Err(());
+        }
+        self.in_progress.remove(&checkpoint.call_id);
         self.values
             .insert(checkpoint.call_id.clone(), checkpoint.clone());
-        if let Some((clock, duration)) = &self.advance_on_save {
+        if let Some((clock, duration)) = &self.advance_on_complete {
             clock.advance(*duration);
         }
         Ok(())
@@ -496,14 +517,14 @@ fn checkpoint_failure_after_side_effect_is_fatal() {
             1,
         ))]),
         MemoryCheckpoints {
-            fail_save: true,
+            fail_complete: true,
             ..MemoryCheckpoints::default()
         },
         3,
         Duration::from_secs(5),
     );
     assert_eq!(result.handoff.stop_reason, StopReason::ToolError);
-    assert_eq!(result.error, Some(WorkerError::Checkpoint));
+    assert_eq!(result.error, Some(WorkerError::CheckpointCompletion));
     assert_eq!(result.model.calls, 1);
     assert_eq!(
         fs::read_to_string(fixture.worktree.path().join("src/file.txt")).unwrap(),
@@ -587,7 +608,7 @@ fn late_tool_is_checkpointed_then_stops_before_second_tool() {
     let clock = TestClock::default();
     let patch = "diff --git a/src/file.txt b/src/file.txt\n--- a/src/file.txt\n+++ b/src/file.txt\n@@ -1 +1 @@\n-old\n+late-change\n";
     let checkpoints = MemoryCheckpoints {
-        advance_on_save: Some((clock.clone(), Duration::from_secs(2))),
+        advance_on_complete: Some((clock.clone(), Duration::from_secs(2))),
         ..MemoryCheckpoints::default()
     };
     let result = run_with_clock(
@@ -624,7 +645,7 @@ fn late_human_request_becomes_timeout_after_checkpoint() {
     let fixture = Fixture::new();
     let clock = TestClock::default();
     let checkpoints = MemoryCheckpoints {
-        advance_on_save: Some((clock.clone(), Duration::from_secs(2))),
+        advance_on_complete: Some((clock.clone(), Duration::from_secs(2))),
         ..MemoryCheckpoints::default()
     };
     let result = run_with_clock(
@@ -699,4 +720,150 @@ fn git_output(repository: &Path, arguments: &[&str]) -> String {
         .unwrap();
     assert!(output.status.success());
     String::from_utf8(output.stdout).unwrap().trim().into()
+}
+
+#[test]
+fn in_progress_reservation_stops_without_repeating_side_effect() {
+    let fixture = Fixture::new();
+    let patch = "diff --git a/src/file.txt b/src/file.txt\n--- a/src/file.txt\n+++ b/src/file.txt\n@@ -1 +1 @@\n-old\n+repeated\n";
+    let mut checkpoints = MemoryCheckpoints::default();
+    checkpoints
+        .in_progress
+        .insert("patch".into(), "apply_patch".into());
+
+    let result = run(
+        &fixture,
+        &contract(100, 100, 10),
+        model(vec![Ok(response(
+            None,
+            vec![call("patch", "apply_patch", json!({"patch":patch}))],
+            1,
+            1,
+        ))]),
+        checkpoints,
+        2,
+        Duration::from_secs(5),
+    );
+
+    assert_eq!(result.handoff.stop_reason, StopReason::RecoveryRequired);
+    assert_eq!(result.error, Some(WorkerError::AmbiguousToolCall));
+    assert_eq!(result.checkpoints.saves, 0);
+    assert_eq!(
+        fs::read_to_string(fixture.worktree.path().join("src/file.txt")).unwrap(),
+        "old\n"
+    );
+}
+
+#[test]
+fn reservation_is_persisted_before_side_effect() {
+    let fixture = Fixture::new();
+    let path = fixture.worktree.path().join("src/file.txt");
+    let patch = "diff --git a/src/file.txt b/src/file.txt\n--- a/src/file.txt\n+++ b/src/file.txt\n@@ -1 +1 @@\n-old\n+changed\n";
+    let result = run(
+        &fixture,
+        &contract(100, 100, 10),
+        model(vec![Ok(response(
+            None,
+            vec![call("patch", "apply_patch", json!({"patch":patch}))],
+            1,
+            1,
+        ))]),
+        MemoryCheckpoints {
+            observe_path: Some(path),
+            ..MemoryCheckpoints::default()
+        },
+        1,
+        Duration::from_secs(5),
+    );
+
+    assert_eq!(result.checkpoints.reservations, 1);
+    assert!(!result.checkpoints.side_effect_seen_at_reserve);
+    assert_eq!(result.checkpoints.saves, 1);
+}
+
+#[test]
+fn reservation_failure_stops_before_side_effect() {
+    let fixture = Fixture::new();
+    let patch = "diff --git a/src/file.txt b/src/file.txt\n--- a/src/file.txt\n+++ b/src/file.txt\n@@ -1 +1 @@\n-old\n+changed\n";
+    let result = run(
+        &fixture,
+        &contract(100, 100, 10),
+        model(vec![Ok(response(
+            None,
+            vec![call("patch", "apply_patch", json!({"patch":patch}))],
+            1,
+            1,
+        ))]),
+        MemoryCheckpoints {
+            fail_reserve: true,
+            ..MemoryCheckpoints::default()
+        },
+        1,
+        Duration::from_secs(5),
+    );
+
+    assert_eq!(result.error, Some(WorkerError::CheckpointReservation));
+    assert_eq!(result.checkpoints.saves, 0);
+    assert_eq!(
+        fs::read_to_string(fixture.worktree.path().join("src/file.txt")).unwrap(),
+        "old\n"
+    );
+}
+
+#[test]
+fn usage_is_aggregated_losslessly() {
+    let fixture = Fixture::new();
+    let mut first = response(None, vec![call("status", "git_status", json!({}))], 10, 5);
+    first.usage.cached_tokens = 3;
+    first.usage.estimated = true;
+    first.latency_ms = 7;
+    let mut done = response(
+        Some(r#"{"summary":"done","status":"self_check"}"#),
+        Vec::new(),
+        20,
+        6,
+    );
+    done.usage.cached_tokens = 4;
+    done.latency_ms = 11;
+
+    let result = run(
+        &fixture,
+        &contract(100, 100, 10),
+        model(vec![Ok(first), Ok(done)]),
+        MemoryCheckpoints::default(),
+        2,
+        Duration::from_secs(5),
+    );
+
+    assert_eq!(result.handoff.token_usage.input_tokens, 30);
+    assert_eq!(result.handoff.token_usage.cached_tokens, 7);
+    assert_eq!(result.handoff.token_usage.output_tokens, 11);
+    assert_eq!(result.handoff.token_usage.tool_calls, 1);
+    assert_eq!(result.handoff.token_usage.latency_ms, 18);
+    assert!(result.handoff.token_usage.estimated);
+}
+
+#[test]
+fn usage_overflow_stops_typed() {
+    let fixture = Fixture::new();
+    let mut first = response(None, vec![call("status", "git_status", json!({}))], 1, 1);
+    first.latency_ms = u128::MAX;
+    let second = response(
+        Some(r#"{"summary":"done","status":"self_check"}"#),
+        Vec::new(),
+        1,
+        1,
+    );
+
+    let result = run(
+        &fixture,
+        &contract(100, 100, 10),
+        model(vec![Ok(first), Ok(second)]),
+        MemoryCheckpoints::default(),
+        2,
+        Duration::from_secs(5),
+    );
+
+    assert_eq!(result.handoff.stop_reason, StopReason::UsageOverflow);
+    assert_eq!(result.error, Some(WorkerError::UsageOverflow));
 }

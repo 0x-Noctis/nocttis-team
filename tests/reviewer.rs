@@ -164,8 +164,11 @@ fn handoff() -> WorkerHandoff {
         artifacts: vec!["verification".into()],
         token_usage: TokenUsage {
             input_tokens: 10,
+            cached_tokens: 0,
             output_tokens: 5,
             tool_calls: 1,
+            latency_ms: 1,
+            estimated: false,
         },
         stop_reason: StopReason::Completed,
     }
@@ -452,4 +455,25 @@ fn git_output(repository: &Path, arguments: &[&str]) -> String {
         .unwrap();
     assert!(output.status.success());
     String::from_utf8(output.stdout).unwrap().trim().into()
+}
+
+#[test]
+fn reviewer_run_preserves_usage_losslessly() {
+    let fixture = Fixture::new();
+    let mut model_response = response(r#"{"decision":"approved","findings":[]}"#);
+    model_response.usage.cached_tokens = 4;
+    model_response.usage.estimated = true;
+    model_response.latency_ms = 17;
+    let run = fixture.review_with_model(ScriptedModel {
+        response: Some(Ok(model_response)),
+        mutation: None,
+        request: None,
+    });
+
+    assert_eq!(run.usage.input_tokens, 10);
+    assert_eq!(run.usage.cached_tokens, 4);
+    assert_eq!(run.usage.output_tokens, 5);
+    assert_eq!(run.usage.tool_calls, 0);
+    assert_eq!(run.usage.latency_ms, 17);
+    assert!(run.usage.estimated);
 }

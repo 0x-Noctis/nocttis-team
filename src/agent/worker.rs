@@ -15,7 +15,6 @@ use crate::{
     },
     model::{
         Message, MessageRole, ModelLimits, ModelRequest, ModelResponse, ToolCall, ToolDefinition,
-        Usage,
     },
     runner::tools::{StructuredTools, ToolErrorCode, ToolRequest, ToolResult},
 };
@@ -29,6 +28,8 @@ pub enum StopReason {
     Timeout,
     ModelError,
     ToolError,
+    RecoveryRequired,
+    UsageOverflow,
     HumanRequested,
 }
 
@@ -46,8 +47,11 @@ pub struct WorkerHandoff {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct TokenUsage {
     pub input_tokens: u64,
+    pub cached_tokens: u64,
     pub output_tokens: u64,
     pub tool_calls: u64,
+    pub latency_ms: u128,
+    pub estimated: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -59,12 +63,22 @@ pub struct ToolCheckpoint {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CheckpointReservation {
+    New,
+    Completed(ToolCheckpoint),
+    InProgress,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorkerError {
     Context,
     Model,
     InvalidModelResponse,
     Tool(ToolErrorCode),
-    Checkpoint,
+    CheckpointReservation,
+    CheckpointCompletion,
+    AmbiguousToolCall,
+    UsageOverflow,
     InvalidTransition,
 }
 
@@ -75,7 +89,10 @@ impl fmt::Display for WorkerError {
             Self::Model => "worker model call failed",
             Self::InvalidModelResponse => "worker model response is invalid",
             Self::Tool(_) => "worker tool call failed",
-            Self::Checkpoint => "worker checkpoint persistence failed",
+            Self::CheckpointReservation => "worker checkpoint reservation failed",
+            Self::CheckpointCompletion => "worker checkpoint completion failed",
+            Self::AmbiguousToolCall => "worker tool call outcome requires recovery",
+            Self::UsageOverflow => "worker usage overflow",
             Self::InvalidTransition => "worker handoff transition is invalid",
         })
     }
@@ -89,8 +106,8 @@ pub trait WorkerModel {
 
 pub trait CheckpointStore {
     type Error;
-    fn completed(&self, call_id: &str) -> Option<ToolCheckpoint>;
-    fn save(&mut self, checkpoint: &ToolCheckpoint) -> Result<(), Self::Error>;
+    fn reserve(&mut self, call_id: &str, tool: &str) -> Result<CheckpointReservation, Self::Error>;
+    fn complete(&mut self, checkpoint: &ToolCheckpoint) -> Result<(), Self::Error>;
 }
 
 pub trait WorkerClock {
@@ -255,16 +272,30 @@ impl<'a, M: WorkerModel, C: CheckpointStore> Worker<'a, M, C> {
                     );
                 }
             };
-            if add_usage(&mut usage, response.usage, self.contract) {
-                return self.finish(
-                    summary,
-                    None,
-                    usage,
-                    artifacts,
-                    changed_paths,
-                    StopReason::BudgetExhausted,
-                    None,
-                );
+            match add_usage(&mut usage, &response, self.contract) {
+                Ok(false) => {}
+                Ok(true) => {
+                    return self.finish(
+                        summary,
+                        None,
+                        usage,
+                        artifacts,
+                        changed_paths,
+                        StopReason::BudgetExhausted,
+                        None,
+                    );
+                }
+                Err(error) => {
+                    return self.finish(
+                        summary,
+                        None,
+                        usage,
+                        artifacts,
+                        changed_paths,
+                        StopReason::UsageOverflow,
+                        Some(error),
+                    );
+                }
             }
             if let Some(text) = response
                 .content
@@ -342,15 +373,6 @@ impl<'a, M: WorkerModel, C: CheckpointStore> Worker<'a, M, C> {
                         None,
                     );
                 }
-                if let Some(checkpoint) = self.checkpoints.completed(&call.id) {
-                    messages.push(tool_message(
-                        &call.id,
-                        checkpoint.succeeded,
-                        checkpoint.error_code,
-                    ));
-                    continue;
-                }
-                usage.tool_calls += 1;
                 let request = match parse_tool_call(&call) {
                     Ok(request) => request,
                     Err(error) => {
@@ -365,6 +387,53 @@ impl<'a, M: WorkerModel, C: CheckpointStore> Worker<'a, M, C> {
                         );
                     }
                 };
+                match self.checkpoints.reserve(&call.id, &call.name) {
+                    Ok(CheckpointReservation::Completed(checkpoint)) => {
+                        messages.push(tool_message(
+                            &call.id,
+                            checkpoint.succeeded,
+                            checkpoint.error_code,
+                        ));
+                        continue;
+                    }
+                    Ok(CheckpointReservation::InProgress) => {
+                        return self.finish(
+                            summary,
+                            None,
+                            usage,
+                            artifacts,
+                            changed_paths,
+                            StopReason::RecoveryRequired,
+                            Some(WorkerError::AmbiguousToolCall),
+                        );
+                    }
+                    Ok(CheckpointReservation::New) => {}
+                    Err(_) => {
+                        return self.finish(
+                            summary,
+                            None,
+                            usage,
+                            artifacts,
+                            changed_paths,
+                            StopReason::ToolError,
+                            Some(WorkerError::CheckpointReservation),
+                        );
+                    }
+                }
+                usage.tool_calls = match usage.tool_calls.checked_add(1) {
+                    Some(value) => value,
+                    None => {
+                        return self.finish(
+                            summary,
+                            None,
+                            usage,
+                            artifacts,
+                            changed_paths,
+                            StopReason::UsageOverflow,
+                            Some(WorkerError::UsageOverflow),
+                        );
+                    }
+                };
                 let execution = self.tools.execute(request);
                 let checkpoint = ToolCheckpoint {
                     call_id: call.id.clone(),
@@ -375,7 +444,7 @@ impl<'a, M: WorkerModel, C: CheckpointStore> Worker<'a, M, C> {
                 if let Ok(result) = &execution.result {
                     collect_result(result, &mut artifacts, &mut changed_paths);
                 }
-                if self.checkpoints.save(&checkpoint).is_err() {
+                if self.checkpoints.complete(&checkpoint).is_err() {
                     return self.finish(
                         summary,
                         None,
@@ -383,7 +452,7 @@ impl<'a, M: WorkerModel, C: CheckpointStore> Worker<'a, M, C> {
                         artifacts,
                         changed_paths,
                         StopReason::ToolError,
-                        Some(WorkerError::Checkpoint),
+                        Some(WorkerError::CheckpointCompletion),
                     );
                 }
                 if self.deadline_reached(deadline) {
@@ -585,11 +654,37 @@ fn call_model<M: WorkerModel>(
     Err(StopReason::ModelError)
 }
 
-fn add_usage(total: &mut TokenUsage, usage: Usage, contract: &TaskContract) -> bool {
-    total.input_tokens = total.input_tokens.saturating_add(usage.input_tokens);
-    total.output_tokens = total.output_tokens.saturating_add(usage.output_tokens);
-    total.input_tokens > limit(contract.limits.max_input_tokens.get())
-        || total.output_tokens > limit(contract.limits.max_output_tokens.get())
+fn add_usage(
+    total: &mut TokenUsage,
+    response: &ModelResponse,
+    contract: &TaskContract,
+) -> Result<bool, WorkerError> {
+    let input_tokens = total
+        .input_tokens
+        .checked_add(response.usage.input_tokens)
+        .ok_or(WorkerError::UsageOverflow)?;
+    let cached_tokens = total
+        .cached_tokens
+        .checked_add(response.usage.cached_tokens)
+        .ok_or(WorkerError::UsageOverflow)?;
+    let output_tokens = total
+        .output_tokens
+        .checked_add(response.usage.output_tokens)
+        .ok_or(WorkerError::UsageOverflow)?;
+    let latency_ms = total
+        .latency_ms
+        .checked_add(response.latency_ms)
+        .ok_or(WorkerError::UsageOverflow)?;
+    *total = TokenUsage {
+        input_tokens,
+        cached_tokens,
+        output_tokens,
+        tool_calls: total.tool_calls,
+        latency_ms,
+        estimated: total.estimated || response.usage.estimated,
+    };
+    Ok(input_tokens > limit(contract.limits.max_input_tokens.get())
+        || output_tokens > limit(contract.limits.max_output_tokens.get()))
 }
 fn limit(value: i64) -> u64 {
     value.try_into().unwrap_or(0)

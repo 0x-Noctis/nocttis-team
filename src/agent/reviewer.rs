@@ -11,7 +11,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    agent::worker::WorkerHandoff,
+    agent::worker::{TokenUsage, WorkerHandoff},
     domain::{
         state_machine::{Actor, transition},
         task::{TaskContract, TaskStatus},
@@ -95,6 +95,7 @@ pub enum ReviewerError {
     InvalidFinding,
     MutationInspection,
     PolicyViolation,
+    UsageOverflow,
     InvalidTransition,
 }
 
@@ -110,6 +111,7 @@ impl fmt::Display for ReviewerError {
             Self::InvalidFinding => "review finding is invalid",
             Self::MutationInspection => "worktree mutation inspection failed",
             Self::PolicyViolation => "reviewer modified worktree",
+            Self::UsageOverflow => "reviewer usage overflow",
             Self::InvalidTransition => "review transition is invalid",
         })
     }
@@ -163,27 +165,34 @@ impl<'a, M: ReviewerModel> Reviewer<'a, M> {
     ) -> ReviewRun<M> {
         let before = match self.snapshot() {
             Ok(snapshot) => snapshot,
-            Err(error) => return self.finish(None, Some(error)),
+            Err(error) => return self.finish(None, Some(error), TokenUsage::default()),
         };
         let request = match self.request(&before, sources, verification) {
             Ok(request) => request,
-            Err(error) => return self.finish(None, Some(error)),
+            Err(error) => return self.finish(None, Some(error), TokenUsage::default()),
         };
         let response = self.model.complete(&request);
+        let usage = match response.as_ref() {
+            Ok(response) => match response_usage(response) {
+                Ok(usage) => usage,
+                Err(error) => return self.finish(None, Some(error), TokenUsage::default()),
+            },
+            Err(_) => TokenUsage::default(),
+        };
         let after = match self.snapshot() {
             Ok(snapshot) => snapshot,
-            Err(error) => return self.finish(None, Some(error)),
+            Err(error) => return self.finish(None, Some(error), usage),
         };
         if before != after {
-            return self.finish(None, Some(ReviewerError::PolicyViolation));
+            return self.finish(None, Some(ReviewerError::PolicyViolation), usage);
         }
         let response = match response {
             Ok(response) => response,
-            Err(_) => return self.finish(None, Some(ReviewerError::Model)),
+            Err(_) => return self.finish(None, Some(ReviewerError::Model), TokenUsage::default()),
         };
         let decision = match self.parse(response) {
             Ok(decision) => decision,
-            Err(error) => return self.finish(None, Some(error)),
+            Err(error) => return self.finish(None, Some(error), usage),
         };
         let next_status = match decision {
             ReviewDecision::Approved => TaskStatus::Verify,
@@ -197,7 +206,7 @@ impl<'a, M: ReviewerModel> Reviewer<'a, M> {
         )
         .is_err()
         {
-            return self.finish(None, Some(ReviewerError::InvalidTransition));
+            return self.finish(None, Some(ReviewerError::InvalidTransition), usage);
         }
         self.finish(
             Some(ReviewOutcome {
@@ -205,6 +214,7 @@ impl<'a, M: ReviewerModel> Reviewer<'a, M> {
                 next_status,
             }),
             None,
+            usage,
         )
     }
 
@@ -376,10 +386,16 @@ impl<'a, M: ReviewerModel> Reviewer<'a, M> {
         })
     }
 
-    fn finish(self, outcome: Option<ReviewOutcome>, error: Option<ReviewerError>) -> ReviewRun<M> {
+    fn finish(
+        self,
+        outcome: Option<ReviewOutcome>,
+        error: Option<ReviewerError>,
+        usage: TokenUsage,
+    ) -> ReviewRun<M> {
         ReviewRun {
             outcome,
             error,
+            usage,
             model: self.model,
         }
     }
@@ -388,7 +404,23 @@ impl<'a, M: ReviewerModel> Reviewer<'a, M> {
 pub struct ReviewRun<M> {
     pub outcome: Option<ReviewOutcome>,
     pub error: Option<ReviewerError>,
+    pub usage: TokenUsage,
     pub model: M,
+}
+
+fn response_usage(response: &ModelResponse) -> Result<TokenUsage, ReviewerError> {
+    Ok(TokenUsage {
+        input_tokens: response.usage.input_tokens,
+        cached_tokens: response.usage.cached_tokens,
+        output_tokens: response.usage.output_tokens,
+        tool_calls: response
+            .tool_calls
+            .len()
+            .try_into()
+            .map_err(|_| ReviewerError::UsageOverflow)?,
+        latency_ms: response.latency_ms,
+        estimated: response.usage.estimated,
+    })
 }
 
 #[derive(Deserialize)]
