@@ -424,6 +424,46 @@ fn oversized_and_excessive_untracked_files_are_typed_errors() {
     assert_eq!(excessive.error, Some(ReviewerError::MutationInspection));
 }
 
+#[test]
+fn total_untracked_content_over_limit_is_typed_and_sanitized() {
+    let fixture = Fixture::new();
+    let secret = "TOTAL_SECRET_MARKER";
+    for index in 0..9 {
+        let mut content = vec![b'x'; 1024 * 1024];
+        if index == 0 {
+            content[..secret.len()].copy_from_slice(secret.as_bytes());
+        }
+        fs::write(
+            fixture
+                .worktree
+                .path()
+                .join(format!("src/total-{index}.bin")),
+            content,
+        )
+        .unwrap();
+    }
+
+    let run = fixture.review(r#"{"decision":"approved","findings":[]}"#);
+    assert_eq!(run.error, Some(ReviewerError::MutationInspection));
+    let error = run.error.as_ref().unwrap();
+    let rendered = format!("{error:?} {error}");
+    assert!(!rendered.contains(secret));
+    assert!(!rendered.contains(fixture.root.to_string_lossy().as_ref()));
+}
+
+#[test]
+fn synthetic_overlong_untracked_path_is_typed_and_sanitized() {
+    let secret = "PATH_SECRET_MARKER";
+    let path = format!("{secret}{}", "x".repeat(4097));
+    let error = reviewer::validate_untracked_path(&path).unwrap_err();
+
+    assert_eq!(error, ReviewerError::MutationInspection);
+    let rendered = format!("{error:?} {error}");
+    assert!(!rendered.contains(secret));
+    assert!(!rendered.contains("/absolute/host/path"));
+    assert!(!rendered.contains(&path));
+}
+
 fn git(repository: &Path, arguments: &[&str]) {
     assert!(
         Command::new("git")

@@ -495,7 +495,7 @@ fn snapshot_untracked(
     Ok(files)
 }
 
-fn validate_untracked_path(value: &str) -> Result<(), ReviewerError> {
+pub(crate) fn validate_untracked_path(value: &str) -> Result<(), ReviewerError> {
     if value.is_empty()
         || value.len() > MAX_UNTRACKED_PATH_BYTES
         || value.starts_with('"')
