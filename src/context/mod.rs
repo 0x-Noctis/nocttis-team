@@ -1,11 +1,21 @@
 use std::{
-    fmt, fs,
+    fmt,
+    fs::{self, File},
     io::Read,
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
 };
 
 use crate::{domain::task::TaskContract, store::artifact::ArtifactStore};
+
+const MAX_SEARCH_TERMS: usize = 32;
+const MAX_EXCERPTS: usize = 128;
+const MAX_CONTEXT_REFS: usize = 64;
+const MAX_ALLOWED_PATHS: usize = 128;
+const MAX_SEARCH_LENGTH: usize = 256;
+const MAX_PATH_LENGTH: usize = 1_024;
+const MAX_GLOB_LENGTH: usize = 512;
+const MAX_ARTIFACT_REFERENCE_LENGTH: usize = 512;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ContextSourceKind {
@@ -69,6 +79,7 @@ pub enum ContextError {
     InvalidArtifactReference,
     ArtifactUnavailable,
     InvalidSearch,
+    InputLimitExceeded,
     SearchFailed,
     Io(&'static str),
 }
@@ -85,6 +96,7 @@ impl fmt::Display for ContextError {
             Self::InvalidArtifactReference => "invalid artifact reference",
             Self::ArtifactUnavailable => "artifact unavailable",
             Self::InvalidSearch => "invalid context search",
+            Self::InputLimitExceeded => "context input exceeds limit",
             Self::SearchFailed => "context search failed",
             Self::Io(operation) => operation,
         })
@@ -131,6 +143,7 @@ impl<'a> ContextBuilder<'a> {
         contract: &TaskContract,
         request: &ContextRequest,
     ) -> Result<BuiltContext, ContextError> {
+        validate_inputs(contract, request)?;
         let task_token_limit =
             usize::try_from(contract.limits.max_input_tokens.get()).unwrap_or(usize::MAX);
         let mut budget = Budget::new(
@@ -160,6 +173,13 @@ impl<'a> ContextBuilder<'a> {
                 .strip_prefix("artifact://")
                 .filter(|id| valid_artifact_id(id))
                 .ok_or(ContextError::InvalidArtifactReference)?;
+            let metadata = self
+                .artifact_store
+                .metadata(artifact_id)
+                .map_err(|_| ContextError::ArtifactUnavailable)?;
+            if metadata.size > self.limits.max_file_bytes as u64 {
+                return Err(ContextError::FileTooLarge);
+            }
             let bytes = self
                 .artifact_store
                 .read(artifact_id)
@@ -199,7 +219,7 @@ impl<'a> ContextBuilder<'a> {
 
         for (relative, reason, command_truncation) in sources {
             let path = self.resolve_source(contract, &relative)?;
-            let bytes = fs::read(path).map_err(|_| ContextError::Io("read context source"))?;
+            let bytes = read_bounded(&path, self.limits.max_file_bytes)?;
             let content = text(bytes, self.limits.max_file_bytes)?;
             budget.push(
                 &mut entries,
@@ -389,6 +409,55 @@ fn text(bytes: Vec<u8>, maximum: usize) -> Result<String, ContextError> {
     String::from_utf8(bytes).map_err(|_| ContextError::BinaryFile)
 }
 
+fn read_bounded(path: &Path, maximum: usize) -> Result<Vec<u8>, ContextError> {
+    let file = File::open(path).map_err(|_| ContextError::Io("read context source"))?;
+    let size = file
+        .metadata()
+        .map_err(|_| ContextError::Io("inspect context source"))?
+        .len();
+    if size > maximum as u64 {
+        return Err(ContextError::FileTooLarge);
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(size).unwrap_or(maximum).min(maximum));
+    file.take(maximum as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ContextError::Io("read context source"))?;
+    if bytes.len() > maximum {
+        return Err(ContextError::FileTooLarge);
+    }
+    Ok(bytes)
+}
+
+fn validate_inputs(contract: &TaskContract, request: &ContextRequest) -> Result<(), ContextError> {
+    if request.search_terms.len() > MAX_SEARCH_TERMS
+        || request.excerpts.len() > MAX_EXCERPTS
+        || contract.context_refs.len() > MAX_CONTEXT_REFS
+        || contract.allowed_paths.len() > MAX_ALLOWED_PATHS
+    {
+        return Err(ContextError::InputLimitExceeded);
+    }
+    if request
+        .search_terms
+        .iter()
+        .any(|term| term.len() > MAX_SEARCH_LENGTH)
+        || request
+            .excerpts
+            .iter()
+            .any(|path| path.len() > MAX_PATH_LENGTH)
+        || contract
+            .context_refs
+            .iter()
+            .any(|reference| reference.as_str().len() > MAX_ARTIFACT_REFERENCE_LENGTH)
+        || contract
+            .allowed_paths
+            .iter()
+            .any(|path| path.as_str().len() > MAX_GLOB_LENGTH)
+    {
+        return Err(ContextError::InputLimitExceeded);
+    }
+    Ok(())
+}
+
 fn validate_search(value: &str) -> Result<(), ContextError> {
     if value.is_empty() || value.chars().any(char::is_control) {
         return Err(ContextError::InvalidSearch);
@@ -402,6 +471,7 @@ fn validate_relative(value: &str) -> Result<(), ContextError> {
         .get(1)
         .is_some_and(|separator| *separator == b':');
     if value.is_empty()
+        || value.len() > MAX_PATH_LENGTH
         || windows_absolute
         || value.chars().any(char::is_control)
         || value.contains('\\')
@@ -430,25 +500,70 @@ fn normalized(value: &str) -> String {
 }
 
 fn glob_matches(pattern: &str, path: &str) -> bool {
-    glob_bytes(pattern.as_bytes(), path.as_bytes())
+    let tokens = glob_tokens(pattern.as_bytes());
+    let path = path.as_bytes();
+    let mut next = vec![false; path.len() + 1];
+    next[path.len()] = true;
+    for token in tokens.iter().rev() {
+        let mut current = vec![false; path.len() + 1];
+        for position in (0..=path.len()).rev() {
+            current[position] = match token {
+                GlobToken::Literal(byte) => {
+                    position < path.len() && path[position] == *byte && next[position + 1]
+                }
+                GlobToken::Any => {
+                    position < path.len() && path[position] != b'/' && next[position + 1]
+                }
+                GlobToken::Star => {
+                    next[position]
+                        || (position < path.len()
+                            && path[position] != b'/'
+                            && current[position + 1])
+                }
+                GlobToken::DoubleStar => {
+                    next[position] || (position < path.len() && current[position + 1])
+                }
+                GlobToken::DoubleStarSlash => {
+                    next[position] || (position < path.len() && current[position + 1])
+                }
+            };
+        }
+        next = current;
+    }
+    next[0]
 }
 
-fn glob_bytes(pattern: &[u8], path: &[u8]) -> bool {
-    match pattern.first() {
-        None => path.is_empty(),
-        Some(b'*') if pattern.get(1) == Some(&b'*') => {
-            let rest = &pattern[2..];
-            glob_bytes(rest, path)
-                || (!path.is_empty() && glob_bytes(pattern, &path[1..]))
-                || (rest.first() == Some(&b'/') && glob_bytes(&rest[1..], path))
+#[derive(Clone, Copy)]
+enum GlobToken {
+    Literal(u8),
+    Any,
+    Star,
+    DoubleStar,
+    DoubleStarSlash,
+}
+
+fn glob_tokens(pattern: &[u8]) -> Vec<GlobToken> {
+    let mut tokens = Vec::with_capacity(pattern.len());
+    let mut index = 0;
+    while index < pattern.len() {
+        if pattern[index..].starts_with(b"**/") {
+            tokens.push(GlobToken::DoubleStarSlash);
+            index += 3;
+        } else if pattern[index..].starts_with(b"**") {
+            tokens.push(GlobToken::DoubleStar);
+            index += 2;
+        } else if pattern[index] == b'*' {
+            tokens.push(GlobToken::Star);
+            index += 1;
+        } else if pattern[index] == b'?' {
+            tokens.push(GlobToken::Any);
+            index += 1;
+        } else {
+            tokens.push(GlobToken::Literal(pattern[index]));
+            index += 1;
         }
-        Some(b'*') => {
-            glob_bytes(&pattern[1..], path)
-                || (!path.is_empty() && path[0] != b'/' && glob_bytes(pattern, &path[1..]))
-        }
-        Some(b'?') => !path.is_empty() && path[0] != b'/' && glob_bytes(&pattern[1..], &path[1..]),
-        Some(byte) => !path.is_empty() && *byte == path[0] && glob_bytes(&pattern[1..], &path[1..]),
     }
+    tokens
 }
 
 fn is_secret_path(path: &str) -> bool {
@@ -456,9 +571,14 @@ fn is_secret_path(path: &str) -> bool {
         let name = component.as_os_str().to_string_lossy().to_ascii_lowercase();
         name == ".env"
             || name.starts_with(".env.")
+            || matches!(name.as_str(), ".netrc" | ".npmrc" | ".pypirc")
+            || matches!(name.as_str(), "credentials" | "credentials.json")
+            || matches!(name.as_str(), "id_rsa" | "id_ed25519")
             || matches!(
-                name.as_str(),
-                "credentials" | "credentials.json" | "id_rsa" | "id_ed25519"
+                Path::new(&name)
+                    .extension()
+                    .and_then(|extension| extension.to_str()),
+                Some("pem" | "key" | "p12" | "pfx")
             )
     })
 }

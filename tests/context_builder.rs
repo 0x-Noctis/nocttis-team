@@ -306,6 +306,173 @@ fn binary_and_oversized_files_are_rejected() {
 }
 
 #[test]
+fn sparse_oversized_source_is_rejected_before_reading_contents() {
+    let repository = TestDirectory::new("sparse-repo");
+    let artifacts = TestDirectory::new("sparse-artifacts");
+    let path = repository.0.join("huge.txt");
+    fs::File::create(&path)
+        .unwrap()
+        .set_len(1024 * 1024 * 1024)
+        .unwrap();
+    let artifact_store = stores(&repository, &artifacts);
+    let builder = ContextBuilder::new(&repository.0, &artifact_store, limits()).unwrap();
+
+    assert_eq!(
+        builder.build(
+            &contract(&["huge.txt"], &[]),
+            &ContextRequest {
+                excerpts: vec!["huge.txt".into()],
+                ..ContextRequest::default()
+            }
+        ),
+        Err(ContextError::FileTooLarge)
+    );
+}
+
+#[test]
+fn oversized_artifact_is_rejected_from_metadata_before_content_read() {
+    let repository = TestDirectory::new("large-artifact-repo");
+    let artifacts = TestDirectory::new("large-artifact-data");
+    let artifact_store = ArtifactStore::new(&artifacts.0, 16_000).unwrap();
+    artifact_store
+        .write("large", "large.txt", "text/plain", &[b'x'; 8_000], |_| {
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+    let builder = ContextBuilder::new(&repository.0, &artifact_store, limits()).unwrap();
+
+    assert_eq!(
+        builder.build(
+            &contract(&["src/**"], &["artifact://large"]),
+            &ContextRequest::default()
+        ),
+        Err(ContextError::FileTooLarge)
+    );
+}
+
+#[test]
+fn additional_secret_paths_are_rejected() {
+    let repository = TestDirectory::new("secrets-repo");
+    let artifacts = TestDirectory::new("secrets-artifacts");
+    let paths = [
+        ".env.local",
+        ".netrc",
+        ".npmrc",
+        ".pypirc",
+        "credentials/value.txt",
+        "credentials.json",
+        "id_rsa",
+        "id_ed25519",
+        "cert.pem",
+        "private.key",
+        "bundle.p12",
+        "bundle.pfx",
+    ];
+    for path in paths {
+        repository.write(path, b"secret");
+    }
+    let artifact_store = stores(&repository, &artifacts);
+    let builder = ContextBuilder::new(&repository.0, &artifact_store, limits()).unwrap();
+    let task = contract(&["**"], &[]);
+
+    for path in paths {
+        assert_eq!(
+            builder.build(
+                &task,
+                &ContextRequest {
+                    excerpts: vec![path.into()],
+                    ..ContextRequest::default()
+                }
+            ),
+            Err(ContextError::PathNotAllowed),
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn request_counts_and_pattern_lengths_are_bounded() {
+    let repository = TestDirectory::new("caps-repo");
+    let artifacts = TestDirectory::new("caps-artifacts");
+    let artifact_store = stores(&repository, &artifacts);
+    let builder = ContextBuilder::new(&repository.0, &artifact_store, limits()).unwrap();
+    let task = contract(&["**"], &[]);
+
+    assert_eq!(
+        builder.build(
+            &task,
+            &ContextRequest {
+                search_terms: vec!["term".into(); 33],
+                excerpts: Vec::new(),
+            }
+        ),
+        Err(ContextError::InputLimitExceeded)
+    );
+    assert_eq!(
+        builder.build(
+            &task,
+            &ContextRequest {
+                search_terms: Vec::new(),
+                excerpts: vec!["file".into(); 129],
+            }
+        ),
+        Err(ContextError::InputLimitExceeded)
+    );
+    assert_eq!(
+        builder.build(
+            &contract(&[&"*".repeat(513)], &[]),
+            &ContextRequest::default()
+        ),
+        Err(ContextError::InputLimitExceeded)
+    );
+    assert_eq!(
+        builder.build(
+            &task,
+            &ContextRequest {
+                search_terms: vec!["x".repeat(257)],
+                excerpts: Vec::new(),
+            }
+        ),
+        Err(ContextError::InputLimitExceeded)
+    );
+    assert_eq!(
+        builder.build(
+            &task,
+            &ContextRequest {
+                search_terms: Vec::new(),
+                excerpts: vec!["x".repeat(1_025)],
+            }
+        ),
+        Err(ContextError::InputLimitExceeded)
+    );
+}
+
+#[test]
+fn unicode_truncation_remains_valid_utf8_and_within_budgets() {
+    let repository = TestDirectory::new("unicode-repo");
+    let artifacts = TestDirectory::new("unicode-artifacts");
+    repository.write("unicode.txt", "éééééé".as_bytes());
+    let artifact_store = stores(&repository, &artifacts);
+    let task = contract(&["unicode.txt"], &[]);
+    let mut small = limits();
+    small.max_bytes = serde_json::to_string(&task).unwrap().len() + 5;
+    let result = ContextBuilder::new(&repository.0, &artifact_store, small)
+        .unwrap()
+        .build(
+            &task,
+            &ContextRequest {
+                excerpts: vec!["unicode.txt".into()],
+                ..ContextRequest::default()
+            },
+        )
+        .unwrap();
+
+    assert!(result.bytes <= small.max_bytes);
+    assert!(result.estimated_tokens <= small.max_tokens);
+    assert_eq!(result.entries.last().unwrap().content, "éé");
+}
+
+#[test]
 fn byte_and_token_budgets_truncate_before_return() {
     let repository = TestDirectory::new("budget-repo");
     let artifacts = TestDirectory::new("budget-artifacts");
