@@ -4,6 +4,9 @@ use std::{
     time::Duration,
 };
 
+pub const FILESYSTEM_TIMEOUT_SEMANTICS: &str =
+    "cooperative ceiling checked between filesystem operations";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ToolRole {
     Worker,
@@ -109,6 +112,9 @@ impl ToolPolicy {
     }
     pub fn timeout(&self) -> Duration {
         self.timeout
+    }
+    pub fn timeout_semantics(&self) -> &'static str {
+        FILESYSTEM_TIMEOUT_SEMANTICS
     }
 
     pub fn authorize_tool(&self, tool: ToolName) -> Result<(), PolicyError> {

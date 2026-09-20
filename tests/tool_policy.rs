@@ -282,6 +282,98 @@ fn oversized_output_and_timeout_are_bounded() {
 }
 
 #[test]
+fn sparse_read_and_oversized_search_source_are_bounded() {
+    let fixture = Fixture::new(4096, 64, Duration::from_secs(1));
+    let sparse = fs::File::create(fixture.worktree.path().join("src/sparse.txt")).unwrap();
+    sparse.set_len(128 * 1024 * 1024).unwrap();
+    fs::write(
+        fixture.worktree.path().join("src/large.txt"),
+        vec![b'a'; 65],
+    )
+    .unwrap();
+    let tools = fixture.tools(ToolRole::Worker, 4096, 64, Duration::from_secs(1));
+    for request in [
+        ToolRequest::ReadFile {
+            path: "src/sparse.txt".into(),
+        },
+        ToolRequest::SearchCode {
+            path: "src".into(),
+            query: "needle".into(),
+        },
+    ] {
+        let execution = tools.execute(request);
+        assert_eq!(execution.result.unwrap_err().code, ToolErrorCode::TooLarge);
+        assert_eq!(execution.audit.error_code, Some(ToolErrorCode::TooLarge));
+    }
+}
+
+#[test]
+fn large_tree_stops_at_listing_limit() {
+    let fixture = Fixture::new(4096, 32, Duration::from_secs(1));
+    for index in 0..1000 {
+        fs::write(
+            fixture
+                .worktree
+                .path()
+                .join(format!("src/file-{index:04}.txt")),
+            b"x",
+        )
+        .unwrap();
+    }
+    let execution = fixture
+        .tools(ToolRole::Worker, 4096, 32, Duration::from_secs(1))
+        .execute(ToolRequest::ListFiles { path: "src".into() });
+    assert_eq!(execution.result.unwrap_err().code, ToolErrorCode::TooLarge);
+    assert_eq!(execution.audit.error_code, Some(ToolErrorCode::TooLarge));
+}
+
+#[test]
+fn rename_copy_malformed_and_symlink_parent_patches_are_denied() {
+    let fixture = Fixture::new(16 * 1024, 16 * 1024, Duration::from_secs(1));
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(
+        &fixture.repository,
+        fixture.worktree.path().join("src/link-parent"),
+    )
+    .unwrap();
+    let tools = fixture.tools(
+        ToolRole::Worker,
+        16 * 1024,
+        16 * 1024,
+        Duration::from_secs(1),
+    );
+    let cases: &[(&[u8], ToolErrorCode)] = &[
+        (b"diff --git a/src/allowed.txt b/denied.txt\nsimilarity index 100%\nrename from src/allowed.txt\nrename to denied.txt\n", ToolErrorCode::PatchDenied),
+        (b"diff --git a/src/allowed.txt b/denied.txt\nsimilarity index 100%\ncopy from src/allowed.txt\ncopy to denied.txt\n", ToolErrorCode::PatchDenied),
+        (b"diff --git a/src/allowed.txt b/src/new.txt\n--- a/src/allowed.txt\n", ToolErrorCode::InvalidArgument),
+        (b"diff --git a/src/allowed.txt b/src/link-parent/new.txt\n--- a/src/allowed.txt\n+++ b/src/link-parent/new.txt\n@@ -1 +1 @@\n-needle\n+changed\n", ToolErrorCode::UnsafePath),
+    ];
+    for (patch, code) in cases {
+        let execution = tools.execute(ToolRequest::ApplyPatch {
+            patch: patch.to_vec(),
+        });
+        assert_eq!(execution.result.unwrap_err().code, *code);
+        assert_eq!(execution.audit.error_code, Some(*code));
+    }
+}
+
+#[test]
+fn timeout_contract_is_explicitly_cooperative() {
+    let policy = ToolPolicy::new(
+        ToolRole::Worker,
+        vec!["src/**".into()],
+        1,
+        1,
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    assert_eq!(
+        policy.timeout_semantics(),
+        "cooperative ceiling checked between filesystem operations"
+    );
+}
+
+#[test]
 fn public_request_surface_has_no_raw_shell_variant() {
     let request = ToolRequest::ApplyPatch {
         patch: b"SECRET_PATCH".to_vec(),

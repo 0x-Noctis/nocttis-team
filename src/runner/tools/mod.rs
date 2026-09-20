@@ -1,5 +1,7 @@
 use std::{
     fmt, fs,
+    fs::File,
+    io::{self, Read},
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -144,11 +146,6 @@ impl<'a> StructuredTools<'a> {
             .authorize_tool(tool)
             .map_err(map_policy)
             .and_then(|()| self.execute_authorized(request, started));
-        let result = if started.elapsed() > self.policy.timeout() {
-            Err(error(ToolErrorCode::Timeout, "tool call timed out"))
-        } else {
-            result
-        };
         ToolExecution {
             audit: AuditEvent {
                 tool,
@@ -207,25 +204,17 @@ impl<'a> StructuredTools<'a> {
         self.policy.authorize_path(path).map_err(map_policy)?;
         let root = safe_existing(self.worktree.path(), path, true)?;
         let mut files = Vec::new();
-        collect_files(
+        let mut output_bytes = 0_usize;
+        collect_files_bounded(
             self.worktree.path(),
             &root,
             &mut files,
+            &mut output_bytes,
+            self.policy.maximum_output_bytes(),
             started,
             self.policy.timeout(),
         )?;
-        files.sort();
-        let bytes = bounded(
-            files.join("\n").into_bytes(),
-            self.policy.maximum_output_bytes(),
-        )?;
-        let text = String::from_utf8(bytes)
-            .map_err(|_| error(ToolErrorCode::OperationFailed, "tool output is invalid"))?;
-        Ok(ToolResult::Files(if text.is_empty() {
-            Vec::new()
-        } else {
-            text.lines().map(str::to_owned).collect()
-        }))
+        Ok(ToolResult::Files(files))
     }
 
     fn search_code(
@@ -246,10 +235,13 @@ impl<'a> StructuredTools<'a> {
         }
         let root = safe_existing(self.worktree.path(), path, true)?;
         let mut files = Vec::new();
-        collect_files(
+        let mut listing_bytes = 0_usize;
+        collect_files_bounded(
             self.worktree.path(),
             &root,
             &mut files,
+            &mut listing_bytes,
+            self.policy.maximum_output_bytes(),
             started,
             self.policy.timeout(),
         )?;
@@ -257,8 +249,8 @@ impl<'a> StructuredTools<'a> {
         let mut output_size = 0_usize;
         for relative in files {
             check_timeout(started, self.policy.timeout())?;
-            let bytes = fs::read(self.worktree.path().join(&relative))
-                .map_err(|_| error(ToolErrorCode::OperationFailed, "tool read failed"))?;
+            let path = safe_existing(self.worktree.path(), &relative, false)?;
+            let bytes = read_bounded(&path, self.policy.maximum_output_bytes())?;
             if bytes.contains(&0) {
                 continue;
             }
@@ -284,12 +276,11 @@ impl<'a> StructuredTools<'a> {
     fn read_file(&self, path: &str) -> Result<Vec<u8>, ToolError> {
         self.policy.authorize_path(path).map_err(map_policy)?;
         let path = safe_existing(self.worktree.path(), path, false)?;
-        let bytes = fs::read(path)
-            .map_err(|_| error(ToolErrorCode::OperationFailed, "tool read failed"))?;
+        let bytes = read_bounded(&path, self.policy.maximum_output_bytes())?;
         if bytes.contains(&0) {
             return Err(error(ToolErrorCode::BinaryInput, "binary input is denied"));
         }
-        bounded(bytes, self.policy.maximum_output_bytes())
+        Ok(bytes)
     }
 
     fn apply_patch(&self, patch: &[u8]) -> Result<ToolResult, ToolError> {
@@ -349,6 +340,7 @@ fn safe_existing(root: &Path, relative: &str, directory: bool) -> Result<PathBuf
     let root = root
         .canonicalize()
         .map_err(|_| error(ToolErrorCode::OperationFailed, "worktree is unavailable"))?;
+    reject_symlink_components(&root, Path::new(&relative), true)?;
     let path = root
         .join(relative)
         .canonicalize()
@@ -365,6 +357,8 @@ fn safe_parent(root: &Path, relative: &str) -> Result<(), ToolError> {
     let root = root
         .canonicalize()
         .map_err(|_| error(ToolErrorCode::OperationFailed, "worktree is unavailable"))?;
+    let relative = Path::new(&relative);
+    reject_symlink_components(&root, relative, true)?;
     let parent = root
         .join(relative)
         .parent()
@@ -377,10 +371,41 @@ fn safe_parent(root: &Path, relative: &str) -> Result<(), ToolError> {
     Ok(())
 }
 
-fn collect_files(
+fn reject_symlink_components(
+    root: &Path,
+    relative: &Path,
+    include_leaf: bool,
+) -> Result<(), ToolError> {
+    let count = relative.components().count();
+    let mut current = root.to_path_buf();
+    for (index, component) in relative.components().enumerate() {
+        current.push(component.as_os_str());
+        if !include_leaf && index + 1 == count {
+            break;
+        }
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(error(ToolErrorCode::UnsafePath, "tool path is unsafe"));
+            }
+            Ok(_) => {}
+            Err(error_value) if error_value.kind() == io::ErrorKind::NotFound => break,
+            Err(_) => {
+                return Err(error(
+                    ToolErrorCode::OperationFailed,
+                    "tool path inspection failed",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_files_bounded(
     root: &Path,
     current: &Path,
     files: &mut Vec<String>,
+    output_bytes: &mut usize,
+    output_limit: usize,
     started: Instant,
     timeout: std::time::Duration,
 ) -> Result<(), ToolError> {
@@ -398,45 +423,159 @@ fn collect_files(
             continue;
         }
         if metadata.is_dir() {
-            collect_files(root, &entry.path(), files, started, timeout)?;
+            collect_files_bounded(
+                root,
+                &entry.path(),
+                files,
+                output_bytes,
+                output_limit,
+                started,
+                timeout,
+            )?;
         } else if metadata.is_file() {
-            files.push(
-                entry
-                    .path()
-                    .strip_prefix(root)
-                    .map_err(|_| error(ToolErrorCode::UnsafePath, "tool path is unsafe"))?
-                    .to_string_lossy()
-                    .replace('\\', "/"),
-            );
+            let relative = entry
+                .path()
+                .strip_prefix(root)
+                .map_err(|_| error(ToolErrorCode::UnsafePath, "tool path is unsafe"))?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let added = relative.len() + usize::from(!files.is_empty());
+            *output_bytes = output_bytes
+                .checked_add(added)
+                .ok_or_else(|| error(ToolErrorCode::TooLarge, "tool output exceeds limit"))?;
+            if *output_bytes > output_limit {
+                return Err(error(ToolErrorCode::TooLarge, "tool output exceeds limit"));
+            }
+            files.push(relative);
         }
     }
     Ok(())
 }
 
+fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, ToolError> {
+    let metadata = path
+        .metadata()
+        .map_err(|_| error(ToolErrorCode::OperationFailed, "tool read failed"))?;
+    if metadata.len() > limit as u64 {
+        return Err(error(ToolErrorCode::TooLarge, "tool input exceeds limit"));
+    }
+    let maximum = limit
+        .checked_add(1)
+        .ok_or_else(|| error(ToolErrorCode::TooLarge, "tool input exceeds limit"))?;
+    let mut bytes = Vec::with_capacity(metadata.len().try_into().unwrap_or(limit).min(limit));
+    File::open(path)
+        .map_err(|_| error(ToolErrorCode::OperationFailed, "tool read failed"))?
+        .take(maximum as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| error(ToolErrorCode::OperationFailed, "tool read failed"))?;
+    if bytes.len() > limit {
+        return Err(error(ToolErrorCode::TooLarge, "tool input exceeds limit"));
+    }
+    Ok(bytes)
+}
+
 fn patch_paths(patch: &str) -> Result<Vec<String>, ToolError> {
     let mut paths = Vec::new();
+    let mut section: Option<PatchSection> = None;
     for line in patch.lines() {
-        if let Some(raw) = line
-            .strip_prefix("+++ ")
-            .or_else(|| line.strip_prefix("--- "))
-        {
-            if raw == "/dev/null" {
-                continue;
+        if let Some(raw) = line.strip_prefix("diff --git ") {
+            if let Some(previous) = section.take() {
+                previous.finish()?;
             }
-            let raw = raw
-                .strip_prefix("a/")
-                .or_else(|| raw.strip_prefix("b/"))
-                .ok_or_else(|| error(ToolErrorCode::InvalidArgument, "patch path is invalid"))?;
-            if raw.contains('\t') || raw.contains(' ') {
-                return Err(error(
-                    ToolErrorCode::InvalidArgument,
-                    "patch path is invalid",
-                ));
+            let mut fields = raw.split(' ');
+            let old = fields
+                .next()
+                .and_then(|value| value.strip_prefix("a/"))
+                .ok_or_else(invalid_patch)?;
+            let new = fields
+                .next()
+                .and_then(|value| value.strip_prefix("b/"))
+                .ok_or_else(invalid_patch)?;
+            if fields.next().is_some() {
+                return Err(invalid_patch());
             }
-            paths.push(validate_relative(raw).map_err(map_policy)?);
+            paths.push(patch_path(old)?);
+            paths.push(patch_path(new)?);
+            section = Some(PatchSection::default());
+        } else if let Some(raw) = line.strip_prefix("--- ") {
+            let current = section.as_mut().ok_or_else(invalid_patch)?;
+            current.old = true;
+            if raw != "/dev/null" {
+                paths.push(patch_marker_path(raw, "a/")?);
+            }
+        } else if let Some(raw) = line.strip_prefix("+++ ") {
+            let current = section.as_mut().ok_or_else(invalid_patch)?;
+            current.new = true;
+            if raw != "/dev/null" {
+                paths.push(patch_marker_path(raw, "b/")?);
+            }
+        } else if let Some(raw) = line.strip_prefix("rename from ") {
+            section.as_mut().ok_or_else(invalid_patch)?.rename_from = true;
+            paths.push(patch_path(raw)?);
+        } else if let Some(raw) = line.strip_prefix("rename to ") {
+            section.as_mut().ok_or_else(invalid_patch)?.rename_to = true;
+            paths.push(patch_path(raw)?);
+        } else if let Some(raw) = line.strip_prefix("copy from ") {
+            section.as_mut().ok_or_else(invalid_patch)?.copy_from = true;
+            paths.push(patch_path(raw)?);
+        } else if let Some(raw) = line.strip_prefix("copy to ") {
+            section.as_mut().ok_or_else(invalid_patch)?.copy_to = true;
+            paths.push(patch_path(raw)?);
         }
     }
+    section.ok_or_else(invalid_patch)?.finish()?;
     Ok(paths)
+}
+
+#[derive(Default)]
+struct PatchSection {
+    old: bool,
+    new: bool,
+    rename_from: bool,
+    rename_to: bool,
+    copy_from: bool,
+    copy_to: bool,
+}
+
+impl PatchSection {
+    fn finish(self) -> Result<(), ToolError> {
+        let regular = self.old
+            && self.new
+            && !self.rename_from
+            && !self.rename_to
+            && !self.copy_from
+            && !self.copy_to;
+        let rename = self.rename_from
+            && self.rename_to
+            && !self.old
+            && !self.new
+            && !self.copy_from
+            && !self.copy_to;
+        let copy = self.copy_from
+            && self.copy_to
+            && !self.old
+            && !self.new
+            && !self.rename_from
+            && !self.rename_to;
+        (regular || rename || copy)
+            .then_some(())
+            .ok_or_else(invalid_patch)
+    }
+}
+
+fn patch_marker_path(raw: &str, prefix: &str) -> Result<String, ToolError> {
+    patch_path(raw.strip_prefix(prefix).ok_or_else(invalid_patch)?)
+}
+
+fn patch_path(raw: &str) -> Result<String, ToolError> {
+    if raw.contains([' ', '\t']) {
+        return Err(invalid_patch());
+    }
+    validate_relative(raw).map_err(|_| invalid_patch())
+}
+
+fn invalid_patch() -> ToolError {
+    error(ToolErrorCode::InvalidArgument, "patch is invalid")
 }
 
 fn bounded(bytes: Vec<u8>, limit: usize) -> Result<Vec<u8>, ToolError> {
