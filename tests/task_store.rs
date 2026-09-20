@@ -168,10 +168,49 @@ async fn full_contract_roundtrip_uses_project_ownership_and_dependencies(pool: P
         original
     );
     assert_eq!(repository.get("TASK-001").await.unwrap().contract, original);
-    repository.delete("TASK-001").await.unwrap();
+    repository.delete("TASK-001", 0).await.unwrap();
     assert!(matches!(
         repository.get("TASK-001").await,
         Err(StoreError::NotFound)
+    ));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn delete_requires_callers_expected_version(pool: PgPool) {
+    let (project_id, run_id) = ownership(&pool).await;
+    let repository = TaskRepository::new(pool);
+    let mut value = contract("delete-version", project_id, run_id);
+    repository.create(&value).await.unwrap();
+    value.title = text("title", "updated");
+    repository.update(&value, 0).await.unwrap();
+
+    assert!(matches!(
+        repository.delete("delete-version", 0).await,
+        Err(StoreError::Conflict(Conflict::StaleVersion))
+    ));
+    repository.delete("delete-version", 1).await.unwrap();
+    assert!(matches!(
+        repository.delete("delete-version", 1).await,
+        Err(StoreError::NotFound)
+    ));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn concurrent_delete_has_one_winner(pool: PgPool) {
+    let (project_id, run_id) = ownership(&pool).await;
+    let repository = TaskRepository::new(pool);
+    repository
+        .create(&contract("delete-race", project_id, run_id))
+        .await
+        .unwrap();
+
+    let (left, right) = tokio::join!(
+        repository.delete("delete-race", 0),
+        repository.delete("delete-race", 0)
+    );
+    assert!(matches!(
+        (&left, &right),
+        (Ok(()), Err(StoreError::NotFound)) | (Err(StoreError::NotFound), Ok(()))
     ));
 }
 

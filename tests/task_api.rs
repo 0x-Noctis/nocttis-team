@@ -1,7 +1,7 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 use ai_team::{api, store::artifact::ArtifactStore};
-use axum::{Router, middleware};
+use axum::{Router, http::HeaderValue, middleware};
 use reqwest::{Client, Response, StatusCode};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -29,6 +29,9 @@ async fn server(pool: PgPool) -> Server {
     let app = Router::new()
         .merge(api::tasks::router(pool, artifacts))
         .fallback(api::error::not_found)
+        .layer(api::cors_layer(
+            "http://127.0.0.1:5173".parse::<HeaderValue>().unwrap(),
+        ))
         .layer(middleware::from_fn(api::request_id));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -82,6 +85,17 @@ async fn mutation(
     .unwrap()
 }
 
+async fn delete(client: &Client, url: &str, key: &str, expected_version: i64) -> Response {
+    mutation(
+        client,
+        reqwest::Method::DELETE,
+        url,
+        key,
+        Some(&json!({"expected_version":expected_version})),
+    )
+    .await
+}
+
 fn assert_request_id(response: &Response) {
     assert!(
         Uuid::parse_str(
@@ -94,6 +108,30 @@ fn assert_request_id(response: &Response) {
         )
         .is_ok()
     );
+}
+
+async fn next_sse_event(response: &mut Response) -> String {
+    let mut event = String::new();
+    loop {
+        let chunk = tokio::time::timeout(Duration::from_secs(3), response.chunk())
+            .await
+            .expect("SSE event timed out")
+            .unwrap()
+            .expect("SSE stream closed");
+        event.push_str(std::str::from_utf8(&chunk).unwrap());
+        if let Some(end) = event.find("\n\n") {
+            return event[..end + 2].to_owned();
+        }
+    }
+}
+
+fn sse_id(event: &str) -> i64 {
+    event
+        .lines()
+        .find_map(|line| line.strip_prefix("id: "))
+        .unwrap()
+        .parse()
+        .unwrap()
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -113,6 +151,10 @@ async fn crud_pagination_idempotency_validation_and_request_id(pool: PgPool) {
     .await;
     assert_eq!(created.status(), StatusCode::CREATED);
     assert_request_id(&created);
+    assert_eq!(
+        created.headers()["access-control-expose-headers"],
+        "x-request-id"
+    );
     let created_body: Value = created.json().await.unwrap();
     assert_eq!(
         created_body["contract"]["project_id"],
@@ -218,15 +260,51 @@ async fn crud_pagination_idempotency_validation_and_request_id(pool: PgPool) {
     assert!(!missing_text.contains("postgres"));
     assert!(!missing_text.contains("/repository/"));
 
-    let deleted = mutation(
+    let stale_delete = delete(&server.client, &format!("{tasks}/api-a"), "delete-stale", 0).await;
+    assert_eq!(stale_delete.status(), StatusCode::CONFLICT);
+
+    let missing_version = mutation(
         &server.client,
         reqwest::Method::DELETE,
         &format!("{tasks}/api-b"),
-        "delete",
-        None,
+        "delete-no-version",
+        Some(&json!({})),
     )
     .await;
+    assert_eq!(missing_version.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let missing_delete = delete(
+        &server.client,
+        &format!("{tasks}/missing"),
+        "delete-missing",
+        0,
+    )
+    .await;
+    assert_eq!(missing_delete.status(), StatusCode::NOT_FOUND);
+
+    let deleted = delete(&server.client, &format!("{tasks}/api-b"), "delete", 0).await;
     assert_eq!(deleted.status(), StatusCode::OK);
+    let replayed = delete(&server.client, &format!("{tasks}/api-b"), "delete", 0).await;
+    assert_eq!(replayed.status(), StatusCode::OK);
+
+    let preflight = server
+        .client
+        .request(reqwest::Method::OPTIONS, &tasks)
+        .header("Origin", "http://127.0.0.1:5173")
+        .header("Access-Control-Request-Method", "POST")
+        .header(
+            "Access-Control-Request-Headers",
+            "content-type,idempotency-key,last-event-id",
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(preflight.status(), StatusCode::OK);
+    let allow_headers = preflight.headers()["access-control-allow-headers"]
+        .to_str()
+        .unwrap();
+    assert!(allow_headers.contains("idempotency-key"));
+    assert!(allow_headers.contains("last-event-id"));
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -346,6 +424,10 @@ async fn events_sse_reconnect_and_artifacts_redact_internal_paths(pool: PgPool) 
         .execute(&pool)
         .await
         .unwrap();
+    let client = server.client.clone();
+    let stream_url = format!("{tasks}/evidence/events/stream");
+    let initial_request = tokio::spawn(async move { client.get(stream_url).send().await.unwrap() });
+    tokio::time::sleep(Duration::from_millis(300)).await;
     mutation(
         &server.client,
         reqwest::Method::POST,
@@ -354,6 +436,28 @@ async fn events_sse_reconnect_and_artifacts_redact_internal_paths(pool: PgPool) 
         Some(&json!({"expected_version":0})),
     )
     .await;
+    let mut initial = tokio::time::timeout(Duration::from_secs(3), initial_request)
+        .await
+        .expect("SSE response timed out")
+        .unwrap();
+    assert_eq!(initial.headers()["content-type"], "text/event-stream");
+    let first = next_sse_event(&mut initial).await;
+    assert!(first.contains("event: task_event"));
+    let first_id = sse_id(&first);
+    drop(initial);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let client = server.client.clone();
+    let stream_url = format!("{tasks}/evidence/events/stream");
+    let reconnect_request = tokio::spawn(async move {
+        client
+            .get(stream_url)
+            .header("Last-Event-ID", first_id)
+            .send()
+            .await
+            .unwrap()
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
     mutation(
         &server.client,
         reqwest::Method::POST,
@@ -362,6 +466,19 @@ async fn events_sse_reconnect_and_artifacts_redact_internal_paths(pool: PgPool) 
         Some(&json!({"expected_version":1})),
     )
     .await;
+    let mut reconnect = tokio::time::timeout(Duration::from_secs(3), reconnect_request)
+        .await
+        .expect("SSE reconnect timed out")
+        .unwrap();
+    let second = next_sse_event(&mut reconnect).await;
+    let second_id = sse_id(&second);
+    assert!(second_id > first_id);
+    assert!(!second.contains(&format!("id: {first_id}\n")));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(600), reconnect.chunk())
+            .await
+            .is_err()
+    );
 
     let events: Value = server
         .client
@@ -374,28 +491,8 @@ async fn events_sse_reconnect_and_artifacts_redact_internal_paths(pool: PgPool) 
         .unwrap();
     let items = events["items"].as_array().unwrap();
     assert_eq!(items.len(), 2);
-    assert!(items[0]["id"].as_i64().unwrap() < items[1]["id"].as_i64().unwrap());
-    let initial = server
-        .client
-        .get(format!("{tasks}/evidence/events/stream"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(initial.headers()["content-type"], "text/event-stream");
-    let initial_body = initial.text().await.unwrap();
-    assert!(initial_body.contains(&format!("id: {}", items[0]["id"].as_i64().unwrap())));
-    let reconnect = server
-        .client
-        .get(format!("{tasks}/evidence/events/stream"))
-        .header("Last-Event-ID", items[0]["id"].as_i64().unwrap())
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
-    assert!(!reconnect.contains(&format!("id: {}\n", items[0]["id"].as_i64().unwrap())));
-    assert!(reconnect.contains(&format!("id: {}\n", items[1]["id"].as_i64().unwrap())));
+    assert_eq!(items[0]["id"], first_id);
+    assert_eq!(items[1]["id"], second_id);
 
     let artifact_id = Uuid::new_v4();
     let bytes = b"diff --git a/safe b/safe\n+safe\n";

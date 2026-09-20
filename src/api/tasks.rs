@@ -209,19 +209,22 @@ async fn delete_task(
     Extension(request_id): Extension<RequestId>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
+    let body = body(payload, request_id)?;
     let route = format!("/api/v1/tasks/{id}");
     mutate(
         &state,
         &headers,
         Method::DELETE,
         &route,
-        &json!({}),
+        &body,
         request_id,
         || async {
+            let input: VersionInput = parse(&body, request_id)?;
             state
                 .tasks
-                .delete(&id)
+                .delete(&id, input.expected_version)
                 .await
                 .map_err(|error| store_error(error, request_id))?;
             Ok((StatusCode::OK, json!({"deleted":true,"id":id})))

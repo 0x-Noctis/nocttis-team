@@ -200,15 +200,28 @@ impl TaskRepository {
         self.get(contract.id.as_str()).await
     }
 
-    pub async fn delete(&self, id: &str) -> Result<(), StoreError> {
-        let result = sqlx::query("DELETE FROM tasks WHERE id=$1")
+    pub async fn delete(&self, id: &str, expected_version: i64) -> Result<(), StoreError> {
+        let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
+        let version =
+            sqlx::query_scalar::<_, i64>("SELECT version FROM tasks WHERE id=$1 FOR UPDATE")
+                .bind(id)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(StoreError::Database)?
+                .ok_or(StoreError::NotFound)?;
+        if version != expected_version {
+            return Err(StoreError::Conflict(Conflict::StaleVersion));
+        }
+        let result = sqlx::query("DELETE FROM tasks WHERE id=$1 AND version=$2")
             .bind(id.to_owned())
-            .execute(&self.pool)
+            .bind(expected_version)
+            .execute(&mut *transaction)
             .await
             .map_err(StoreError::Database)?;
         if result.rows_affected() == 0 {
-            return Err(StoreError::NotFound);
+            return Err(StoreError::Conflict(Conflict::StaleVersion));
         }
+        transaction.commit().await.map_err(StoreError::Database)?;
         Ok(())
     }
 
@@ -284,6 +297,16 @@ impl TaskRepository {
     pub async fn events(&self, task_id: &str) -> Result<Vec<TaskEvent>, StoreError> {
         let rows = sqlx::query("SELECT id,task_id,actor_type,event_type,from_status::text,to_status::text,payload FROM events WHERE task_id=$1 ORDER BY id")
             .bind(task_id).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        rows.iter().map(event_from_row).collect()
+    }
+
+    pub async fn events_after(
+        &self,
+        task_id: &str,
+        cursor: i64,
+    ) -> Result<Vec<TaskEvent>, StoreError> {
+        let rows = sqlx::query("SELECT id,task_id,actor_type,event_type,from_status::text,to_status::text,payload FROM events WHERE task_id=$1 AND id>$2 ORDER BY id LIMIT 100")
+            .bind(task_id).bind(cursor).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
         rows.iter().map(event_from_row).collect()
     }
 

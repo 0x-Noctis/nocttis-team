@@ -19,4 +19,5 @@ pub fn cors_layer(origin: HeaderValue) -> CorsLayer {
             HeaderName::from_static("idempotency-key"),
             HeaderName::from_static("last-event-id"),
         ])
+        .expose_headers([HeaderName::from_static("x-request-id")])
 }
