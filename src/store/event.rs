@@ -28,6 +28,118 @@ pub struct AgentAttempt {
     pub status: NonEmptyString,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttemptStatus {
+    Running,
+    Completed,
+    Failed,
+}
+
+impl AttemptStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "running" => Some(Self::Running),
+            "completed" => Some(Self::Completed),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeAttempt {
+    pub id: Uuid,
+    pub task_id: NonEmptyString,
+    pub role: NonEmptyString,
+    pub provider_id: NonEmptyString,
+    pub model_id: NonEmptyString,
+    pub attempt: i64,
+    pub status: AttemptStatus,
+    pub branch: String,
+    pub base_commit: String,
+    pub heartbeat_unix_ms: Option<i64>,
+    pub finished_unix_ms: Option<i64>,
+    pub retain_until_unix_ms: Option<i64>,
+    pub error_code: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClaimAttempt {
+    pub id: Uuid,
+    pub task_id: NonEmptyString,
+    pub role: NonEmptyString,
+    pub provider_id: NonEmptyString,
+    pub model_id: NonEmptyString,
+    pub branch: String,
+    pub base_commit: String,
+    pub retention_seconds: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AttemptUpdate {
+    pub status: AttemptStatus,
+    pub error_code: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolOutcome {
+    Succeeded,
+    Failed,
+    TimedOut,
+}
+
+impl ToolOutcome {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::TimedOut => "timed_out",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "succeeded" => Some(Self::Succeeded),
+            "failed" => Some(Self::Failed),
+            "timed_out" => Some(Self::TimedOut),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolCallMetadata {
+    pub outcome: ToolOutcome,
+    pub duration_ms: i64,
+    pub artifact_id: Option<Uuid>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ToolCallReservation {
+    New,
+    InProgress,
+    Completed(ToolCallMetadata),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArtifactRecord {
+    pub id: Uuid,
+    pub task_id: NonEmptyString,
+    pub kind: NonEmptyString,
+    pub logical_name: NonEmptyString,
+    pub media_type: NonEmptyString,
+    pub size: i64,
+    pub checksum: String,
+}
+
 impl AgentAttempt {
     pub fn validate(&self) -> Result<(), NumericError> {
         positive("attempt", self.attempt)

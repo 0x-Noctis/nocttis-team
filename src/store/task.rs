@@ -13,16 +13,21 @@ use crate::domain::{
     },
 };
 
-use super::event::{AgentAttempt, NumericError, TaskEvent, Usage};
+use super::event::{
+    AgentAttempt, ArtifactRecord, AttemptStatus, AttemptUpdate, ClaimAttempt, NumericError,
+    RuntimeAttempt, TaskEvent, ToolCallMetadata, ToolCallReservation, ToolOutcome, Usage,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Conflict {
     TaskId,
     Attempt,
+    Claim,
+    ToolCall,
+    Usage,
     StaleVersion,
 }
 
-#[derive(Debug)]
 pub enum StoreError {
     Conflict(Conflict),
     NotFound,
@@ -32,6 +37,12 @@ pub enum StoreError {
     InvalidId(&'static str),
     InvalidJson(serde_json::Error),
     Database(sqlx::Error),
+}
+
+impl fmt::Debug for StoreError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
 }
 
 impl fmt::Display for StoreError {
@@ -57,7 +68,7 @@ impl Error for StoreError {
             Self::InvalidTransition(error) => Some(error),
             Self::InvalidRow(error) => Some(error),
             Self::InvalidJson(error) => Some(error),
-            Self::Database(error) => Some(error),
+            Self::Database(_) => None,
             _ => None,
         }
     }
@@ -325,12 +336,288 @@ impl TaskRepository {
         }
     }
 
+    pub async fn create_runtime_attempt(&self, attempt: &RuntimeAttempt) -> Result<(), StoreError> {
+        validate_runtime_attempt(attempt)?;
+        let result = sqlx::query(
+            "INSERT INTO agent_runs
+             (id,task_id,role,provider_id,model_id,attempt,status,branch,base_commit,
+              heartbeat_at,finished_at,retain_until,error_code)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,
+              CASE WHEN $10::bigint IS NULL THEN NULL ELSE to_timestamp($10::double precision/1000) END,
+              CASE WHEN $11::bigint IS NULL THEN NULL ELSE to_timestamp($11::double precision/1000) END,
+              CASE WHEN $12::bigint IS NULL THEN NULL ELSE to_timestamp($12::double precision/1000) END,$13)",
+        )
+        .bind(attempt.id)
+        .bind(attempt.task_id.as_str())
+        .bind(attempt.role.as_str())
+        .bind(attempt.provider_id.as_str())
+        .bind(attempt.model_id.as_str())
+        .bind(attempt.attempt)
+        .bind(attempt.status.as_str())
+        .bind(&attempt.branch)
+        .bind(&attempt.base_commit)
+        .bind(attempt.heartbeat_unix_ms)
+        .bind(attempt.finished_unix_ms)
+        .bind(attempt.retain_until_unix_ms)
+        .bind(&attempt.error_code)
+        .execute(&self.pool)
+        .await;
+        match result {
+            Ok(_) => Ok(()),
+            Err(error) if constraint(&error) == Some("agent_runs_task_id_attempt_key") => {
+                Err(StoreError::Conflict(Conflict::Attempt))
+            }
+            Err(error) => Err(StoreError::Database(error)),
+        }
+    }
+
+    pub async fn get_attempt(&self, id: Uuid) -> Result<RuntimeAttempt, StoreError> {
+        let row = attempt_query("WHERE id=$1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::Database)?
+            .ok_or(StoreError::NotFound)?;
+        runtime_attempt_from_row(&row)
+    }
+
+    pub async fn list_attempts(&self, task_id: &str) -> Result<Vec<RuntimeAttempt>, StoreError> {
+        let rows = attempt_query(
+            "WHERE task_id=$1 AND branch IS NOT NULL AND base_commit IS NOT NULL ORDER BY attempt,id",
+        )
+            .bind(task_id.to_owned())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        rows.iter().map(runtime_attempt_from_row).collect()
+    }
+
+    pub async fn unfinished_attempts(&self) -> Result<Vec<RuntimeAttempt>, StoreError> {
+        let rows = attempt_query(
+            "WHERE finished_at IS NULL AND branch IS NOT NULL AND base_commit IS NOT NULL ORDER BY heartbeat_at NULLS FIRST,started_at,id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(runtime_attempt_from_row).collect()
+    }
+
+    pub async fn update_attempt(
+        &self,
+        id: Uuid,
+        update: &AttemptUpdate,
+    ) -> Result<RuntimeAttempt, StoreError> {
+        validate_error_code(update.error_code.as_deref())?;
+        let terminal = update.status != AttemptStatus::Running;
+        let result = sqlx::query(
+            "UPDATE agent_runs SET status=$2,error_code=$3,heartbeat_at=now(),
+             finished_at=CASE WHEN $4 THEN COALESCE(finished_at,now()) ELSE NULL END
+             WHERE id=$1",
+        )
+        .bind(id)
+        .bind(update.status.as_str())
+        .bind(&update.error_code)
+        .bind(terminal)
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::NotFound);
+        }
+        self.get_attempt(id).await
+    }
+
+    pub async fn claim_ready(
+        &self,
+        expected_version: i64,
+        claim: &ClaimAttempt,
+    ) -> Result<RuntimeAttempt, StoreError> {
+        validate_claim(claim)?;
+        if !(0..=crate::domain::task::MAX_SAFE_INTEGER).contains(&expected_version) {
+            return Err(invalid_numeric("expected_version"));
+        }
+        let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
+        let row = sqlx::query(
+            "SELECT status,version,max_attempts,project_run_id FROM tasks WHERE id=$1 FOR UPDATE",
+        )
+        .bind(claim.task_id.as_str())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(StoreError::Database)?
+        .ok_or(StoreError::NotFound)?;
+        let status: String = row.get("status");
+        let version: i64 = row.get("version");
+        if status != "READY" || version != expected_version {
+            return Err(StoreError::Conflict(Conflict::Claim));
+        }
+        let max_attempts = i64::from(row.get::<i16, _>("max_attempts"));
+        let attempt: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(attempt),0)+1 FROM agent_runs WHERE task_id=$1",
+        )
+        .bind(claim.task_id.as_str())
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(StoreError::Database)?;
+        if attempt > max_attempts {
+            return Err(StoreError::Conflict(Conflict::Attempt));
+        }
+        sqlx::query("UPDATE tasks SET status='RUNNING',version=version+1,updated_at=now() WHERE id=$1 AND version=$2 AND status='READY'")
+            .bind(claim.task_id.as_str()).bind(expected_version).execute(&mut *transaction).await.map_err(StoreError::Database)?;
+        sqlx::query("INSERT INTO events (project_run_id,task_id,actor_type,event_type,from_status,to_status,payload) VALUES ($1,$2,'system','status_transition','READY','RUNNING','{}')")
+            .bind(row.get::<Uuid,_>("project_run_id")).bind(claim.task_id.as_str()).execute(&mut *transaction).await.map_err(StoreError::Database)?;
+        sqlx::query(
+            "INSERT INTO agent_runs
+             (id,task_id,role,provider_id,model_id,attempt,status,branch,base_commit,heartbeat_at,retain_until)
+             VALUES ($1,$2,$3,$4,$5,$6,'running',$7,$8,now(),now()+($9 * interval '1 second'))",
+        )
+        .bind(claim.id).bind(claim.task_id.as_str()).bind(claim.role.as_str())
+        .bind(claim.provider_id.as_str()).bind(claim.model_id.as_str()).bind(attempt)
+        .bind(&claim.branch).bind(&claim.base_commit).bind(claim.retention_seconds)
+        .execute(&mut *transaction).await.map_err(StoreError::Database)?;
+        transaction.commit().await.map_err(StoreError::Database)?;
+        self.get_attempt(claim.id).await
+    }
+
+    pub async fn reserve_tool_call(
+        &self,
+        agent_run_id: Uuid,
+        call_id: &str,
+    ) -> Result<ToolCallReservation, StoreError> {
+        validate_key(call_id, "call ID")?;
+        let inserted = sqlx::query("INSERT INTO tool_call_reservations (agent_run_id,call_id) VALUES ($1,$2) ON CONFLICT DO NOTHING")
+            .bind(agent_run_id).bind(call_id).execute(&self.pool).await.map_err(StoreError::Database)?;
+        if inserted.rows_affected() == 1 {
+            return Ok(ToolCallReservation::New);
+        }
+        self.tool_call(agent_run_id, call_id).await
+    }
+
+    pub async fn complete_tool_call(
+        &self,
+        agent_run_id: Uuid,
+        call_id: &str,
+        metadata: &ToolCallMetadata,
+    ) -> Result<ToolCallReservation, StoreError> {
+        validate_key(call_id, "call ID")?;
+        non_negative_safe(metadata.duration_ms, "duration")?;
+        let result = sqlx::query(
+            "UPDATE tool_call_reservations SET status='completed',outcome=$3,duration_ms=$4,
+             artifact_id=$5,completed_at=now() WHERE agent_run_id=$1 AND call_id=$2 AND status='in_progress'",
+        )
+        .bind(agent_run_id).bind(call_id).bind(metadata.outcome.as_str())
+        .bind(metadata.duration_ms).bind(metadata.artifact_id).execute(&self.pool).await.map_err(StoreError::Database)?;
+        if result.rows_affected() == 1 {
+            return Ok(ToolCallReservation::Completed(metadata.clone()));
+        }
+        match self.tool_call(agent_run_id, call_id).await? {
+            ToolCallReservation::Completed(existing) if existing == *metadata => {
+                Ok(ToolCallReservation::Completed(existing))
+            }
+            ToolCallReservation::Completed(_) => Err(StoreError::Conflict(Conflict::ToolCall)),
+            ToolCallReservation::InProgress | ToolCallReservation::New => {
+                Err(StoreError::Conflict(Conflict::ToolCall))
+            }
+        }
+    }
+
+    async fn tool_call(
+        &self,
+        agent_run_id: Uuid,
+        call_id: &str,
+    ) -> Result<ToolCallReservation, StoreError> {
+        let row = sqlx::query("SELECT status,outcome,duration_ms,artifact_id FROM tool_call_reservations WHERE agent_run_id=$1 AND call_id=$2")
+            .bind(agent_run_id).bind(call_id).fetch_optional(&self.pool).await.map_err(StoreError::Database)?
+            .ok_or(StoreError::NotFound)?;
+        if row.get::<String, _>("status") == "in_progress" {
+            return Ok(ToolCallReservation::InProgress);
+        }
+        let outcome = ToolOutcome::parse(&row.get::<String, _>("outcome"))
+            .ok_or_else(|| invalid_numeric("tool_outcome"))?;
+        Ok(ToolCallReservation::Completed(ToolCallMetadata {
+            outcome,
+            duration_ms: row.get("duration_ms"),
+            artifact_id: row.get("artifact_id"),
+        }))
+    }
+
     pub async fn record_usage(&self, attempt_id: Uuid, usage: &Usage) -> Result<i64, StoreError> {
         usage.validate()?;
         sqlx::query_scalar("INSERT INTO model_usage (agent_run_id,input_tokens,cached_tokens,output_tokens,tool_calls,latency_ms,estimated) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id")
             .bind(attempt_id).bind(usage.input_tokens).bind(usage.cached_tokens).bind(usage.output_tokens)
             .bind(usage.tool_calls).bind(usage.latency_ms).bind(usage.estimated)
             .fetch_one(&self.pool).await.map_err(StoreError::Database)
+    }
+
+    pub async fn record_usage_once(
+        &self,
+        attempt_id: Uuid,
+        operation_key: &str,
+        usage: &Usage,
+    ) -> Result<i64, StoreError> {
+        validate_key(operation_key, "operation key")?;
+        usage.validate()?;
+        let inserted = sqlx::query_scalar(
+            "INSERT INTO model_usage
+             (agent_run_id,operation_key,input_tokens,cached_tokens,output_tokens,tool_calls,latency_ms,estimated)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+             ON CONFLICT (agent_run_id,operation_key) WHERE operation_key IS NOT NULL
+             DO NOTHING RETURNING id",
+        )
+        .bind(attempt_id)
+        .bind(operation_key)
+        .bind(usage.input_tokens)
+        .bind(usage.cached_tokens)
+        .bind(usage.output_tokens)
+        .bind(usage.tool_calls)
+        .bind(usage.latency_ms)
+        .bind(usage.estimated)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        if let Some(id) = inserted {
+            return Ok(id);
+        }
+        let row = sqlx::query("SELECT id,input_tokens,cached_tokens,output_tokens,tool_calls,latency_ms,estimated FROM model_usage WHERE agent_run_id=$1 AND operation_key=$2")
+            .bind(attempt_id).bind(operation_key).fetch_one(&self.pool).await.map_err(StoreError::Database)?;
+        let matches = row.get::<i64, _>("input_tokens") == usage.input_tokens
+            && row.get::<i64, _>("cached_tokens") == usage.cached_tokens
+            && row.get::<i64, _>("output_tokens") == usage.output_tokens
+            && row.get::<i64, _>("tool_calls") == usage.tool_calls
+            && row.get::<i64, _>("latency_ms") == usage.latency_ms
+            && row.get::<bool, _>("estimated") == usage.estimated;
+        if !matches {
+            return Err(StoreError::Conflict(Conflict::Usage));
+        }
+        Ok(row.get("id"))
+    }
+
+    pub async fn persist_artifact(&self, artifact: &ArtifactRecord) -> Result<(), StoreError> {
+        validate_artifact(artifact)?;
+        sqlx::query(
+            "INSERT INTO artifacts
+             (id,task_id,kind,path,logical_name,media_type,size_bytes,sha256)
+             VALUES ($1,$2,$3,NULL,$4,$5,$6,$7)",
+        )
+        .bind(artifact.id)
+        .bind(artifact.task_id.as_str())
+        .bind(artifact.kind.as_str())
+        .bind(artifact.logical_name.as_str())
+        .bind(artifact.media_type.as_str())
+        .bind(artifact.size)
+        .bind(&artifact.checksum)
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        Ok(())
+    }
+
+    pub async fn delete_artifact(&self, id: Uuid) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM artifacts WHERE id=$1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        Ok(())
     }
 
     pub async fn usage(&self, id: i64) -> Result<Usage, StoreError> {
@@ -362,6 +649,134 @@ fn task_query(suffix: &str) -> sqlx::query::Query<'static, Postgres, sqlx::postg
         "SELECT t.*,pr.project_id::text AS project_id,COALESCE((SELECT jsonb_agg(td.dependency_id ORDER BY td.dependency_id) FROM task_dependencies td WHERE td.task_id=t.id),'[]') AS depends_on FROM tasks t JOIN project_runs pr ON pr.id=t.project_run_id {suffix}"
     );
     sqlx::query(Box::leak(sql.into_boxed_str()))
+}
+
+fn attempt_query(
+    suffix: &str,
+) -> sqlx::query::Query<'static, Postgres, sqlx::postgres::PgArguments> {
+    let sql = format!(
+        "SELECT id,task_id,role,provider_id,model_id,attempt,status,branch,base_commit,
+         (extract(epoch FROM heartbeat_at)*1000)::bigint AS heartbeat_unix_ms,
+         (extract(epoch FROM finished_at)*1000)::bigint AS finished_unix_ms,
+         (extract(epoch FROM retain_until)*1000)::bigint AS retain_until_unix_ms,error_code
+         FROM agent_runs {suffix}"
+    );
+    sqlx::query(Box::leak(sql.into_boxed_str()))
+}
+
+fn runtime_attempt_from_row(row: &PgRow) -> Result<RuntimeAttempt, StoreError> {
+    let status = row.get::<String, _>("status");
+    Ok(RuntimeAttempt {
+        id: row.get("id"),
+        task_id: text(row, "task_id", "task_id")?,
+        role: text(row, "role", "role")?,
+        provider_id: text(row, "provider_id", "provider_id")?,
+        model_id: text(row, "model_id", "model_id")?,
+        attempt: row.get("attempt"),
+        status: AttemptStatus::parse(&status).ok_or_else(|| invalid_numeric("attempt_status"))?,
+        branch: row.get("branch"),
+        base_commit: row.get("base_commit"),
+        heartbeat_unix_ms: row.get("heartbeat_unix_ms"),
+        finished_unix_ms: row.get("finished_unix_ms"),
+        retain_until_unix_ms: row.get("retain_until_unix_ms"),
+        error_code: row.get("error_code"),
+    })
+}
+
+fn validate_runtime_attempt(attempt: &RuntimeAttempt) -> Result<(), StoreError> {
+    if !(1..=crate::domain::task::MAX_SAFE_INTEGER).contains(&attempt.attempt) {
+        return Err(invalid_numeric("attempt"));
+    }
+    validate_component(&attempt.branch, "branch")?;
+    validate_base_commit(&attempt.base_commit)?;
+    validate_error_code(attempt.error_code.as_deref())?;
+    for value in [
+        attempt.heartbeat_unix_ms,
+        attempt.finished_unix_ms,
+        attempt.retain_until_unix_ms,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        non_negative_safe(value, "timestamp")?;
+    }
+    Ok(())
+}
+
+fn validate_claim(claim: &ClaimAttempt) -> Result<(), StoreError> {
+    validate_component(&claim.branch, "branch")?;
+    validate_base_commit(&claim.base_commit)?;
+    if !(1..=crate::domain::task::MAX_SAFE_INTEGER).contains(&claim.retention_seconds) {
+        return Err(invalid_numeric("retention"));
+    }
+    Ok(())
+}
+
+fn validate_artifact(artifact: &ArtifactRecord) -> Result<(), StoreError> {
+    non_negative_safe(artifact.size, "artifact size")?;
+    validate_component(artifact.logical_name.as_str(), "logical name")?;
+    if artifact.media_type.as_str().chars().any(char::is_control) {
+        return Err(StoreError::InvalidId("media_type"));
+    }
+    if artifact.checksum.len() != 64
+        || !artifact
+            .checksum
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(StoreError::InvalidId("artifact_checksum"));
+    }
+    Ok(())
+}
+
+fn validate_key(value: &str, field: &'static str) -> Result<(), StoreError> {
+    if value.is_empty() || value.len() > 255 || value.chars().any(char::is_control) {
+        return Err(StoreError::InvalidId(field));
+    }
+    Ok(())
+}
+
+fn validate_component(value: &str, field: &'static str) -> Result<(), StoreError> {
+    if value.is_empty()
+        || value.len() > 255
+        || value.starts_with('-')
+        || value.contains(['/', '\\'])
+        || value.chars().any(char::is_control)
+    {
+        return Err(StoreError::InvalidId(field));
+    }
+    Ok(())
+}
+
+fn validate_error_code(value: Option<&str>) -> Result<(), StoreError> {
+    if value.is_some_and(|value| {
+        value.is_empty()
+            || value.len() > 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
+    }) {
+        return Err(StoreError::InvalidId("error_code"));
+    }
+    Ok(())
+}
+
+fn validate_base_commit(value: &str) -> Result<(), StoreError> {
+    if !matches!(value.len(), 40 | 64) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(StoreError::InvalidId("base_commit"));
+    }
+    Ok(())
+}
+
+fn non_negative_safe(value: i64, field: &'static str) -> Result<(), StoreError> {
+    if !(0..=crate::domain::task::MAX_SAFE_INTEGER).contains(&value) {
+        return Err(invalid_numeric(field));
+    }
+    Ok(())
+}
+
+fn invalid_numeric(field: &'static str) -> StoreError {
+    StoreError::InvalidNumeric(NumericError { field })
 }
 
 async fn replace_dependencies(
