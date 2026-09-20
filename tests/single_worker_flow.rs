@@ -1,6 +1,11 @@
 use std::{
+    collections::VecDeque,
     fs,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
 };
 
 use ai_team::{
@@ -18,15 +23,20 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+const FLOW_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[sqlx::test(migrations = "./migrations")]
 async fn production_orchestrator_conflict_preserves_target(pool: PgPool) {
-    production_flow(pool, true).await;
+    tokio::time::timeout(FLOW_TIMEOUT, production_flow(pool, true))
+        .await
+        .expect("production flow timed out");
 }
 
 #[sqlx::test(migrations = "./migrations")]
 async fn production_orchestrator_completes_full_flow(pool: PgPool) {
-    production_flow(pool, false).await;
+    tokio::time::timeout(FLOW_TIMEOUT, production_flow(pool, false))
+        .await
+        .expect("production flow timed out");
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -147,7 +157,7 @@ async fn production_flow(pool: PgPool, conflict: bool) {
             "usage": {"prompt_tokens": 4, "completion_tokens": 1, "total_tokens": 5}
         }),
     ];
-    let (base_url, server) = fake_provider(responses).await;
+    let mut server = FakeProvider::start(responses).await;
     unsafe {
         std::env::set_var("FLOW_API_KEY", "test-only");
         std::env::set_var("NOCTIS_RUNNER_IMAGE", "dbisynergy-frontend:dev");
@@ -162,7 +172,7 @@ async fn production_flow(pool: PgPool, conflict: bool) {
         .await
         .unwrap();
     sqlx::query("INSERT INTO project_runs (id,project_id,objective,status,token_budget) VALUES ($1,$2,'flow','running',1000)").bind(run_id).bind(project_id).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO providers (id,base_url,api_key_env,request_timeout_seconds) VALUES ('flow-e2e-provider',$1,'FLOW_API_KEY',5)").bind(&base_url).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO providers (id,base_url,api_key_env,request_timeout_seconds) VALUES ('flow-e2e-provider',$1,'FLOW_API_KEY',5)").bind(server.base_url()).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO models (id,provider_id,remote_name,class,context_window,max_output_tokens,claimed_capabilities,verified_capabilities) VALUES ('flow-e2e-model','flow-e2e-provider','mock','coding',1000,1000,'{\"chat\":true,\"streaming\":false,\"tools\":true,\"parallel_tools\":false}','{\"chat\":\"unknown\",\"streaming\":\"unknown\",\"tools\":\"unknown\",\"parallel_tools\":\"unknown\"}')").execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO tasks (id,project_run_id,role,title,objective,status,allowed_paths,acceptance_criteria,verification_commands,max_input_tokens,max_output_tokens,max_attempts,max_tool_calls,timeout_seconds) VALUES ($1,$2,'worker','flow','flow','READY','[\"tracked.txt\"]','[\"works\"]','[\"test -f tracked.txt\"]',1000,1000,2,10,60)").bind(&task_id).bind(run_id).execute(&pool).await.unwrap();
     let tasks = TaskRepository::new(pool.clone());
@@ -202,8 +212,13 @@ async fn production_flow(pool: PgPool, conflict: bool) {
             retention_lease_seconds: 60,
         },
     );
-    assert!(orchestrator.dispatch_once().await.unwrap());
-    server.await.unwrap();
+    assert!(
+        tokio::time::timeout(FLOW_TIMEOUT, orchestrator.dispatch_once())
+            .await
+            .expect("dispatch timed out")
+            .unwrap()
+    );
+    server.finish(3).await;
 
     let stored = tasks.get(&task_id).await.unwrap();
     assert_eq!(
@@ -448,18 +463,72 @@ fn git_output(path: &std::path::Path, arguments: &[&str]) -> String {
     .to_owned()
 }
 
-async fn fake_provider(responses: Vec<serde_json::Value>) -> (String, tokio::task::JoinHandle<()>) {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let handle = tokio::spawn(async move {
-        for response in responses {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = vec![0; 65536];
-            let _ = stream.read(&mut request).await.unwrap();
-            let body = response.to_string();
-            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).as_bytes()).await.unwrap();
+struct FakeProvider {
+    base_url: String,
+    requests: Arc<AtomicU64>,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl FakeProvider {
+    async fn start(responses: Vec<serde_json::Value>) -> Self {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicU64::new(0));
+        let request_count = Arc::clone(&requests);
+        let (shutdown, mut stopping) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let mut responses = VecDeque::from(responses);
+            while let Some(response) = responses.pop_front() {
+                let accepted = tokio::select! {
+                    accepted = listener.accept() => accepted,
+                    _ = &mut stopping => return,
+                };
+                let (mut stream, _) = accepted.unwrap();
+                let mut request = vec![0; 65536];
+                let _ = stream.read(&mut request).await.unwrap();
+                request_count.fetch_add(1, Ordering::SeqCst);
+                let body = response.to_string();
+                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).as_bytes()).await.unwrap();
+            }
+        });
+        Self {
+            base_url: format!("http://{address}/v1"),
+            requests,
+            shutdown: Some(shutdown),
+            task: Some(task),
         }
-    });
-    (format!("http://{address}/v1"), handle)
+    }
+
+    fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    async fn finish(&mut self, expected_requests: u64) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        let task = self.task.take().unwrap();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("fake provider shutdown timed out")
+            .expect("fake provider task failed");
+        assert_eq!(
+            self.requests.load(Ordering::SeqCst),
+            expected_requests,
+            "fake provider received unexpected request count"
+        );
+    }
+}
+
+impl Drop for FakeProvider {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
 }

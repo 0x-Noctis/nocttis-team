@@ -312,6 +312,11 @@ impl Orchestrator {
             git.cleanup(&worktree).map_err(|_| OrchestratorError::Git)?;
             return Err(OrchestratorError::Store);
         }
+        let task = self
+            .tasks
+            .get(attempt.task_id.as_str())
+            .await
+            .map_err(|_| OrchestratorError::Store)?;
         let run = Worker::new(
             &task.contract,
             TaskStatus::Running,
