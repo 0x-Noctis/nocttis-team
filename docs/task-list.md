@@ -431,7 +431,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
 
 ## Gelombang M2-E — Vertical Slice Integration
 
-- [ ] **M2-014 — Single-worker orchestrator** · Lane A/B Integrator
+- [x] **M2-014 — Single-worker orchestrator** · Lane A/B Integrator
   - Depends On: M2-010, M2-011, M2-012
   - Parallel With: M2-015
   - Allowed Paths: `src/orchestrator.rs`, `src/main.rs`, `tests/single_worker_flow.rs`
@@ -439,7 +439,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: crash-safe checkpoint, event tiap transition, attempt maksimal dua, usage tercatat, worktree cleanup sesuai retention.
   - Verify: end-to-end fake provider pada fixture menghasilkan patch terverifikasi.
 
-- [ ] **M2-015 — Vertical slice browser smoke** · Lane D
+- [x] **M2-015 — Vertical slice browser smoke** · Lane D
   - Depends On: M2-013
   - Parallel With: M2-014
   - Allowed Paths: `tests/e2e/**`, `docs/manual-test.md`, `web/package.json`, `web/package-lock.json`
@@ -449,11 +449,11 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
 
 ### Exit Gate M2
 
-- [ ] Task manual dari WebApp selesai end-to-end.
-- [ ] Worker hanya membaca/edit scope task.
-- [ ] Patch, review, verification, event, dan usage tersedia.
-- [ ] Failure tidak mengubah branch dasar.
-- [ ] Full validation dan E2E lulus.
+- [x] Task manual dari WebApp selesai end-to-end.
+- [x] Worker hanya membaca/edit scope task.
+- [x] Patch, review, verification, event, dan usage tersedia.
+- [x] Failure tidak mengubah branch dasar.
+- [x] Full validation dan E2E lulus.
 
 ---
 
@@ -871,3 +871,4 @@ Tambahkan satu baris saat task selesai atau diblokir.
 | 2026-09-20 | M2-010 | Task/artifact HTTP API terintegrasi dengan versioned delete dan live SSE bounded | `cargo test --test task_store --test task_api -- --test-threads=1 --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo fmt --check`; `git diff --check` | SSE mendukung heartbeat dan reconnect `Last-Event-ID` tanpa duplikat; CORS mengekspos `x-request-id` |
 | 2026-09-20 | M2-011 | Reviewer read-only terintegrasi dengan bounded mutation snapshot | `cargo test --test reviewer -- --test-threads=1 --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo fmt --check`; `git diff --check` | Test memakai production crate; tracked dan untracked mutation menghasilkan typed policy failure |
 | 2026-09-20 | M2-013 | Halaman task dan live events terintegrasi dengan lifecycle SSE aman | `npm run check`; `npm run build`; `git diff --check` | Native `EventSource` mengejar event tertinggal dan ditutup saat navigasi; destructive cancel wajib konfirmasi |
+| 2026-09-21 | M2-014, M2-015, Exit Gate M2 | Orchestrator crash-safe dan vertical browser smoke production terintegrasi | `cargo fmt --check`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `npm run check`; `npm run build`; `npm run e2e`; `git diff --check` | E2E 2 passed tanpa skip; integration checkpoint, recovery, retention lease, SSE reconnect, artifact, diff, verification, dan usage terverifikasi |
