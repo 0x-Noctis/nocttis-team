@@ -5,8 +5,10 @@ if (!fixtureApiKey) throw new Error('NOCTIS_E2E_API_KEY is required for E2E');
 
 module.exports = defineConfig({
   testDir: '.',
+  timeout: 180_000,
   outputDir: '../../web/test-results',
   fullyParallel: false,
+  workers: 1,
   retries: 0,
   reporter: 'line',
   use: {

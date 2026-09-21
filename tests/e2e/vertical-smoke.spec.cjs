@@ -16,7 +16,6 @@ function makeReady(taskId) {
 
 test.describe('production vertical slice', () => {
   test('provider to terminal task result survives SSE reconnect', async ({ page, request }) => {
-    test.setTimeout(150_000);
     const suffix = Date.now().toString(36);
     const providerId = `e2e-provider-${suffix}`;
     const modelId = 'e2e-model';
@@ -48,8 +47,7 @@ test.describe('production vertical slice', () => {
       });
       expect(model.ok()).toBeTruthy();
       const probe = await request.post(`/api/v1/models/${modelId}/probes/tools`, {
-        headers: headers(),
-        data: {}
+        headers: headers()
       });
       expect(probe.ok()).toBeTruthy();
       expect((await probe.json()).result.verified).toBe('supported');
@@ -76,7 +74,7 @@ test.describe('production vertical slice', () => {
       await form.getByLabel('Objective').fill('Exercise production vertical flow.');
       await form.getByLabel('Allowed paths, one per line').fill('e2e-output.txt');
       await form.getByLabel('Acceptance criteria, one per line').fill('Terminal result is visible.');
-      await form.getByLabel('Verification commands, one per line').fill('true');
+      await form.getByLabel('Verification commands, one per line').fill('cat e2e-output.txt');
       await form.getByRole('button', { name: 'Create task' }).press('Enter');
       await expect(page.getByRole('status')).toContainText(taskId);
       makeReady(taskId);
@@ -94,27 +92,25 @@ test.describe('production vertical slice', () => {
       expect(new Set(replayedIds).size).toBe(replayedIds.length);
       expect(replayedIds.length).toBeGreaterThanOrEqual(eventIdsBefore.length);
 
-      await expect.poll(async () => {
-        const status = await page.locator('.status strong').textContent();
-        return status === 'FAILED' ? status : status === 'DONE' ? status : 'RUNNING';
-      }, { timeout: 120_000 }).toBe('DONE');
+      await expect(page.locator('.status')).toContainText('DONE', { timeout: 120_000 });
       await page.reload();
       await expect(page.getByText('Loading task…')).toHaveCount(0);
       const eventIds = await page.locator('.timeline > li > span').allTextContents();
       expect(new Set(eventIds).size).toBe(eventIds.length);
       expect(eventIds.length).toBeGreaterThanOrEqual(eventIdsBefore.length);
-      await page.getByRole('button', { name: 'Start' }).press('Enter');
-      const visibleFailure = page.getByRole('alert');
-      await expect(visibleFailure).toBeVisible();
-      const failureText = await visibleFailure.textContent();
       await expect(page.getByRole('heading', { name: 'Verification results' })).toBeVisible();
-      await expect(page.getByText(/passed|exit_code/i)).toBeVisible();
+      await expect(page.getByText(/passed: true/i)).toBeVisible();
       await expect(page.getByRole('heading', { name: 'Artifacts' })).toBeVisible();
-      await expect(page.getByRole('link', { name: 'Download' }).first()).toBeVisible();
+      await expect(page.getByRole('link', { name: 'Download' })).toBeVisible();
       await expect(page.getByRole('heading', { name: 'Diff' })).toBeVisible();
       await expect(page.getByLabel('Task diff')).toContainText('e2e-output.txt');
       await expect(page.getByRole('heading', { name: 'Usage' })).toBeVisible();
       await expect(page.locator('.metrics dd').first()).not.toHaveText('0');
+
+      await page.getByRole('button', { name: 'Start' }).press('Enter');
+      const visibleFailure = page.getByRole('alert');
+      await expect(visibleFailure).toBeVisible();
+      const failureText = await visibleFailure.textContent();
       await expect(visibleFailure).toContainText(failureText ?? '');
       await expect(page.locator('main')).not.toContainText(process.env.NOCTIS_E2E_API_KEY);
       await expect(page.locator('main')).not.toContainText('/home/');

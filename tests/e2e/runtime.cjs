@@ -95,7 +95,8 @@ async function main() {
       NOCTIS__ARTIFACTS__ROOT: artifacts,
       NOCTIS__PROVIDER__BASE_URL: 'http://127.0.0.1:7411/v1',
       NOCTIS__PROVIDER__MODEL: 'e2e-model',
-      NOCTIS_RUNNER_IMAGE: 'postgres:16-alpine'
+      NOCTIS_PROVIDER_HOST_ALLOWLIST: '127.0.0.1',
+      NOCTIS_RUNNER_IMAGE: 'rust:1'
     }
   });
   await wait('http://127.0.0.1:7410/api/v1/health');

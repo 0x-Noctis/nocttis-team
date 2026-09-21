@@ -39,7 +39,7 @@ NOCTIS_E2E_API_KEY='<ephemeral fixture value>' \
 npm run e2e -- --grep 'production vertical slice'
 ```
 
-The test creates a provider and model against `http://127.0.0.1:7411/v1`, creates and starts a task using keyboard controls, disconnects and reconnects the browser network, rejects duplicate event IDs, and checks terminal status, verification, artifacts, diff, usage, persistent failure UI, and sensitive-output boundaries.
+The test creates a provider and model against `http://127.0.0.1:7411/v1`, creates and starts a task using keyboard controls, reconnects through page reload and SSE backlog, rejects duplicate event IDs, and checks terminal status, verification, artifacts, diff, usage, persistent failure UI, and sensitive-output boundaries. Because no planning route currently promotes a manual task, the harness changes only its status from `DRAFT` to `READY` in isolated PostgreSQL; verification, usage, artifact, and diff data come from production orchestration and APIs.
 
 ## Full manual vertical flow
 
