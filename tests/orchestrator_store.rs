@@ -16,8 +16,8 @@ use ai_team::{
         artifact::ArtifactStore,
         event::{
             ArtifactRecord, AttemptStatus, AttemptUpdate, ClaimAttempt, DispatchClaim,
-            RecoveryDisposition, RuntimeAttempt, ToolCallMetadata, ToolCallReservation,
-            ToolOutcome, Usage,
+            IntegrationOperation, IntegrationStatus, RecoveryDisposition, RuntimeAttempt,
+            ToolCallMetadata, ToolCallReservation, ToolOutcome, Usage,
         },
         task::{CheckpointPersistenceError, Conflict, StoreError, TaskRepository},
     },
@@ -40,6 +40,92 @@ async fn ownership(pool: &PgPool) -> (Uuid, Uuid) {
     sqlx::query("INSERT INTO project_runs (id,project_id,objective,status,token_budget) VALUES ($1,$2,'runtime','running',100)")
         .bind(run_id).bind(project_id).execute(pool).await.unwrap();
     (project_id, run_id)
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn integration_checkpoint_and_observable_writes_are_idempotent(pool: PgPool) {
+    let (project_id, run_id) = ownership(&pool).await;
+    let repository = TaskRepository::new(pool.clone());
+    let task = contract("durable-integration", project_id, run_id, 2);
+    ready(&repository, &task).await;
+    let attempt = claim(task.id.as_str());
+    repository.claim_ready(2, &attempt).await.unwrap();
+    start(&repository, attempt.id).await;
+    let operation = IntegrationOperation {
+        id: Uuid::new_v4(),
+        attempt_id: attempt.id,
+        task_id: task.id.clone(),
+        source_branch: attempt.branch.clone(),
+        source_base_commit: attempt.base_commit.clone(),
+        target_id: "integration-target".to_owned(),
+        target_branch: "integration-task".to_owned(),
+        target_base_commit: attempt.base_commit.clone(),
+        patch_sha256: "a".repeat(64),
+        owner_token: Uuid::new_v4(),
+        status: IntegrationStatus::Prepared,
+    };
+    let stored = repository.prepare_integration(&operation).await.unwrap();
+    assert_eq!(
+        repository.prepare_integration(&operation).await.unwrap(),
+        stored
+    );
+    repository
+        .set_integration_status(
+            stored.id,
+            stored.owner_token,
+            IntegrationStatus::Prepared,
+            IntegrationStatus::Applied,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        repository
+            .set_integration_status(
+                stored.id,
+                Uuid::new_v4(),
+                IntegrationStatus::Applied,
+                IntegrationStatus::Completed
+            )
+            .await,
+        Err(StoreError::Conflict(Conflict::Integration))
+    ));
+
+    let payload = serde_json::json!({"passed":true,"exit_code":0,"timed_out":false,"command_index":0,"artifact_ids":[]});
+    repository
+        .record_event_once(task.id.as_str(), "verify-0", "verification", &payload)
+        .await
+        .unwrap();
+    repository
+        .record_event_once(task.id.as_str(), "verify-0", "verification", &payload)
+        .await
+        .unwrap();
+    let events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM events WHERE task_id=$1 AND operation_key='verify-0'",
+    )
+    .bind(task.id.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(events, 1);
+
+    let artifact = ArtifactRecord {
+        id: Uuid::new_v4(),
+        task_id: task.id.clone(),
+        kind: text("kind", "diff"),
+        logical_name: text("logical_name", "official.diff"),
+        media_type: text("media_type", "text/x-diff"),
+        size: 4,
+        checksum: "b".repeat(64),
+    };
+    repository.persist_artifact_once(&artifact).await.unwrap();
+    repository.persist_artifact_once(&artifact).await.unwrap();
+    let artifacts: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM artifacts WHERE id=$1 AND path IS NULL")
+            .bind(artifact.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(artifacts, 1);
 }
 
 fn text(field: &'static str, value: impl Into<String>) -> NonEmptyString {

@@ -18,8 +18,9 @@ use crate::domain::{
 
 use super::event::{
     AgentAttempt, ArtifactRecord, AttemptStatus, AttemptUpdate, ClaimAttempt, DispatchClaim,
-    NumericError, RecoveryDisposition, RecoveryResult, RetentionClaim, RuntimeAttempt, TaskEvent,
-    ToolCallMetadata, ToolCallReservation, ToolOutcome, Usage,
+    IntegrationOperation, IntegrationStatus, NumericError, RecoveryDisposition, RecoveryResult,
+    RetentionClaim, RuntimeAttempt, TaskEvent, ToolCallMetadata, ToolCallReservation, ToolOutcome,
+    Usage,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,6 +32,7 @@ pub enum Conflict {
     RetentionLease,
     ToolIdentity,
     Usage,
+    Integration,
     StaleVersion,
 }
 
@@ -893,6 +895,78 @@ impl TaskRepository {
         }))
     }
 
+    pub async fn next_stale(
+        &self,
+        heartbeat_before_unix_ms: i64,
+    ) -> Result<Option<RuntimeAttempt>, StoreError> {
+        non_negative_safe(heartbeat_before_unix_ms, "heartbeat cutoff")?;
+        let row = attempt_query("WHERE finished_at IS NULL AND status IN ('assigned','running') AND COALESCE(heartbeat_at,started_at) < to_timestamp($1::double precision/1000) ORDER BY COALESCE(heartbeat_at,started_at),id LIMIT 1")
+            .bind(heartbeat_before_unix_ms).fetch_optional(&self.pool).await.map_err(StoreError::Database)?;
+        row.as_ref().map(runtime_attempt_from_row).transpose()
+    }
+
+    pub async fn recover_stale_attempt(
+        &self,
+        attempt_id: Uuid,
+        force_human: bool,
+    ) -> Result<RecoveryResult, StoreError> {
+        let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
+        let attempt = sqlx::query("SELECT task_id,status FROM agent_runs WHERE id=$1 AND finished_at IS NULL AND status IN ('assigned','running') FOR UPDATE")
+            .bind(attempt_id).fetch_optional(&mut *transaction).await.map_err(StoreError::Database)?.ok_or(StoreError::NotFound)?;
+        let task_id = attempt.get::<String, _>("task_id");
+        let task = task_query("WHERE t.id=$1 FOR UPDATE OF t")
+            .bind(task_id.clone())
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(StoreError::Database)?;
+        let stored = task_from_row(&task)?;
+        let tool_ambiguous: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tool_call_reservations WHERE agent_run_id=$1 AND status='in_progress')")
+            .bind(attempt_id).fetch_one(&mut *transaction).await.map_err(StoreError::Database)?;
+        let ambiguous = force_human || tool_ambiguous || stored.status == TaskStatus::Integrate;
+        let to = recovery_transition(&stored.contract, stored.status, ambiguous)?;
+        let (status, error, disposition) = if ambiguous {
+            (
+                "recovery_required",
+                if force_human {
+                    "recovery.worktree_unverified"
+                } else {
+                    "recovery.side_effect_ambiguous"
+                },
+                RecoveryDisposition::RecoveryRequired,
+            )
+        } else {
+            ("failed", "recovery.stale", RecoveryDisposition::Requeued)
+        };
+        sqlx::query("UPDATE agent_runs SET status=$2,error_code=$3,heartbeat_at=now(),finished_at=now() WHERE id=$1")
+            .bind(attempt_id).bind(status).bind(error).execute(&mut *transaction).await.map_err(StoreError::Database)?;
+        sqlx::query("UPDATE tasks SET status=$2,version=version+1,updated_at=now() WHERE id=$1")
+            .bind(&task_id)
+            .bind(enum_text(&to)?)
+            .execute(&mut *transaction)
+            .await
+            .map_err(StoreError::Database)?;
+        insert_event(
+            &mut transaction,
+            &stored.contract,
+            Actor::System,
+            stored.status,
+            to,
+        )
+        .await?;
+        transaction.commit().await.map_err(StoreError::Database)?;
+        Ok(RecoveryResult {
+            attempt_id,
+            task_id: NonEmptyString::parse("task_id", task_id)?,
+            disposition,
+        })
+    }
+
+    pub async fn pending_integrations(&self) -> Result<Vec<IntegrationOperation>, StoreError> {
+        sqlx::query("SELECT id,attempt_id,task_id,source_branch,source_base_commit,target_id,target_branch,target_base_commit,patch_sha256,owner_token,status FROM integration_operations WHERE status IN ('prepared','applied') ORDER BY created_at,id")
+            .fetch_all(&self.pool).await.map_err(StoreError::Database)?
+            .into_iter().map(integration_from_row).collect()
+    }
+
     pub async fn claim_retention_due(
         &self,
         lease_seconds: i64,
@@ -1071,6 +1145,89 @@ impl TaskRepository {
         Ok(row.get("id"))
     }
 
+    pub async fn record_event_once(
+        &self,
+        task_id: &str,
+        operation_key: &str,
+        event_type: &str,
+        payload: &Value,
+    ) -> Result<(), StoreError> {
+        validate_key(operation_key, "operation key")?;
+        validate_key(event_type, "event type")?;
+        let project_run_id: Uuid =
+            sqlx::query_scalar("SELECT project_run_id FROM tasks WHERE id=$1")
+                .bind(task_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(StoreError::Database)?
+                .ok_or(StoreError::NotFound)?;
+        sqlx::query("INSERT INTO events (project_run_id,task_id,actor_type,event_type,payload,operation_key) VALUES ($1,$2,'system',$3,$4,$5) ON CONFLICT (task_id,operation_key) WHERE operation_key IS NOT NULL DO NOTHING")
+            .bind(project_run_id).bind(task_id).bind(event_type).bind(payload).bind(operation_key)
+            .execute(&self.pool).await.map_err(StoreError::Database)?;
+        Ok(())
+    }
+
+    pub async fn prepare_integration(
+        &self,
+        operation: &IntegrationOperation,
+    ) -> Result<IntegrationOperation, StoreError> {
+        validate_integration(operation)?;
+        sqlx::query("INSERT INTO integration_operations (id,attempt_id,task_id,source_branch,source_base_commit,target_id,target_branch,target_base_commit,patch_sha256,owner_token,status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'prepared') ON CONFLICT (attempt_id) DO NOTHING")
+            .bind(operation.id).bind(operation.attempt_id).bind(operation.task_id.as_str())
+            .bind(&operation.source_branch).bind(&operation.source_base_commit).bind(&operation.target_id)
+            .bind(&operation.target_branch).bind(&operation.target_base_commit).bind(&operation.patch_sha256)
+            .bind(operation.owner_token).execute(&self.pool).await.map_err(StoreError::Database)?;
+        let stored = self
+            .integration_for_attempt(operation.attempt_id)
+            .await?
+            .ok_or(StoreError::NotFound)?;
+        if stored.task_id != operation.task_id
+            || stored.source_branch != operation.source_branch
+            || stored.source_base_commit != operation.source_base_commit
+            || stored.target_id != operation.target_id
+            || stored.target_branch != operation.target_branch
+            || stored.target_base_commit != operation.target_base_commit
+            || stored.patch_sha256 != operation.patch_sha256
+        {
+            return Err(StoreError::Conflict(Conflict::Integration));
+        }
+        Ok(stored)
+    }
+
+    pub async fn integration_for_attempt(
+        &self,
+        attempt_id: Uuid,
+    ) -> Result<Option<IntegrationOperation>, StoreError> {
+        let row = sqlx::query("SELECT id,attempt_id,task_id,source_branch,source_base_commit,target_id,target_branch,target_base_commit,patch_sha256,owner_token,status FROM integration_operations WHERE attempt_id=$1")
+            .bind(attempt_id).fetch_optional(&self.pool).await.map_err(StoreError::Database)?;
+        row.map(integration_from_row).transpose()
+    }
+
+    pub async fn set_integration_status(
+        &self,
+        operation_id: Uuid,
+        owner: Uuid,
+        from: IntegrationStatus,
+        to: IntegrationStatus,
+    ) -> Result<(), StoreError> {
+        let result = sqlx::query("UPDATE integration_operations SET status=$4,updated_at=now() WHERE id=$1 AND owner_token=$2 AND status=$3")
+            .bind(operation_id).bind(owner).bind(from.as_str()).bind(to.as_str())
+            .execute(&self.pool).await.map_err(StoreError::Database)?;
+        if result.rows_affected() != 1 {
+            return Err(StoreError::Conflict(Conflict::Integration));
+        }
+        Ok(())
+    }
+
+    pub async fn complete_done_attempt(&self, attempt_id: Uuid) -> Result<(), StoreError> {
+        let result = sqlx::query("UPDATE agent_runs ar SET status='completed',finished_at=COALESCE(finished_at,now()),heartbeat_at=now(),error_code=NULL FROM tasks t WHERE ar.id=$1 AND t.id=ar.task_id AND t.status='DONE' AND ar.status IN ('running','recovery_required','completed')")
+            .bind(attempt_id).execute(&self.pool).await.map_err(StoreError::Database)?;
+        if result.rows_affected() != 1 {
+            return Err(StoreError::Conflict(Conflict::Integration));
+        }
+        Ok(())
+    }
+
     pub async fn persist_artifact(&self, artifact: &ArtifactRecord) -> Result<(), StoreError> {
         validate_artifact(artifact)?;
         sqlx::query(
@@ -1088,6 +1245,22 @@ impl TaskRepository {
         .execute(&self.pool)
         .await
         .map_err(StoreError::Database)?;
+        Ok(())
+    }
+
+    pub async fn persist_artifact_once(&self, artifact: &ArtifactRecord) -> Result<(), StoreError> {
+        validate_artifact(artifact)?;
+        sqlx::query("INSERT INTO artifacts (id,task_id,kind,path,logical_name,media_type,size_bytes,sha256) VALUES ($1,$2,$3,NULL,$4,$5,$6,$7) ON CONFLICT (id) DO NOTHING")
+            .bind(artifact.id).bind(artifact.task_id.as_str()).bind(artifact.kind.as_str())
+            .bind(artifact.logical_name.as_str()).bind(artifact.media_type.as_str()).bind(artifact.size)
+            .bind(&artifact.checksum).execute(&self.pool).await.map_err(StoreError::Database)?;
+        let matches: bool = sqlx::query_scalar("SELECT task_id=$2 AND kind=$3 AND logical_name=$4 AND media_type=$5 AND size_bytes=$6 AND sha256=$7 FROM artifacts WHERE id=$1")
+            .bind(artifact.id).bind(artifact.task_id.as_str()).bind(artifact.kind.as_str())
+            .bind(artifact.logical_name.as_str()).bind(artifact.media_type.as_str()).bind(artifact.size)
+            .bind(&artifact.checksum).fetch_one(&self.pool).await.map_err(StoreError::Database)?;
+        if !matches {
+            return Err(StoreError::Conflict(Conflict::Integration));
+        }
         Ok(())
     }
 
@@ -1229,6 +1402,40 @@ fn validate_artifact(artifact: &ArtifactRecord) -> Result<(), StoreError> {
         return Err(StoreError::InvalidId("artifact_checksum"));
     }
     Ok(())
+}
+
+fn validate_integration(operation: &IntegrationOperation) -> Result<(), StoreError> {
+    validate_component(&operation.source_branch, "source branch")?;
+    validate_base_commit(&operation.source_base_commit)?;
+    validate_component(&operation.target_id, "target ID")?;
+    validate_component(&operation.target_branch, "target branch")?;
+    validate_base_commit(&operation.target_base_commit)?;
+    if operation.patch_sha256.len() != 64
+        || !operation
+            .patch_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(StoreError::InvalidId("patch checksum"));
+    }
+    Ok(())
+}
+
+fn integration_from_row(row: PgRow) -> Result<IntegrationOperation, StoreError> {
+    Ok(IntegrationOperation {
+        id: row.get("id"),
+        attempt_id: row.get("attempt_id"),
+        task_id: NonEmptyString::parse("task_id", row.get::<String, _>("task_id"))?,
+        source_branch: row.get("source_branch"),
+        source_base_commit: row.get("source_base_commit"),
+        target_id: row.get("target_id"),
+        target_branch: row.get("target_branch"),
+        target_base_commit: row.get("target_base_commit"),
+        patch_sha256: row.get("patch_sha256"),
+        owner_token: row.get("owner_token"),
+        status: IntegrationStatus::parse(row.get::<String, _>("status").as_str())
+            .ok_or(StoreError::InvalidId("integration status"))?,
+    })
 }
 
 fn validate_key(value: &str, field: &'static str) -> Result<(), StoreError> {

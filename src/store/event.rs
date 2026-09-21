@@ -193,6 +193,50 @@ pub struct Usage {
     pub estimated: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IntegrationStatus {
+    Prepared,
+    Applied,
+    Completed,
+    Conflict,
+}
+
+impl IntegrationStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Prepared => "prepared",
+            Self::Applied => "applied",
+            Self::Completed => "completed",
+            Self::Conflict => "conflict",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "prepared" => Some(Self::Prepared),
+            "applied" => Some(Self::Applied),
+            "completed" => Some(Self::Completed),
+            "conflict" => Some(Self::Conflict),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IntegrationOperation {
+    pub id: Uuid,
+    pub attempt_id: Uuid,
+    pub task_id: NonEmptyString,
+    pub source_branch: String,
+    pub source_base_commit: String,
+    pub target_id: String,
+    pub target_branch: String,
+    pub target_base_commit: String,
+    pub patch_sha256: String,
+    pub owner_token: Uuid,
+    pub status: IntegrationStatus,
+}
+
 impl Usage {
     pub fn validate(&self) -> Result<(), NumericError> {
         for (field, value) in [

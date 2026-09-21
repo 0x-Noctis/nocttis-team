@@ -127,6 +127,63 @@ async fn setup_failures_requeue_without_running_event(pool: PgPool) {
     }
 }
 
+#[sqlx::test(migrations = "./migrations")]
+async fn unverified_tools_are_rejected_before_worktree(pool: PgPool) {
+    for verified in ["unknown", "unsupported"] {
+        let fixture = FlowFixture::new();
+        let project_id = Uuid::new_v4();
+        let run_id = Uuid::new_v4();
+        let task_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO projects (id,name,repository_path) VALUES ($1,$2,$3)")
+            .bind(project_id)
+            .bind(format!("capability-{verified}"))
+            .bind(fixture.repository.to_string_lossy().as_ref())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO project_runs (id,project_id,objective,status,token_budget) VALUES ($1,$2,'capability','running',1000)").bind(run_id).bind(project_id).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO providers (id,base_url,api_key_env,request_timeout_seconds) VALUES ($1,'http://127.0.0.1:1','CAPABILITY_SECRET',1)").bind(format!("provider-{verified}")).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO models (id,provider_id,remote_name,class,context_window,max_output_tokens,claimed_capabilities,verified_capabilities) VALUES ($1,$2,'mock','coding',1000,1000,'{\"chat\":true,\"streaming\":false,\"tools\":true,\"parallel_tools\":false}',jsonb_build_object('chat','unknown','streaming','unknown','tools',$3::text,'parallel_tools','unknown'))").bind(format!("model-{verified}")).bind(format!("provider-{verified}")).bind(verified).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO tasks (id,project_run_id,role,title,objective,status,allowed_paths,acceptance_criteria,verification_commands,max_input_tokens,max_output_tokens,max_attempts) VALUES ($1,$2,'worker','capability','capability','READY','[\"tracked.txt\"]','[\"works\"]','[\"true\"]',1000,1000,2)").bind(&task_id).bind(run_id).execute(&pool).await.unwrap();
+        let tasks = TaskRepository::new(pool.clone());
+        let providers = ProviderRepository::new(pool.clone());
+        claim_task(
+            &tasks,
+            &providers,
+            StartRequest {
+                task_id: &task_id,
+                expected_version: 0,
+                model_id: &format!("model-{verified}"),
+                retention_seconds: 60,
+                attempt_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .unwrap();
+        let mut orchestrator = Orchestrator::new(
+            tasks.clone(),
+            providers,
+            ArtifactStore::new(&fixture.artifacts, 1024).unwrap(),
+            OrchestratorConfig {
+                worktree_root: fixture.worktrees.clone(),
+                stale_after_seconds: 60,
+                retention_lease_seconds: 60,
+            },
+        );
+        assert!(orchestrator.dispatch_once().await.unwrap());
+        assert_eq!(tasks.get(&task_id).await.unwrap().status, TaskStatus::Ready);
+        assert!(
+            !tasks
+                .events(&task_id)
+                .await
+                .unwrap()
+                .iter()
+                .any(|event| event.to_status == Some(TaskStatus::Running))
+        );
+        assert!(!fixture.worktrees.join(&task_id).exists());
+    }
+}
+
 async fn production_flow(pool: PgPool, conflict: bool) {
     let fixture = FlowFixture::new();
     let patch = "diff --git a/tracked.txt b/tracked.txt\n--- a/tracked.txt\n+++ b/tracked.txt\n@@ -1 +1 @@\n-base\n+changed\n";
@@ -173,7 +230,7 @@ async fn production_flow(pool: PgPool, conflict: bool) {
         .unwrap();
     sqlx::query("INSERT INTO project_runs (id,project_id,objective,status,token_budget) VALUES ($1,$2,'flow','running',1000)").bind(run_id).bind(project_id).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO providers (id,base_url,api_key_env,request_timeout_seconds) VALUES ('flow-e2e-provider',$1,'FLOW_API_KEY',5)").bind(server.base_url()).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO models (id,provider_id,remote_name,class,context_window,max_output_tokens,claimed_capabilities,verified_capabilities) VALUES ('flow-e2e-model','flow-e2e-provider','mock','coding',1000,1000,'{\"chat\":true,\"streaming\":false,\"tools\":true,\"parallel_tools\":false}','{\"chat\":\"unknown\",\"streaming\":\"unknown\",\"tools\":\"unknown\",\"parallel_tools\":\"unknown\"}')").execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO models (id,provider_id,remote_name,class,context_window,max_output_tokens,claimed_capabilities,verified_capabilities) VALUES ('flow-e2e-model','flow-e2e-provider','mock','coding',1000,1000,'{\"chat\":true,\"streaming\":false,\"tools\":true,\"parallel_tools\":false}','{\"chat\":\"unknown\",\"streaming\":\"unknown\",\"tools\":\"supported\",\"parallel_tools\":\"unknown\"}')").execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO tasks (id,project_run_id,role,title,objective,status,allowed_paths,acceptance_criteria,verification_commands,max_input_tokens,max_output_tokens,max_attempts,max_tool_calls,timeout_seconds) VALUES ($1,$2,'worker','flow','flow','READY','[\"tracked.txt\"]','[\"works\"]','[\"test -f tracked.txt\"]',1000,1000,2,10,60)").bind(&task_id).bind(run_id).execute(&pool).await.unwrap();
     let tasks = TaskRepository::new(pool.clone());
     let providers = ProviderRepository::new(pool.clone());
@@ -315,7 +372,7 @@ async fn start_is_atomic_and_ambiguous_recovery_never_replays(pool: PgPool) {
         .bind(run_id).bind(project_id).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO providers (id,base_url,api_key_env,request_timeout_seconds) VALUES ('flow-provider','http://127.0.0.1:1','FLOW_API_KEY',1)")
         .execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO models (id,provider_id,remote_name,class,context_window,max_output_tokens,claimed_capabilities,verified_capabilities) VALUES ('flow-model','flow-provider','mock','coding',1000,1000,'{\"chat\":true,\"streaming\":false,\"tools\":true,\"parallel_tools\":false}','{\"chat\":\"unknown\",\"streaming\":\"unknown\",\"tools\":\"unknown\",\"parallel_tools\":\"unknown\"}')")
+    sqlx::query("INSERT INTO models (id,provider_id,remote_name,class,context_window,max_output_tokens,claimed_capabilities,verified_capabilities) VALUES ('flow-model','flow-provider','mock','coding',1000,1000,'{\"chat\":true,\"streaming\":false,\"tools\":true,\"parallel_tools\":false}','{\"chat\":\"unknown\",\"streaming\":\"unknown\",\"tools\":\"supported\",\"parallel_tools\":\"unknown\"}')")
         .execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO tasks (id,project_run_id,role,title,objective,status,allowed_paths,acceptance_criteria,verification_commands,max_input_tokens,max_output_tokens,max_attempts) VALUES ($1,$2,'worker','flow','flow','READY','[\"src/**\"]','[\"works\"]','[\"cargo test\"]',1000,1000,2)")
         .bind(&task_id).bind(run_id).execute(&pool).await.unwrap();
