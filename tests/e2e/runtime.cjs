@@ -89,6 +89,7 @@ async function main() {
       ...process.env,
       DATABASE_URL: 'postgres://ai_team:ai_team_dev@127.0.0.1:55432/ai_team',
       PRIMARY_API_KEY: process.env.NOCTIS_E2E_API_KEY,
+      NOCTIS_PROVIDER_HOST_ALLOWLIST: '127.0.0.1',
       NOCTIS__SERVER__BIND: '127.0.0.1:7410',
       NOCTIS__GIT__WORKTREE_ROOT: worktrees,
       NOCTIS__ARTIFACTS__ROOT: artifacts,

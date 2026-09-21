@@ -16,6 +16,18 @@ function response(body) {
 }
 
 function modelReply(request) {
+  const probe = request.tools?.find(({ function: tool }) => tool?.name === 'noctis_capability_probe');
+  if (probe) {
+    return response({
+      role: 'assistant',
+      content: null,
+      tool_calls: [{
+        id: 'fixture-probe',
+        type: 'function',
+        function: { name: 'noctis_capability_probe', arguments: '{"enabled":true}' }
+      }]
+    });
+  }
   calls += 1;
   const messages = Array.isArray(request.messages) ? request.messages : [];
   const toolResults = messages.filter(({ role }) => role === 'tool').length;
