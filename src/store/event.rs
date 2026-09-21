@@ -237,6 +237,35 @@ pub struct IntegrationOperation {
     pub status: IntegrationStatus,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(untagged)]
+pub enum DurableEvent {
+    Usage {
+        input_tokens: i64,
+        cached_tokens: i64,
+        output_tokens: i64,
+        tool_calls: i64,
+        latency_ms: i64,
+        estimated: bool,
+    },
+    Verification {
+        passed: bool,
+        exit_code: Option<i32>,
+        timed_out: bool,
+        command_index: usize,
+        artifact_ids: [String; 2],
+    },
+}
+
+impl DurableEvent {
+    pub(crate) fn event_type(&self) -> &'static str {
+        match self {
+            Self::Usage { .. } => "usage",
+            Self::Verification { .. } => "verification",
+        }
+    }
+}
+
 impl Usage {
     pub fn validate(&self) -> Result<(), NumericError> {
         for (field, value) in [

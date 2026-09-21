@@ -18,9 +18,9 @@ use crate::domain::{
 
 use super::event::{
     AgentAttempt, ArtifactRecord, AttemptStatus, AttemptUpdate, ClaimAttempt, DispatchClaim,
-    IntegrationOperation, IntegrationStatus, NumericError, RecoveryDisposition, RecoveryResult,
-    RetentionClaim, RuntimeAttempt, TaskEvent, ToolCallMetadata, ToolCallReservation, ToolOutcome,
-    Usage,
+    DurableEvent, IntegrationOperation, IntegrationStatus, NumericError, RecoveryDisposition,
+    RecoveryResult, RetentionClaim, RuntimeAttempt, TaskEvent, ToolCallMetadata,
+    ToolCallReservation, ToolOutcome, Usage,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,6 +33,7 @@ pub enum Conflict {
     ToolIdentity,
     Usage,
     Integration,
+    Event,
     StaleVersion,
 }
 
@@ -927,7 +928,9 @@ impl TaskRepository {
         let (status, error, disposition) = if ambiguous {
             (
                 "recovery_required",
-                if force_human {
+                if tool_ambiguous {
+                    "recovery.tool_in_progress"
+                } else if force_human {
                     "recovery.worktree_unverified"
                 } else {
                     "recovery.side_effect_ambiguous"
@@ -962,7 +965,7 @@ impl TaskRepository {
     }
 
     pub async fn pending_integrations(&self) -> Result<Vec<IntegrationOperation>, StoreError> {
-        sqlx::query("SELECT id,attempt_id,task_id,source_branch,source_base_commit,target_id,target_branch,target_base_commit,patch_sha256,owner_token,status FROM integration_operations WHERE status IN ('prepared','applied') ORDER BY created_at,id")
+        sqlx::query("SELECT id,attempt_id,task_id,source_branch,source_base_commit,target_id,target_branch,target_base_commit,patch_sha256,owner_token,status FROM integration_operations WHERE status IN ('prepared','applied','conflict') ORDER BY created_at,id")
             .fetch_all(&self.pool).await.map_err(StoreError::Database)?
             .into_iter().map(integration_from_row).collect()
     }
@@ -1149,11 +1152,14 @@ impl TaskRepository {
         &self,
         task_id: &str,
         operation_key: &str,
-        event_type: &str,
-        payload: &Value,
+        event: &DurableEvent,
     ) -> Result<(), StoreError> {
         validate_key(operation_key, "operation key")?;
-        validate_key(event_type, "event type")?;
+        let payload = serde_json::to_value(event)?;
+        if serde_json::to_vec(&payload)?.len() > 64 * 1024 {
+            return Err(StoreError::Conflict(Conflict::Event));
+        }
+        let event_type = event.event_type();
         let project_run_id: Uuid =
             sqlx::query_scalar("SELECT project_run_id FROM tasks WHERE id=$1")
                 .bind(task_id)
@@ -1161,10 +1167,27 @@ impl TaskRepository {
                 .await
                 .map_err(StoreError::Database)?
                 .ok_or(StoreError::NotFound)?;
-        sqlx::query("INSERT INTO events (project_run_id,task_id,actor_type,event_type,payload,operation_key) VALUES ($1,$2,'system',$3,$4,$5) ON CONFLICT (task_id,operation_key) WHERE operation_key IS NOT NULL DO NOTHING")
-            .bind(project_run_id).bind(task_id).bind(event_type).bind(payload).bind(operation_key)
-            .execute(&self.pool).await.map_err(StoreError::Database)?;
-        Ok(())
+        let inserted = sqlx::query("INSERT INTO events (project_run_id,task_id,actor_type,event_type,payload,operation_key) VALUES ($1,$2,'system',$3,$4,$5) ON CONFLICT (task_id,operation_key) WHERE operation_key IS NOT NULL DO NOTHING RETURNING id")
+            .bind(project_run_id).bind(task_id).bind(event_type).bind(&payload).bind(operation_key)
+            .fetch_optional(&self.pool).await.map_err(StoreError::Database)?;
+        if inserted.is_some() {
+            return Ok(());
+        }
+        let matches: bool = sqlx::query_scalar(
+            "SELECT event_type=$3 AND payload=$4 FROM events WHERE task_id=$1 AND operation_key=$2",
+        )
+        .bind(task_id)
+        .bind(operation_key)
+        .bind(event_type)
+        .bind(&payload)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        if matches {
+            Ok(())
+        } else {
+            Err(StoreError::Conflict(Conflict::Event))
+        }
     }
 
     pub async fn prepare_integration(
@@ -1217,6 +1240,77 @@ impl TaskRepository {
             return Err(StoreError::Conflict(Conflict::Integration));
         }
         Ok(())
+    }
+
+    pub async fn finalize_integration(
+        &self,
+        operation_id: Uuid,
+        owner: Uuid,
+        from: IntegrationStatus,
+        to: TaskStatus,
+    ) -> Result<StoredTask, StoreError> {
+        let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
+        let operation = sqlx::query("SELECT task_id,attempt_id,status,owner_token FROM integration_operations WHERE id=$1 FOR UPDATE")
+            .bind(operation_id).fetch_optional(&mut *transaction).await.map_err(StoreError::Database)?
+            .ok_or(StoreError::NotFound)?;
+        if operation.get::<Uuid, _>("owner_token") != owner
+            || operation.get::<String, _>("status") != from.as_str()
+        {
+            return Err(StoreError::Conflict(Conflict::Integration));
+        }
+        let task_id: String = operation.get("task_id");
+        let attempt_id: Uuid = operation.get("attempt_id");
+        let row = task_query("WHERE t.id=$1 FOR UPDATE")
+            .bind(task_id.clone())
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(StoreError::Database)?;
+        let current = task_from_row(&row)?;
+        let actor = match to {
+            TaskStatus::Done | TaskStatus::Conflict => Actor::Integrator,
+            TaskStatus::NeedsHuman => Actor::System,
+            _ => return Err(StoreError::Conflict(Conflict::Integration)),
+        };
+        if current.status != to {
+            if to == TaskStatus::NeedsHuman {
+                recovery_transition(&current.contract, current.status, true)?;
+            } else {
+                transition(&current.contract, current.status, to, actor)?;
+            }
+            sqlx::query("UPDATE tasks SET status=$2,version=version+1,updated_at=now() WHERE id=$1 AND version=$3")
+                .bind(&task_id).bind(enum_text(&to)?).bind(current.version)
+                .execute(&mut *transaction).await.map_err(StoreError::Database)?;
+            insert_event(
+                &mut transaction,
+                &current.contract,
+                actor,
+                current.status,
+                to,
+            )
+            .await?;
+        }
+        let (attempt_status, error_code) = match to {
+            TaskStatus::Done => ("completed", None),
+            TaskStatus::Conflict => ("failed", Some("integration.conflict")),
+            TaskStatus::NeedsHuman => ("recovery_required", Some("integration.recovery_required")),
+            _ => unreachable!(),
+        };
+        sqlx::query("UPDATE agent_runs SET status=$2,finished_at=COALESCE(finished_at,now()),heartbeat_at=now(),error_code=$3 WHERE id=$1")
+            .bind(attempt_id).bind(attempt_status).bind(error_code)
+            .execute(&mut *transaction).await.map_err(StoreError::Database)?;
+        sqlx::query(
+            "UPDATE integration_operations SET status='completed',updated_at=now() WHERE id=$1",
+        )
+        .bind(operation_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(StoreError::Database)?;
+        transaction.commit().await.map_err(StoreError::Database)?;
+        Ok(StoredTask {
+            contract: current.contract,
+            status: to,
+            version: current.version + i64::from(current.status != to),
+        })
     }
 
     pub async fn complete_done_attempt(&self, attempt_id: Uuid) -> Result<(), StoreError> {

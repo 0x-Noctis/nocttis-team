@@ -125,6 +125,22 @@ fn rejects_duplicate_without_overwriting() {
 }
 
 #[test]
+fn remove_deletes_artifact_and_metadata() {
+    let directory = TestDirectory::new();
+    let store = ArtifactStore::new(&directory.0, 1024).unwrap();
+    store
+        .write("removed", "result.txt", "text/plain", b"data", |_| {
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+
+    store.remove("removed").unwrap();
+
+    assert_eq!(store.read("removed"), Err(ArtifactError::NotFound));
+    assert!(fs::read_dir(&directory.0).unwrap().next().is_none());
+}
+
+#[test]
 fn metadata_failure_removes_final_and_partial_files() {
     let directory = TestDirectory::new();
     let store = ArtifactStore::new(&directory.0, 1024).unwrap();

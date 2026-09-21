@@ -16,8 +16,8 @@ use ai_team::{
         artifact::ArtifactStore,
         event::{
             ArtifactRecord, AttemptStatus, AttemptUpdate, ClaimAttempt, DispatchClaim,
-            IntegrationOperation, IntegrationStatus, RecoveryDisposition, RuntimeAttempt,
-            ToolCallMetadata, ToolCallReservation, ToolOutcome, Usage,
+            DurableEvent, IntegrationOperation, IntegrationStatus, RecoveryDisposition,
+            RuntimeAttempt, ToolCallMetadata, ToolCallReservation, ToolOutcome, Usage,
         },
         task::{CheckpointPersistenceError, Conflict, StoreError, TaskRepository},
     },
@@ -90,13 +90,51 @@ async fn integration_checkpoint_and_observable_writes_are_idempotent(pool: PgPoo
         Err(StoreError::Conflict(Conflict::Integration))
     ));
 
-    let payload = serde_json::json!({"passed":true,"exit_code":0,"timed_out":false,"command_index":0,"artifact_ids":[]});
+    let payload = DurableEvent::Verification {
+        passed: true,
+        exit_code: Some(0),
+        timed_out: false,
+        command_index: 0,
+        artifact_ids: ["stdout".to_owned(), "stderr".to_owned()],
+    };
     repository
-        .record_event_once(task.id.as_str(), "verify-0", "verification", &payload)
+        .record_event_once(task.id.as_str(), "verify-0", &payload)
         .await
         .unwrap();
+    assert!(matches!(
+        repository
+            .record_event_once(
+                task.id.as_str(),
+                "verify-0",
+                &DurableEvent::Verification {
+                    passed: false,
+                    exit_code: Some(0),
+                    timed_out: false,
+                    command_index: 0,
+                    artifact_ids: ["stdout".to_owned(), "stderr".to_owned()],
+                },
+            )
+            .await,
+        Err(StoreError::Conflict(Conflict::Event))
+    ));
+    assert!(matches!(
+        repository
+            .record_event_once(
+                task.id.as_str(),
+                "oversized",
+                &DurableEvent::Verification {
+                    passed: true,
+                    exit_code: Some(0),
+                    timed_out: false,
+                    command_index: 0,
+                    artifact_ids: ["x".repeat(64 * 1024), "stderr".to_owned()],
+                },
+            )
+            .await,
+        Err(StoreError::Conflict(Conflict::Event))
+    ));
     repository
-        .record_event_once(task.id.as_str(), "verify-0", "verification", &payload)
+        .record_event_once(task.id.as_str(), "verify-0", &payload)
         .await
         .unwrap();
     let events: i64 = sqlx::query_scalar(
@@ -126,6 +164,88 @@ async fn integration_checkpoint_and_observable_writes_are_idempotent(pool: PgPoo
             .await
             .unwrap();
     assert_eq!(artifacts, 1);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn conflict_checkpoint_finalizes_task_attempt_and_operation_atomically(pool: PgPool) {
+    let (project_id, run_id) = ownership(&pool).await;
+    let repository = TaskRepository::new(pool.clone());
+    let task = contract("integration-conflict", project_id, run_id, 2);
+    ready(&repository, &task).await;
+    let attempt = claim(task.id.as_str());
+    repository.claim_ready(2, &attempt).await.unwrap();
+    start(&repository, attempt.id).await;
+    sqlx::query("UPDATE tasks SET status='INTEGRATE',version=version+1 WHERE id=$1")
+        .bind(task.id.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let operation = repository
+        .prepare_integration(&IntegrationOperation {
+            id: Uuid::new_v4(),
+            attempt_id: attempt.id,
+            task_id: task.id.clone(),
+            source_branch: attempt.branch.clone(),
+            source_base_commit: attempt.base_commit.clone(),
+            target_id: "conflict-target".to_owned(),
+            target_branch: "conflict-branch".to_owned(),
+            target_base_commit: attempt.base_commit.clone(),
+            patch_sha256: "c".repeat(64),
+            owner_token: Uuid::new_v4(),
+            status: IntegrationStatus::Prepared,
+        })
+        .await
+        .unwrap();
+    repository
+        .set_integration_status(
+            operation.id,
+            operation.owner_token,
+            IntegrationStatus::Prepared,
+            IntegrationStatus::Conflict,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        repository.pending_integrations().await.unwrap(),
+        vec![IntegrationOperation {
+            status: IntegrationStatus::Conflict,
+            ..operation.clone()
+        }]
+    );
+    repository
+        .finalize_integration(
+            operation.id,
+            operation.owner_token,
+            IntegrationStatus::Conflict,
+            TaskStatus::Conflict,
+        )
+        .await
+        .unwrap();
+    let completed_events = repository.events(task.id.as_str()).await.unwrap().len();
+    assert!(matches!(
+        repository
+            .finalize_integration(
+                operation.id,
+                operation.owner_token,
+                IntegrationStatus::Conflict,
+                TaskStatus::Conflict,
+            )
+            .await,
+        Err(StoreError::Conflict(Conflict::Integration))
+    ));
+    assert_eq!(
+        repository.get(task.id.as_str()).await.unwrap().status,
+        TaskStatus::Conflict
+    );
+    assert_eq!(
+        repository.get_attempt(attempt.id).await.unwrap().status,
+        AttemptStatus::Failed
+    );
+    assert!(repository.pending_integrations().await.unwrap().is_empty());
+    assert_eq!(
+        repository.events(task.id.as_str()).await.unwrap().len(),
+        completed_events
+    );
 }
 
 fn text(field: &'static str, value: impl Into<String>) -> NonEmptyString {

@@ -31,8 +31,8 @@ use crate::{
     store::{
         artifact::ArtifactStore,
         event::{
-            ArtifactRecord, AttemptStatus, AttemptUpdate, ClaimAttempt, IntegrationOperation,
-            IntegrationStatus, Usage,
+            ArtifactRecord, ClaimAttempt, DurableEvent, IntegrationOperation, IntegrationStatus,
+            Usage,
         },
         provider::ProviderRepository,
         task::{Conflict, StoreError, StoredTask, TaskRepository},
@@ -121,15 +121,16 @@ impl Orchestrator {
                 .project_repository(attempt.task_id.as_str())
                 .await
                 .map_err(|_| OrchestratorError::Store)?;
-            let git = GitWorktreeManager::new(repository, &self.config.worktree_root)
-                .map_err(|_| OrchestratorError::Git)?;
-            let verified = git.open(
-                attempt.task_id.as_str(),
-                &attempt.branch,
-                &attempt.base_commit,
-            );
-            let force_human = match verified {
-                Ok(worktree) => git.cleanup(&worktree).is_err(),
+            let force_human = match GitWorktreeManager::new(repository, &self.config.worktree_root)
+            {
+                Ok(git) => match git.open(
+                    attempt.task_id.as_str(),
+                    &attempt.branch,
+                    &attempt.base_commit,
+                ) {
+                    Ok(worktree) => git.cleanup(&worktree).is_err(),
+                    Err(_) => true,
+                },
                 Err(_) => true,
             };
             self.tasks
@@ -154,17 +155,28 @@ impl Orchestrator {
                 .get(operation.task_id.as_str())
                 .await
                 .map_err(|_| OrchestratorError::Store)?;
-            if task.status == TaskStatus::Done {
+            if task.status == TaskStatus::Done && operation.status == IntegrationStatus::Applied {
                 self.tasks
-                    .complete_done_attempt(operation.attempt_id)
-                    .await
-                    .map_err(|_| OrchestratorError::Store)?;
-                self.tasks
-                    .set_integration_status(
+                    .finalize_integration(
                         operation.id,
                         operation.owner_token,
                         IntegrationStatus::Applied,
-                        IntegrationStatus::Completed,
+                        TaskStatus::Done,
+                    )
+                    .await
+                    .map_err(|_| OrchestratorError::Store)?;
+                recovered += 1;
+                continue;
+            }
+            if task.status == TaskStatus::Conflict
+                && operation.status == IntegrationStatus::Conflict
+            {
+                self.tasks
+                    .finalize_integration(
+                        operation.id,
+                        operation.owner_token,
+                        IntegrationStatus::Conflict,
+                        TaskStatus::Conflict,
                     )
                     .await
                     .map_err(|_| OrchestratorError::Store)?;
@@ -174,13 +186,37 @@ impl Orchestrator {
             if task.status != TaskStatus::Integrate {
                 continue;
             }
+            if operation.status == IntegrationStatus::Conflict {
+                self.tasks
+                    .finalize_integration(
+                        operation.id,
+                        operation.owner_token,
+                        IntegrationStatus::Conflict,
+                        TaskStatus::Conflict,
+                    )
+                    .await
+                    .map_err(|_| OrchestratorError::Store)?;
+                recovered += 1;
+                continue;
+            }
             let repository = self
                 .tasks
                 .project_repository(operation.task_id.as_str())
                 .await
                 .map_err(|_| OrchestratorError::Store)?;
-            let git = GitWorktreeManager::new(repository, &self.config.worktree_root)
-                .map_err(|_| OrchestratorError::Git)?;
+            let Ok(git) = GitWorktreeManager::new(repository, &self.config.worktree_root) else {
+                self.tasks
+                    .finalize_integration(
+                        operation.id,
+                        operation.owner_token,
+                        operation.status,
+                        TaskStatus::NeedsHuman,
+                    )
+                    .await
+                    .map_err(|_| OrchestratorError::Store)?;
+                recovered += 1;
+                continue;
+            };
             let source = git.open(
                 operation.task_id.as_str(),
                 &operation.source_branch,
@@ -193,103 +229,43 @@ impl Orchestrator {
             );
             let outcome = match (source, target) {
                 (Ok(source), Ok(target)) => {
-                    let source_patch = git
-                        .diff_binary(&source)
-                        .map_err(|_| OrchestratorError::Git)?;
-                    let source_hash = format!("{:x}", Sha256::digest(&source_patch));
-                    let target_patch = git
-                        .diff_binary(&target)
-                        .map_err(|_| OrchestratorError::Git)?;
-                    let target_hash = format!("{:x}", Sha256::digest(&target_patch));
-                    if operation.status == IntegrationStatus::Prepared
-                        && target_patch.is_empty()
-                        && source_hash == operation.patch_sha256
-                    {
-                        match git
-                            .integrate_verified(&source, &target)
-                            .map_err(|_| OrchestratorError::Git)?
-                        {
-                            IntegrationResult::Integrated => {
-                                self.tasks
-                                    .set_integration_status(
-                                        operation.id,
-                                        operation.owner_token,
-                                        IntegrationStatus::Prepared,
-                                        IntegrationStatus::Applied,
-                                    )
-                                    .await
-                                    .map_err(|_| OrchestratorError::Store)?;
-                                Some(TaskStatus::Done)
-                            }
-                            IntegrationResult::Conflict => {
-                                self.tasks
-                                    .set_integration_status(
-                                        operation.id,
-                                        operation.owner_token,
-                                        IntegrationStatus::Prepared,
-                                        IntegrationStatus::Conflict,
-                                    )
-                                    .await
-                                    .map_err(|_| OrchestratorError::Store)?;
-                                Some(TaskStatus::Conflict)
+                    match (git.diff_binary(&source), git.diff_binary(&target)) {
+                        (Ok(source_patch), Ok(target_patch)) => {
+                            let source_hash = format!("{:x}", Sha256::digest(&source_patch));
+                            let target_hash = format!("{:x}", Sha256::digest(&target_patch));
+                            if let Some(status) = recovered_integration_status(
+                                operation.status,
+                                &target_hash,
+                                &operation.patch_sha256,
+                            ) {
+                                (status, operation.status)
+                            } else if operation.status == IntegrationStatus::Prepared
+                                && target_patch.is_empty()
+                                && source_hash == operation.patch_sha256
+                            {
+                                match git.integrate_verified(&source, &target) {
+                                    Ok(IntegrationResult::Integrated) => {
+                                        (TaskStatus::Done, IntegrationStatus::Prepared)
+                                    }
+                                    Ok(IntegrationResult::Conflict) => {
+                                        (TaskStatus::Conflict, IntegrationStatus::Prepared)
+                                    }
+                                    Err(_) => (TaskStatus::NeedsHuman, operation.status),
+                                }
+                            } else {
+                                (TaskStatus::NeedsHuman, operation.status)
                             }
                         }
-                    } else if operation.status == IntegrationStatus::Applied
-                        && target_hash == operation.patch_sha256
-                    {
-                        Some(TaskStatus::Done)
-                    } else {
-                        Some(TaskStatus::NeedsHuman)
+                        _ => (TaskStatus::NeedsHuman, operation.status),
                     }
                 }
-                _ => Some(TaskStatus::NeedsHuman),
+                _ => (TaskStatus::NeedsHuman, operation.status),
             };
-            if let Some(status) = outcome {
-                let actor = if matches!(status, TaskStatus::Done | TaskStatus::Conflict) {
-                    Actor::Integrator
-                } else {
-                    Actor::System
-                };
-                let current = self.transition(&task, status, actor).await?;
-                if current.status == TaskStatus::Done {
-                    self.tasks
-                        .set_integration_status(
-                            operation.id,
-                            operation.owner_token,
-                            IntegrationStatus::Applied,
-                            IntegrationStatus::Completed,
-                        )
-                        .await
-                        .map_err(|_| OrchestratorError::Store)?;
-                    self.tasks
-                        .complete_done_attempt(operation.attempt_id)
-                        .await
-                        .map_err(|_| OrchestratorError::Store)?;
-                } else {
-                    self.tasks
-                        .update_attempt(
-                            operation.attempt_id,
-                            &AttemptUpdate {
-                                status: if current.status == TaskStatus::Conflict {
-                                    AttemptStatus::Failed
-                                } else {
-                                    AttemptStatus::RecoveryRequired
-                                },
-                                error_code: Some(
-                                    if current.status == TaskStatus::Conflict {
-                                        "integration.conflict"
-                                    } else {
-                                        "integration.recovery_required"
-                                    }
-                                    .to_owned(),
-                                ),
-                            },
-                        )
-                        .await
-                        .map_err(|_| OrchestratorError::Store)?;
-                }
-                recovered += 1;
-            }
+            self.tasks
+                .finalize_integration(operation.id, operation.owner_token, outcome.1, outcome.0)
+                .await
+                .map_err(|_| OrchestratorError::Store)?;
+            recovered += 1;
         }
         Ok(recovered)
     }
@@ -580,20 +556,21 @@ impl Orchestrator {
                 .record_event_once(
                     attempt.task_id.as_str(),
                     &format!("{}-verification-{index}", attempt.id),
-                    "verification",
-                    &serde_json::json!({
-                        "passed": result.passed,
-                        "exit_code": result.exit_code,
-                        "timed_out": result.timed_out,
-                        "command_index": index,
-                        "artifact_ids": [result.stdout_artifact_id, result.stderr_artifact_id],
-                    }),
+                    &DurableEvent::Verification {
+                        passed: result.passed,
+                        exit_code: result.exit_code,
+                        timed_out: result.timed_out,
+                        command_index: index,
+                        artifact_ids: [
+                            result.stdout_artifact_id.clone(),
+                            result.stderr_artifact_id.clone(),
+                        ],
+                    },
                 )
                 .await
                 .map_err(|_| OrchestratorError::Store)?;
         }
-        let current = self
-            .transition(&current, report.proposed_status, Actor::Verifier)
+        self.transition(&current, report.proposed_status, Actor::Verifier)
             .await?;
         if report.verdict == VerificationVerdict::Failed {
             return self
@@ -633,59 +610,18 @@ impl Orchestrator {
             .integrate_verified(&worktree, &target)
             .map_err(|_| OrchestratorError::Git)?;
         let terminal = match integrated {
-            IntegrationResult::Integrated => {
-                self.tasks
-                    .set_integration_status(
-                        operation.id,
-                        operation.owner_token,
-                        IntegrationStatus::Prepared,
-                        IntegrationStatus::Applied,
-                    )
-                    .await
-                    .map_err(|_| OrchestratorError::Store)?;
-                TaskStatus::Done
-            }
-            IntegrationResult::Conflict => {
-                self.tasks
-                    .set_integration_status(
-                        operation.id,
-                        operation.owner_token,
-                        IntegrationStatus::Prepared,
-                        IntegrationStatus::Conflict,
-                    )
-                    .await
-                    .map_err(|_| OrchestratorError::Store)?;
-                TaskStatus::Conflict
-            }
+            IntegrationResult::Integrated => TaskStatus::Done,
+            IntegrationResult::Conflict => TaskStatus::Conflict,
         };
-        self.transition(&current, terminal, Actor::Integrator)
-            .await?;
         self.tasks
-            .update_attempt(
-                attempt.id,
-                &AttemptUpdate {
-                    status: if terminal == TaskStatus::Done {
-                        AttemptStatus::Completed
-                    } else {
-                        AttemptStatus::Failed
-                    },
-                    error_code: (terminal == TaskStatus::Conflict)
-                        .then(|| "integration.conflict".to_owned()),
-                },
+            .finalize_integration(
+                operation.id,
+                operation.owner_token,
+                IntegrationStatus::Prepared,
+                terminal,
             )
             .await
             .map_err(|_| OrchestratorError::Store)?;
-        if terminal == TaskStatus::Done {
-            self.tasks
-                .set_integration_status(
-                    operation.id,
-                    operation.owner_token,
-                    IntegrationStatus::Applied,
-                    IntegrationStatus::Completed,
-                )
-                .await
-                .map_err(|_| OrchestratorError::Store)?;
-        }
         Ok(())
     }
 
@@ -743,15 +679,14 @@ impl Orchestrator {
             .record_event_once(
                 attempt.task_id.as_str(),
                 &format!("{attempt_id}-usage-{operation}"),
-                "usage",
-                &serde_json::json!({
-                    "input_tokens": usage.input_tokens,
-                    "cached_tokens": usage.cached_tokens,
-                    "output_tokens": usage.output_tokens,
-                    "tool_calls": usage.tool_calls,
-                    "latency_ms": usage.latency_ms,
-                    "estimated": usage.estimated,
-                }),
+                &DurableEvent::Usage {
+                    input_tokens: usage.input_tokens,
+                    cached_tokens: usage.cached_tokens,
+                    output_tokens: usage.output_tokens,
+                    tool_calls: usage.tool_calls,
+                    latency_ms: usage.latency_ms,
+                    estimated: usage.estimated,
+                },
             )
             .await
             .map_err(|_| OrchestratorError::Usage)?;
@@ -766,14 +701,14 @@ impl Orchestrator {
     ) -> Result<(), OrchestratorError> {
         let artifact_id = attempt_id;
         let checksum = format!("{:x}", Sha256::digest(patch));
-        match self.artifacts.write(
+        let created = match self.artifacts.write(
             &artifact_id.to_string(),
             "official.diff",
             "text/x-diff",
             patch,
             |_| Ok::<_, ()>(()),
         ) {
-            Ok(_) => {}
+            Ok(_) => true,
             Err(crate::store::artifact::ArtifactError::AlreadyExists) => {
                 let existing = self
                     .artifacts
@@ -782,10 +717,12 @@ impl Orchestrator {
                 if format!("{:x}", Sha256::digest(existing)) != checksum {
                     return Err(OrchestratorError::Store);
                 }
+                false
             }
             Err(_) => return Err(OrchestratorError::Store),
-        }
-        self.tasks
+        };
+        let result = self
+            .tasks
             .persist_artifact_once(&ArtifactRecord {
                 id: artifact_id,
                 task_id: NonEmptyString::parse("task_id", task_id)
@@ -802,8 +739,11 @@ impl Orchestrator {
                     .map_err(|_| OrchestratorError::Store)?,
                 checksum,
             })
-            .await
-            .map_err(|_| OrchestratorError::Store)
+            .await;
+        if result.is_err() && created {
+            let _ = self.artifacts.remove(&artifact_id.to_string());
+        }
+        result.map_err(|_| OrchestratorError::Store)
     }
 
     async fn fail_attempt(
@@ -827,6 +767,22 @@ impl Orchestrator {
             .close_failed_attempt(attempt_id, error_code)
             .await
             .map_err(|_| OrchestratorError::Store)
+    }
+}
+
+fn recovered_integration_status(
+    checkpoint: IntegrationStatus,
+    target_hash: &str,
+    patch_hash: &str,
+) -> Option<TaskStatus> {
+    match checkpoint {
+        IntegrationStatus::Conflict => Some(TaskStatus::Conflict),
+        IntegrationStatus::Prepared | IntegrationStatus::Applied if target_hash == patch_hash => {
+            Some(TaskStatus::Done)
+        }
+        IntegrationStatus::Applied => Some(TaskStatus::NeedsHuman),
+        IntegrationStatus::Prepared => None,
+        IntegrationStatus::Completed => Some(TaskStatus::NeedsHuman),
     }
 }
 
@@ -943,12 +899,32 @@ fn valid_commit(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::valid_commit;
+    use super::*;
 
     #[test]
     fn commit_validation_rejects_symbolic_and_malformed_values() {
         assert!(valid_commit("0123456789012345678901234567890123456789"));
         assert!(!valid_commit("HEAD"));
         assert!(!valid_commit("secret-value"));
+    }
+
+    #[test]
+    fn recovery_recognizes_applied_prepared_checkpoint_and_rejects_other_fingerprints() {
+        assert_eq!(
+            recovered_integration_status(IntegrationStatus::Prepared, "patch", "patch"),
+            Some(TaskStatus::Done)
+        );
+        assert_eq!(
+            recovered_integration_status(IntegrationStatus::Prepared, "other", "patch"),
+            None
+        );
+        assert_eq!(
+            recovered_integration_status(IntegrationStatus::Applied, "other", "patch"),
+            Some(TaskStatus::NeedsHuman)
+        );
+        assert_eq!(
+            recovered_integration_status(IntegrationStatus::Conflict, "other", "patch"),
+            Some(TaskStatus::Conflict)
+        );
     }
 }

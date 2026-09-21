@@ -157,6 +157,18 @@ impl ArtifactStore {
         self.read_bounded(artifact_id, self.maximum_size)
     }
 
+    pub fn remove(&self, artifact_id: &str) -> Result<(), ArtifactError> {
+        validate_component(artifact_id).map_err(|_| ArtifactError::InvalidArtifactId)?;
+        let _write = self
+            .writes
+            .lock()
+            .map_err(|_| ArtifactError::Io("lock artifact store"))?;
+        self.ensure_root()?;
+        remove_if_present(&self.artifact_path(artifact_id));
+        remove_if_present(&self.metadata_path(artifact_id));
+        Ok(())
+    }
+
     pub fn read_bounded(
         &self,
         artifact_id: &str,
