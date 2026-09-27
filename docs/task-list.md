@@ -461,7 +461,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
 
 ## Gelombang M3-A — DAG dan Plan Contract
 
-- [ ] **M3-001 — Project/run domain dan API contract** · Lane A
+- [x] **M3-001 — Project/run domain dan API contract** · Lane A
   - Depends On: M2 exit gate
   - Parallel With: M3-002, M3-003, M3-004
   - Allowed Paths: `src/domain/project.rs`, `src/api/contracts/project.rs`, `src/api/contracts/plan.rs`
@@ -469,7 +469,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: objective dan acceptance criteria wajib; repository path canonical; budget positif.
   - Verify: boundary validation tests.
 
-- [ ] **M3-002 — DAG validation** · Lane A
+- [x] **M3-002 — DAG validation** · Lane A
   - Depends On: M2 exit gate
   - Parallel With: M3-001, M3-003, M3-004
   - Allowed Paths: `src/domain/dag.rs`, `tests/dag.rs`
@@ -477,7 +477,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: missing/self/cyclic dependency ditolak; task blocked tidak dianggap ready.
   - Verify: property/table-driven DAG tests.
 
-- [ ] **M3-003 — Repository discovery** · Lane B
+- [x] **M3-003 — Repository discovery** · Lane B
   - Depends On: M2 exit gate
   - Parallel With: M3-001, M3-002, M3-004
   - Allowed Paths: `src/context/discovery.rs`, `tests/discovery.rs`
