@@ -4,6 +4,8 @@ use std::{
     io::Read,
     path::{Component, Path},
     process::{Command, Stdio},
+    sync::mpsc,
+    time::Duration,
 };
 
 use serde::Serialize;
@@ -59,18 +61,21 @@ pub fn discover(root: &Path) -> Result<RepositoryMap, DiscoveryError> {
         .stderr(Stdio::null())
         .spawn()
         .map_err(|_| DiscoveryError::ListingFailed)?;
-    let mut listing = Vec::new();
-    let result = child
-        .stdout
-        .take()
-        .ok_or(DiscoveryError::ListingFailed)?
-        .take(MAX_LIST_BYTES + 1)
-        .read_to_end(&mut listing);
-    if result.is_err() {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(DiscoveryError::ListingFailed);
-    }
+    let stdout = child.stdout.take().ok_or(DiscoveryError::ListingFailed)?;
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut listing = Vec::new();
+        let result = stdout.take(MAX_LIST_BYTES + 1).read_to_end(&mut listing);
+        let _ = tx.send(result.map(|_| listing));
+    });
+    let mut listing = match rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(Ok(listing)) => listing,
+        _ => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(DiscoveryError::ListingFailed);
+        }
+    };
     let listing_truncated = listing.len() as u64 > MAX_LIST_BYTES;
     if listing_truncated {
         let _ = child.kill();
