@@ -1,4 +1,5 @@
 pub mod discovery;
+pub mod policy;
 
 use std::{
     fmt,
