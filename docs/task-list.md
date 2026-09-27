@@ -495,7 +495,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
 
 ## Gelombang M3-B — Lead dan Project API
 
-- [ ] **M3-005 — Project/run PostgreSQL store** · Lane A
+- [x] **M3-005 — Project/run PostgreSQL store** · Lane A
   - Depends On: M3-001, M3-002
   - Parallel With: M3-006, M3-007
   - Allowed Paths: `migrations/0011_projects_and_plans.sql`, `src/store/project.rs`, `tests/project_store.rs`
@@ -503,7 +503,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: plan immutable setelah approval; supersede membuat version baru; budget reservation atomik.
   - Verify: integration tests version, approval race, dan rollback.
 
-- [ ] **M3-006 — Lead planner** · Lane B
+- [x] **M3-006 — Lead planner** · Lane B
   - Depends On: M3-001, M3-002, M3-003
   - Parallel With: M3-005, M3-007
   - Allowed Paths: `src/agent/lead.rs`, `src/agent/prompts/lead.md`, `tests/lead_planner.rs`
@@ -529,7 +529,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: duplicate/invalid ID ditolak; lead hanya menerima metadata; worker maksimal dua skill default.
   - Verify: parser, matching, budget, dan reload tests.
 
-- [ ] **M3-009 — Role context policies** · Lane B
+- [x] **M3-009 — Role context policies** · Lane B
   - Depends On: M2-006, M3-003
   - Parallel With: M3-008, M3-010
   - Allowed Paths: `src/context/policy.rs`, `tests/context_policy.rs`
