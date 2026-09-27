@@ -1,5 +1,4 @@
-#[path = "../src/domain/mod.rs"]
-mod domain;
+use ai_team::domain;
 #[path = "../src/store/provider.rs"]
 mod provider_store;
 
