@@ -106,8 +106,8 @@ cargo test --test integration -- --test-threads=1
 | Milestone | Tujuan | Status | Exit Gate |
 |---|---|---|---|
 | M0 | Baseline dan fondasi repo | `[x]` | lingkungan repeatable, baseline tersimpan |
-| M1 | Provider foundation | `[ ]` | provider dikelola dan seluruh probe lulus |
-| M2 | Single-worker vertical slice | `[ ]` | satu task menghasilkan patch terverifikasi |
+| M1 | Provider foundation | `[x]` | provider dikelola dan seluruh probe lulus |
+| M2 | Single-worker vertical slice | `[x]` | satu task menghasilkan patch terverifikasi |
 | M3 | Lead Agent dan task DAG | `[ ]` | plan disetujui dan dependency dipatuhi |
 | M4 | Parallel workers dan integrasi | `[ ]` | 2–4 task independen berjalan aman |
 | M5 | Hardening dan MVP release | `[ ]` | recovery, security, E2E, docs lulus |
