@@ -498,7 +498,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
 - [ ] **M3-005 — Project/run PostgreSQL store** · Lane A
   - Depends On: M3-001, M3-002
   - Parallel With: M3-006, M3-007
-  - Allowed Paths: `migrations/0004_projects_and_plans.sql`, `src/store/project.rs`, `tests/project_store.rs`
+  - Allowed Paths: `migrations/0011_projects_and_plans.sql`, `src/store/project.rs`, `tests/project_store.rs`
   - Output: project/run/plan/dependency persistence dan transactional approval.
   - Acceptance: plan immutable setelah approval; supersede membuat version baru; budget reservation atomik.
   - Verify: integration tests version, approval race, dan rollback.
