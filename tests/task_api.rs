@@ -61,13 +61,34 @@ async fn ownership(pool: &PgPool) -> (Uuid, Uuid) {
     let project_id = Uuid::new_v4();
     let run_id = Uuid::new_v4();
     let repository = std::env::temp_dir().join(format!("noctis-task-repository-{project_id}"));
-    std::fs::create_dir_all(repository.join(".git/refs/heads")).unwrap();
-    std::fs::write(repository.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
-    std::fs::write(
-        repository.join(".git/refs/heads/main"),
-        "0123456789012345678901234567890123456789\n",
-    )
-    .unwrap();
+    std::fs::create_dir_all(&repository).unwrap();
+    for arguments in [
+        vec!["init", "--initial-branch=main"],
+        vec!["config", "user.name", "Noctis Test"],
+        vec!["config", "user.email", "noctis@example.invalid"],
+    ] {
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(arguments)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    std::fs::write(repository.join("tracked.txt"), "base\n").unwrap();
+    for arguments in [vec!["add", "tracked.txt"], vec!["commit", "-m", "initial"]] {
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(arguments)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
     sqlx::query("INSERT INTO projects (id,name,repository_path) VALUES ($1,'api',$2)")
         .bind(project_id)
         .bind(repository.to_string_lossy().as_ref())
@@ -218,7 +239,7 @@ async fn crud_pagination_idempotency_validation_and_request_id(pool: PgPool) {
     let invalid_body: Value = invalid.json().await.unwrap();
     assert!(invalid_body["error"]["request_id"].as_str().is_some());
 
-    mutation(
+    let created_b = mutation(
         &server.client,
         reqwest::Method::POST,
         &tasks,
@@ -226,6 +247,12 @@ async fn crud_pagination_idempotency_validation_and_request_id(pool: PgPool) {
         Some(&task("api-b", project_id, run_id)),
     )
     .await;
+    assert_eq!(
+        created_b.status(),
+        StatusCode::CREATED,
+        "{}",
+        created_b.text().await.unwrap()
+    );
     let page: Value = server
         .client
         .get(format!("{tasks}?limit=1"))

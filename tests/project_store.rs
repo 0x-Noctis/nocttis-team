@@ -159,6 +159,12 @@ async fn versions_are_immutable_and_reuse_canonical_tasks(pool: PgPool) {
             .await
             .is_err()
     );
+    assert!(
+        sqlx::query("DELETE FROM tasks WHERE id='a'")
+            .execute(&pool)
+            .await
+            .is_err()
+    );
     assert!(matches!(
         store
             .decide(&decision("plan-1", ApprovalDecision::Approved))
@@ -205,6 +211,41 @@ async fn failed_materialization_rolls_back_tasks_dependencies_and_budget(pool: P
     assert_eq!(
         store.get_plan("plan-1").await.unwrap().status,
         PlanStatus::Proposed
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn manual_dependency_delete_removes_rows(pool: PgPool) {
+    let (_, _, run) = setup(pool.clone()).await;
+    for id in ["manual-a", "manual-b"] {
+        sqlx::query("INSERT INTO tasks (id,project_run_id,role,title,objective,status,allowed_paths,acceptance_criteria,verification_commands,max_input_tokens,max_output_tokens,max_attempts) VALUES ($1,$2,'worker','manual','manual','DRAFT','[]','[]','[]',10,10,2)")
+            .bind(id)
+            .bind(run)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO task_dependencies (task_id,dependency_id) VALUES ('manual-b','manual-a')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        sqlx::query("DELETE FROM task_dependencies WHERE task_id='manual-b'")
+            .execute(&pool)
+            .await
+            .unwrap()
+            .rows_affected(),
+        1
+    );
+    assert_eq!(
+        sqlx::query("DELETE FROM tasks WHERE id='manual-a'")
+            .execute(&pool)
+            .await
+            .unwrap()
+            .rows_affected(),
+        1
     );
 }
 
