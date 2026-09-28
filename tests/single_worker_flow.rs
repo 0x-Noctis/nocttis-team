@@ -352,13 +352,16 @@ async fn start_is_atomic_and_ambiguous_recovery_never_replays(pool: PgPool) {
         SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
     let repository = root.join("repository");
-    fs::create_dir_all(repository.join(".git/refs/heads")).unwrap();
-    fs::write(repository.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
-    fs::write(
-        repository.join(".git/refs/heads/main"),
-        "0123456789012345678901234567890123456789\n",
-    )
-    .unwrap();
+    fs::create_dir_all(&repository).unwrap();
+    git(&repository, &["init", "--initial-branch=main"]);
+    git(&repository, &["config", "user.name", "Noctis Test"]);
+    git(
+        &repository,
+        &["config", "user.email", "noctis@example.invalid"],
+    );
+    fs::write(repository.join("tracked.txt"), "base\n").unwrap();
+    git(&repository, &["add", "tracked.txt"]);
+    git(&repository, &["commit", "-m", "initial"]);
     let project_id = Uuid::new_v4();
     let run_id = Uuid::new_v4();
     let task_id = Uuid::new_v4().to_string();
