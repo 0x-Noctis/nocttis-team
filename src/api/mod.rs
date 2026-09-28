@@ -2,7 +2,9 @@ pub mod artifacts;
 pub mod contracts;
 pub mod error;
 pub mod events;
+pub mod projects;
 pub mod providers;
+pub mod runs;
 pub mod tasks;
 
 use axum::http::{HeaderName, HeaderValue, Method, header::CONTENT_TYPE};
