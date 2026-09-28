@@ -13,7 +13,7 @@ use tracing::info;
 use crate::config::Config;
 use ai_team::api::tasks::StartState;
 use ai_team::api::{self, AppError, RequestId, request_id};
-use ai_team::orchestrator::{Orchestrator, OrchestratorConfig};
+use ai_team::orchestrator::{Orchestrator, OrchestratorConfig, SequentialScheduler};
 use ai_team::store::artifact::ArtifactStore;
 use ai_team::store::{provider::ProviderRepository, task::TaskRepository};
 
@@ -46,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
         config.artifacts.max_tool_output_bytes as u64,
     )?;
     let (wake, wake_receiver) = mpsc::channel(1);
-    let orchestrator = Orchestrator::new(
+    let mut orchestrator = Orchestrator::new(
         TaskRepository::new(database.clone()),
         ProviderRepository::new(database.clone()),
         orchestrator_artifacts,
@@ -57,6 +57,13 @@ async fn main() -> anyhow::Result<()> {
         },
     );
     orchestrator.startup_recovery().await?;
+    let scheduler = SequentialScheduler::new(
+        database.clone(),
+        config.provider.model.clone(),
+        i64::try_from(config.git.retention_hours)
+            .unwrap_or(i64::MAX / 3_600)
+            .saturating_mul(3_600),
+    );
 
     let app = Router::new()
         .route("/api/v1/health", get(health))
@@ -86,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
     info!(%address, "server listening");
     tokio::select! {
         result = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal()) => result?,
-        () = orchestrator.run(wake_receiver) => {}
+        () = orchestrator.run_sequential(&scheduler, wake_receiver) => {}
     }
     Ok(())
 }

@@ -1,5 +1,5 @@
 use std::{
-    env, fmt, fs,
+    env, fmt,
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -344,6 +344,14 @@ impl Orchestrator {
     ) {
         loop {
             loop {
+                match self.dispatch_once().await {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(error) => {
+                        eprintln!("{error}");
+                        break;
+                    }
+                }
                 match self.dispatch_sequential_once(scheduler).await {
                     Ok(true) => {}
                     Ok(false) => break,
@@ -920,42 +928,16 @@ pub async fn claim_task(
 }
 
 fn repository_head(repository: &Path) -> Option<String> {
-    let git = git_directory(repository)?;
-    let head = fs::read_to_string(git.join("HEAD")).ok()?;
-    let head = head.trim();
-    if valid_commit(head) {
-        return Some(head.to_owned());
-    }
-    let reference = head.strip_prefix("ref: ")?;
-    let loose = git.join(reference);
-    if let Ok(commit) = fs::read_to_string(loose) {
-        let commit = commit.trim();
-        if valid_commit(commit) {
-            return Some(commit.to_owned());
-        }
-    }
-    fs::read_to_string(git.join("packed-refs"))
-        .ok()?
-        .lines()
-        .filter(|line| !line.starts_with(['#', '^']))
-        .find_map(|line| {
-            let (commit, name) = line.split_once(' ')?;
-            (name == reference && valid_commit(commit)).then(|| commit.to_owned())
-        })
-}
-
-fn git_directory(repository: &Path) -> Option<PathBuf> {
-    let dot_git = repository.join(".git");
-    if dot_git.is_dir() {
-        return Some(dot_git);
-    }
-    let pointer = fs::read_to_string(dot_git).ok()?;
-    let path = pointer.trim().strip_prefix("gitdir: ")?;
-    Some(if Path::new(path).is_absolute() {
-        PathBuf::from(path)
-    } else {
-        repository.join(path)
-    })
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(["rev-parse", "--verify", "HEAD"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let commit = std::str::from_utf8(&output.stdout).ok()?.trim();
+    (output.status.success() && valid_commit(commit)).then(|| commit.to_owned())
 }
 
 fn valid_commit(value: &str) -> bool {
