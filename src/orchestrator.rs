@@ -1,12 +1,16 @@
 use std::{
     env, fmt, fs,
     path::{Path, PathBuf},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use uuid::Uuid;
+
+#[path = "scheduler/mod.rs"]
+mod scheduler;
+pub use scheduler::SequentialScheduler;
 
 use crate::{
     agent::{
@@ -58,6 +62,7 @@ pub enum OrchestratorError {
     Reviewer,
     Verifier,
     Usage,
+    Deadline,
 }
 
 impl fmt::Display for OrchestratorError {
@@ -73,6 +78,7 @@ impl fmt::Display for OrchestratorError {
             Self::Reviewer => "orchestrator reviewer failed",
             Self::Verifier => "orchestrator verification failed",
             Self::Usage => "orchestrator usage persistence failed",
+            Self::Deadline => "orchestrator task deadline exceeded",
         })
     }
 }
@@ -299,6 +305,13 @@ impl Orchestrator {
         else {
             return Ok(false);
         };
+        self.dispatch_claimed(attempt).await
+    }
+
+    async fn dispatch_claimed(
+        &mut self,
+        attempt: crate::store::event::RuntimeAttempt,
+    ) -> Result<bool, OrchestratorError> {
         let dispatch_owner = match self.tasks.claim_dispatch(attempt.id).await {
             Ok(owner) => owner,
             Err(StoreError::Conflict(Conflict::Claim)) => return Ok(true),
@@ -322,6 +335,44 @@ impl Orchestrator {
             eprintln!("{error}");
         }
         Ok(true)
+    }
+
+    pub async fn run_sequential(
+        &mut self,
+        scheduler: &SequentialScheduler,
+        mut wake: mpsc::Receiver<()>,
+    ) {
+        loop {
+            loop {
+                match self.dispatch_sequential_once(scheduler).await {
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    Err(error) => {
+                        eprintln!("{error}");
+                        break;
+                    }
+                }
+            }
+            let _ = self.sweep_retention().await;
+            tokio::select! {
+                value = wake.recv() => if value.is_none() { break },
+                () = tokio::time::sleep(Duration::from_secs(1)) => {}
+            }
+        }
+    }
+
+    pub async fn dispatch_sequential_once(
+        &mut self,
+        scheduler: &SequentialScheduler,
+    ) -> Result<bool, OrchestratorError> {
+        let Some(attempt) = scheduler
+            .claim_one()
+            .await
+            .map_err(|_| OrchestratorError::Store)?
+        else {
+            return Ok(false);
+        };
+        self.dispatch_claimed(attempt).await
     }
 
     pub async fn sweep_retention(&self) -> Result<bool, OrchestratorError> {
@@ -377,6 +428,8 @@ impl Orchestrator {
             .get(attempt.task_id.as_str())
             .await
             .map_err(|_| OrchestratorError::Store)?;
+        let deadline =
+            Instant::now() + Duration::from_secs(task.contract.limits.timeout_seconds.get() as u64);
         let model = self
             .providers
             .get_model(attempt.model_id.as_str())
@@ -486,7 +539,7 @@ impl Orchestrator {
                 agent_run_id: attempt.id.to_string(),
                 model_class: model.class.as_str().to_owned(),
                 max_turns: 32,
-                deadline: Duration::from_secs(task.contract.limits.timeout_seconds.get() as u64),
+                deadline: deadline.saturating_duration_since(Instant::now()),
             },
         )
         .run()
@@ -511,9 +564,13 @@ impl Orchestrator {
             run.model,
             attempt.id.to_string(),
             model.class.as_str(),
+        );
+        let review = tokio::time::timeout(
+            deadline.saturating_duration_since(Instant::now()),
+            review.review(&[] as &[SourceExcerpt], &[] as &[VerificationEvidence]),
         )
-        .review(&[] as &[SourceExcerpt], &[] as &[VerificationEvidence])
-        .await;
+        .await
+        .map_err(|_| OrchestratorError::Deadline)?;
         self.record_usage(attempt.id, "reviewer", review.usage)
             .await?;
         let outcome = review.outcome.ok_or(OrchestratorError::Reviewer)?;
@@ -528,13 +585,17 @@ impl Orchestrator {
                 .close_failed_attempt(attempt.id, "review.changes_requested")
                 .await;
         }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(OrchestratorError::Deadline);
+        }
         let commands = verification_commands(&current)?;
         let runner = ProcessRunner::new(
             worktree.path(),
             env::var("NOCTIS_RUNNER_IMAGE").unwrap_or_else(|_| "rust:1".to_owned()),
             commands,
             Vec::new(),
-            Duration::from_secs(current.contract.limits.timeout_seconds.get() as u64),
+            remaining,
             1024 * 1024,
             ContainerLimits {
                 cpu_count: "1".to_owned(),
@@ -572,6 +633,9 @@ impl Orchestrator {
         }
         self.transition(&current, report.proposed_status, Actor::Verifier)
             .await?;
+        if deadline <= Instant::now() {
+            return Err(OrchestratorError::Deadline);
+        }
         if report.verdict == VerificationVerdict::Failed {
             return self
                 .close_failed_attempt(attempt.id, "verification.failed")
@@ -799,6 +863,7 @@ impl OrchestratorError {
             Self::Reviewer => "orchestrator.reviewer",
             Self::Verifier => "orchestrator.verifier",
             Self::Usage => "orchestrator.usage",
+            Self::Deadline => "orchestrator.deadline",
         }
     }
 }
