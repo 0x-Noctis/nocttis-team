@@ -511,7 +511,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: schema tervalidasi; file scope/task dependency/budget/verification ada; invalid plan tidak disimpan sebagai approved.
   - Verify: fake model valid, malformed, cyclic, overlapping, dan over-budget plans.
 
-- [ ] **M3-007 — Project/run HTTP API** · Lane A
+- [x] **M3-007 — Project/run HTTP API** · Lane A
   - Depends On: M3-001, M3-005
   - Parallel With: M3-006
   - Allowed Paths: `src/api/projects.rs`, `src/api/runs.rs`, `src/api/mod.rs`, `src/main.rs`, `tests/project_api.rs`
@@ -521,7 +521,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
 
 ## Gelombang M3-C — Skill dan Context Policy
 
-- [ ] **M3-008 — Skill registry lazy loading** · Lane B
+- [x] **M3-008 — Skill registry lazy loading** · Lane B
   - Depends On: M3-003
   - Parallel With: M3-009, M3-010
   - Allowed Paths: `src/context/skills.rs`, `skills/**`, `tests/skills.rs`
@@ -547,7 +547,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
 
 ## Gelombang M3-D — Sequential Scheduler
 
-- [ ] **M3-011 — Scheduler dependency-aware satu worker** · Lane A
+- [x] **M3-011 — Scheduler dependency-aware satu worker** · Lane A
   - Depends On: M3-002, M3-005, M3-006, M3-009
   - Parallel With: M3-012
   - Allowed Paths: `src/scheduler/**`, `src/orchestrator.rs`, `tests/scheduler_sequential.rs`
