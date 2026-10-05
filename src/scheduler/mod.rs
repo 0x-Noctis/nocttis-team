@@ -7,7 +7,7 @@ use crate::{
     orchestrator::repository_head,
     store::{
         event::RuntimeAttempt,
-        provider::ProviderRepository,
+        provider::{ProviderRepository, StoreError as ProviderStoreError},
         task::{StoreError, TaskRepository},
     },
 };
@@ -19,6 +19,20 @@ pub struct SequentialScheduler {
     providers: ProviderRepository,
     model_id: String,
     retention_seconds: i64,
+}
+
+// Menerjemahkan error lookup model (tipe milik provider) ke tipe task tanpa membuang penyebabnya.
+// ValidationError provider dan task adalah tipe berbeda, jadi baris korup dicatat di log lalu
+// dilaporkan sebagai InvalidId; NotFound ditangani pemanggil, Conflict hanya muncul dari INSERT.
+fn model_lookup_error(error: ProviderStoreError) -> StoreError {
+    match error {
+        ProviderStoreError::Database(error) => StoreError::Database(error),
+        ProviderStoreError::InvalidRowJson(error) => StoreError::InvalidJson(error),
+        other => {
+            tracing::error!(cause = %other, "lookup model scheduler gagal");
+            StoreError::InvalidId("model_id")
+        }
+    }
 }
 
 impl SequentialScheduler {
@@ -36,11 +50,6 @@ impl SequentialScheduler {
         if !(1..=crate::domain::task::MAX_SAFE_INTEGER).contains(&self.retention_seconds) {
             return Err(StoreError::InvalidId("retention_seconds"));
         }
-        let model = self
-            .providers
-            .get_model(&self.model_id)
-            .await
-            .map_err(|_| StoreError::InvalidId("model_id"))?;
         let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
         // ponytail: satu advisory lock membatasi seluruh run ke satu worker; M4 menggantinya dengan slot paralel.
         let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(311, 11)")
@@ -73,6 +82,19 @@ impl SequentialScheduler {
         .await.map_err(StoreError::Database)?;
         let Some(row) = candidate else {
             return Ok(None);
+        };
+        // Model dicari setelah ada kandidat: scheduler idle tidak butuh model. Model belum
+        // terdaftar (mis. provider baru dibuat lewat UI) bukan error; task menunggu, tx di-rollback.
+        let model = match self.providers.get_model(&self.model_id).await {
+            Ok(model) => model,
+            Err(ProviderStoreError::NotFound) => {
+                tracing::warn!(
+                    model_id = %self.model_id,
+                    "scheduler menunggu: model default belum terdaftar"
+                );
+                return Ok(None);
+            }
+            Err(error) => return Err(model_lookup_error(error)),
         };
         let task_id: String = row.get("id");
         let task = sqlx::query("SELECT status,version FROM tasks WHERE id=$1 FOR UPDATE")

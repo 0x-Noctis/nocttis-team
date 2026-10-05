@@ -85,6 +85,13 @@ impl fmt::Display for OrchestratorError {
 
 impl std::error::Error for OrchestratorError {}
 
+/// Mencatat penyebab asli lalu memetakannya ke kategori `Store`. Dulu penyebab dibuang
+/// (`map_err(|_| ..)`), sehingga operator hanya melihat "persistence failed" tanpa petunjuk.
+fn store_error<E: fmt::Display>(error: E) -> OrchestratorError {
+    tracing::error!(cause = %error, "orchestrator persistence failed");
+    OrchestratorError::Store
+}
+
 pub struct Orchestrator {
     tasks: TaskRepository,
     providers: ProviderRepository,
@@ -110,23 +117,18 @@ impl Orchestrator {
     pub async fn startup_recovery(&self) -> Result<usize, OrchestratorError> {
         let cutoff = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(|_| OrchestratorError::Store)?
+            .map_err(store_error)?
             .as_millis()
             .saturating_sub(self.config.stale_after_seconds.max(0) as u128 * 1_000)
             .try_into()
-            .map_err(|_| OrchestratorError::Store)?;
+            .map_err(store_error)?;
         let mut recovered = self.recover_integrations().await?;
-        while let Some(attempt) = self
-            .tasks
-            .next_stale(cutoff)
-            .await
-            .map_err(|_| OrchestratorError::Store)?
-        {
+        while let Some(attempt) = self.tasks.next_stale(cutoff).await.map_err(store_error)? {
             let repository = self
                 .tasks
                 .project_repository(attempt.task_id.as_str())
                 .await
-                .map_err(|_| OrchestratorError::Store)?;
+                .map_err(store_error)?;
             let force_human = match GitWorktreeManager::new(repository, &self.config.worktree_root)
             {
                 Ok(git) => match git.open(
@@ -142,7 +144,7 @@ impl Orchestrator {
             self.tasks
                 .recover_stale_attempt(attempt.id, force_human)
                 .await
-                .map_err(|_| OrchestratorError::Store)?;
+                .map_err(store_error)?;
             recovered += 1;
         }
         Ok(recovered)
@@ -154,13 +156,13 @@ impl Orchestrator {
             .tasks
             .pending_integrations()
             .await
-            .map_err(|_| OrchestratorError::Store)?
+            .map_err(store_error)?
         {
             let task = self
                 .tasks
                 .get(operation.task_id.as_str())
                 .await
-                .map_err(|_| OrchestratorError::Store)?;
+                .map_err(store_error)?;
             if task.status == TaskStatus::Done && operation.status == IntegrationStatus::Applied {
                 self.tasks
                     .finalize_integration(
@@ -170,7 +172,7 @@ impl Orchestrator {
                         TaskStatus::Done,
                     )
                     .await
-                    .map_err(|_| OrchestratorError::Store)?;
+                    .map_err(store_error)?;
                 recovered += 1;
                 continue;
             }
@@ -185,7 +187,7 @@ impl Orchestrator {
                         TaskStatus::Conflict,
                     )
                     .await
-                    .map_err(|_| OrchestratorError::Store)?;
+                    .map_err(store_error)?;
                 recovered += 1;
                 continue;
             }
@@ -201,7 +203,7 @@ impl Orchestrator {
                         TaskStatus::Conflict,
                     )
                     .await
-                    .map_err(|_| OrchestratorError::Store)?;
+                    .map_err(store_error)?;
                 recovered += 1;
                 continue;
             }
@@ -209,7 +211,7 @@ impl Orchestrator {
                 .tasks
                 .project_repository(operation.task_id.as_str())
                 .await
-                .map_err(|_| OrchestratorError::Store)?;
+                .map_err(store_error)?;
             let Ok(git) = GitWorktreeManager::new(repository, &self.config.worktree_root) else {
                 self.tasks
                     .finalize_integration(
@@ -219,7 +221,7 @@ impl Orchestrator {
                         TaskStatus::NeedsHuman,
                     )
                     .await
-                    .map_err(|_| OrchestratorError::Store)?;
+                    .map_err(store_error)?;
                 recovered += 1;
                 continue;
             };
@@ -270,7 +272,7 @@ impl Orchestrator {
             self.tasks
                 .finalize_integration(operation.id, operation.owner_token, outcome.1, outcome.0)
                 .await
-                .map_err(|_| OrchestratorError::Store)?;
+                .map_err(store_error)?;
             recovered += 1;
         }
         Ok(recovered)
@@ -283,7 +285,7 @@ impl Orchestrator {
                     Ok(true) => {}
                     Ok(false) => break,
                     Err(error) => {
-                        eprintln!("{error}");
+                        tracing::error!(%error, "dispatch orchestrator gagal");
                         break;
                     }
                 }
@@ -297,12 +299,7 @@ impl Orchestrator {
     }
 
     pub async fn dispatch_once(&mut self) -> Result<bool, OrchestratorError> {
-        let Some(attempt) = self
-            .tasks
-            .next_assigned()
-            .await
-            .map_err(|_| OrchestratorError::Store)?
-        else {
+        let Some(attempt) = self.tasks.next_assigned().await.map_err(store_error)? else {
             return Ok(false);
         };
         self.dispatch_claimed(attempt).await
@@ -315,7 +312,7 @@ impl Orchestrator {
         let dispatch_owner = match self.tasks.claim_dispatch(attempt.id).await {
             Ok(owner) => owner,
             Err(StoreError::Conflict(Conflict::Claim)) => return Ok(true),
-            Err(_) => return Err(OrchestratorError::Store),
+            Err(error) => return Err(store_error(error)),
         };
         let attempt_id = attempt.id;
         if let Err(error) = self.execute(attempt, dispatch_owner).await {
@@ -329,10 +326,10 @@ impl Orchestrator {
                     .tasks
                     .fail_runtime(attempt_id, error.code())
                     .await
-                    .map_err(|_| OrchestratorError::Store)?,
-                Err(_) => return Err(OrchestratorError::Store),
+                    .map_err(store_error)?,
+                Err(error) => return Err(store_error(error)),
             }
-            eprintln!("{error}");
+            tracing::error!(%attempt_id, %error, "dispatch attempt gagal");
         }
         Ok(true)
     }
@@ -348,7 +345,7 @@ impl Orchestrator {
                     Ok(true) => continue,
                     Ok(false) => {}
                     Err(error) => {
-                        eprintln!("{error}");
+                        tracing::error!(%error, "dispatch orchestrator gagal");
                         break;
                     }
                 }
@@ -356,7 +353,7 @@ impl Orchestrator {
                     Ok(true) => {}
                     Ok(false) => break,
                     Err(error) => {
-                        eprintln!("{error}");
+                        tracing::error!(%error, "dispatch orchestrator gagal");
                         break;
                     }
                 }
@@ -373,11 +370,7 @@ impl Orchestrator {
         &mut self,
         scheduler: &SequentialScheduler,
     ) -> Result<bool, OrchestratorError> {
-        let Some(attempt) = scheduler
-            .claim_one()
-            .await
-            .map_err(|_| OrchestratorError::Store)?
-        else {
+        let Some(attempt) = scheduler.claim_one().await.map_err(store_error)? else {
             return Ok(false);
         };
         self.dispatch_claimed(attempt).await
@@ -388,7 +381,7 @@ impl Orchestrator {
             .tasks
             .claim_retention_due(self.config.retention_lease_seconds)
             .await
-            .map_err(|_| OrchestratorError::Store)?
+            .map_err(store_error)?
         else {
             return Ok(false);
         };
@@ -396,7 +389,7 @@ impl Orchestrator {
             .tasks
             .project_repository(claim.attempt.task_id.as_str())
             .await
-            .map_err(|_| OrchestratorError::Store)?;
+            .map_err(store_error)?;
         let git = GitWorktreeManager::new(repository, &self.config.worktree_root)
             .map_err(|_| OrchestratorError::Git)?;
         let worktree = match git.open(
@@ -422,7 +415,7 @@ impl Orchestrator {
         self.tasks
             .complete_retention_cleanup(claim.attempt.id, claim.owner_token)
             .await
-            .map_err(|_| OrchestratorError::Store)?;
+            .map_err(store_error)?;
         Ok(true)
     }
 
@@ -435,7 +428,7 @@ impl Orchestrator {
             .tasks
             .get(attempt.task_id.as_str())
             .await
-            .map_err(|_| OrchestratorError::Store)?;
+            .map_err(store_error)?;
         let deadline =
             Instant::now() + Duration::from_secs(task.contract.limits.timeout_seconds.get() as u64);
         let model = self
@@ -479,7 +472,7 @@ impl Orchestrator {
             .tasks
             .project_repository(attempt.task_id.as_str())
             .await
-            .map_err(|_| OrchestratorError::Store)?;
+            .map_err(store_error)?;
         let git = GitWorktreeManager::new(&repository, &self.config.worktree_root)
             .map_err(|_| OrchestratorError::Git)?;
         let worktree = git
@@ -520,22 +513,17 @@ impl Orchestrator {
             return Err(OrchestratorError::Context);
         }
         let tools = StructuredTools::new(policy, &git, &worktree, &self.artifacts);
-        if self
-            .tasks
-            .start_claimed(attempt.id, dispatch_owner)
-            .await
-            .is_err()
-        {
+        if let Err(error) = self.tasks.start_claimed(attempt.id, dispatch_owner).await {
             drop(tools);
             drop(context);
             git.cleanup(&worktree).map_err(|_| OrchestratorError::Git)?;
-            return Err(OrchestratorError::Store);
+            return Err(store_error(error));
         }
         let task = self
             .tasks
             .get(attempt.task_id.as_str())
             .await
-            .map_err(|_| OrchestratorError::Store)?;
+            .map_err(store_error)?;
         let run = Worker::new(
             &task.contract,
             TaskStatus::Running,
@@ -637,7 +625,7 @@ impl Orchestrator {
                     },
                 )
                 .await
-                .map_err(|_| OrchestratorError::Store)?;
+                .map_err(store_error)?;
         }
         self.transition(&current, report.proposed_status, Actor::Verifier)
             .await?;
@@ -677,7 +665,7 @@ impl Orchestrator {
                 status: IntegrationStatus::Prepared,
             })
             .await
-            .map_err(|_| OrchestratorError::Store)?;
+            .map_err(store_error)?;
         let integrated = git
             .integrate_verified(&worktree, &target)
             .map_err(|_| OrchestratorError::Git)?;
@@ -693,7 +681,7 @@ impl Orchestrator {
                 terminal,
             )
             .await
-            .map_err(|_| OrchestratorError::Store)?;
+            .map_err(store_error)?;
         Ok(())
     }
 
@@ -706,7 +694,7 @@ impl Orchestrator {
         self.tasks
             .transition(task.contract.id.as_str(), task.version, to, actor)
             .await
-            .map_err(|_| OrchestratorError::Store)
+            .map_err(store_error)
     }
 
     async fn record_usage(
@@ -785,37 +773,33 @@ impl Orchestrator {
                 let existing = self
                     .artifacts
                     .read(&artifact_id.to_string())
-                    .map_err(|_| OrchestratorError::Store)?;
+                    .map_err(store_error)?;
                 if format!("{:x}", Sha256::digest(existing)) != checksum {
+                    tracing::error!(%artifact_id, "artifact sudah ada dengan checksum berbeda");
                     return Err(OrchestratorError::Store);
                 }
                 false
             }
-            Err(_) => return Err(OrchestratorError::Store),
+            Err(error) => return Err(store_error(error)),
         };
         let result = self
             .tasks
             .persist_artifact_once(&ArtifactRecord {
                 id: artifact_id,
-                task_id: NonEmptyString::parse("task_id", task_id)
-                    .map_err(|_| OrchestratorError::Store)?,
-                kind: NonEmptyString::parse("kind", "diff")
-                    .map_err(|_| OrchestratorError::Store)?,
+                task_id: NonEmptyString::parse("task_id", task_id).map_err(store_error)?,
+                kind: NonEmptyString::parse("kind", "diff").map_err(store_error)?,
                 logical_name: NonEmptyString::parse("logical_name", "official.diff")
-                    .map_err(|_| OrchestratorError::Store)?,
+                    .map_err(store_error)?,
                 media_type: NonEmptyString::parse("media_type", "text/x-diff")
-                    .map_err(|_| OrchestratorError::Store)?,
-                size: patch
-                    .len()
-                    .try_into()
-                    .map_err(|_| OrchestratorError::Store)?,
+                    .map_err(store_error)?,
+                size: patch.len().try_into().map_err(store_error)?,
                 checksum,
             })
             .await;
         if result.is_err() && created {
             let _ = self.artifacts.remove(&artifact_id.to_string());
         }
-        result.map_err(|_| OrchestratorError::Store)
+        result.map_err(store_error)
     }
 
     async fn fail_attempt(
@@ -826,7 +810,7 @@ impl Orchestrator {
         self.tasks
             .fail_runtime(attempt_id, error_code)
             .await
-            .map_err(|_| OrchestratorError::Store)?;
+            .map_err(store_error)?;
         Ok(())
     }
 
@@ -838,7 +822,7 @@ impl Orchestrator {
         self.tasks
             .close_failed_attempt(attempt_id, error_code)
             .await
-            .map_err(|_| OrchestratorError::Store)
+            .map_err(store_error)
     }
 }
 

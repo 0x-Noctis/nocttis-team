@@ -471,3 +471,68 @@ async fn multi_task_pipeline_follows_dependencies(pool: PgPool) {
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+// Regression: model default belum terdaftar (mis. provider baru dibuat lewat UI setelah server start)
+// dulu membuat claim_one gagal tiap polling dengan "model_id must be a UUID", dan task READY terblokir
+// tanpa petunjuk. Sekarang scheduler menunggu tanpa error dan tanpa efek samping.
+#[sqlx::test(migrations = "./migrations")]
+async fn missing_model_waits_without_error_or_side_effect(pool: PgPool) {
+    let (run, _) = setup(&pool, 40).await;
+    let scheduler = SequentialScheduler::new(pool.clone(), "not-registered-yet".into(), 60);
+
+    // Idle: tanpa task READY pun tidak boleh error.
+    assert!(scheduler.claim_one().await.unwrap().is_none());
+
+    task(&pool, run, "waiting", 0).await;
+    assert!(scheduler.claim_one().await.unwrap().is_none());
+    let row = sqlx::query("SELECT status FROM tasks WHERE id='waiting'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(row.get::<&str, _>("status"), "READY");
+    let attempts: i64 = sqlx::query_scalar("SELECT count(*) FROM agent_runs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(attempts, 0);
+    // Reservasi budget harus ikut rollback; kalau bocor, retry berikutnya kehabisan budget.
+    let reserved: i64 = sqlx::query_scalar("SELECT reserved_tokens FROM project_runs WHERE id=$1")
+        .bind(run)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(reserved, 0);
+
+    // Begitu model terdaftar, task yang sama langsung diklaim.
+    sqlx::query("INSERT INTO models (id,provider_id,remote_name,class,context_window,max_output_tokens) VALUES ('not-registered-yet','scheduler-provider','mock-late','coding',1000,1000)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let attempt = scheduler.claim_one().await.unwrap().unwrap();
+    assert_eq!(attempt.task_id.as_str(), "waiting");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn missing_model_does_not_fail_sequential_dispatch(pool: PgPool) {
+    let (run, _) = setup(&pool, 40).await;
+    task(&pool, run, "waiting", 0).await;
+    let scheduler = SequentialScheduler::new(pool.clone(), "not-registered-yet".into(), 60);
+    let root = std::env::temp_dir().join(format!("scheduler-test-{}", Uuid::new_v4()));
+    let mut orchestrator = Orchestrator::new(
+        TaskRepository::new(pool.clone()),
+        ProviderRepository::new(pool.clone()),
+        ArtifactStore::new(root.join("artifacts"), 1024).unwrap(),
+        OrchestratorConfig {
+            worktree_root: root.join("worktrees"),
+            stale_after_seconds: 60,
+            retention_lease_seconds: 60,
+        },
+    );
+    assert!(
+        !orchestrator
+            .dispatch_sequential_once(&scheduler)
+            .await
+            .unwrap()
+    );
+    std::fs::remove_dir_all(root).ok();
+}
