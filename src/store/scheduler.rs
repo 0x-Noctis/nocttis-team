@@ -50,6 +50,8 @@ pub struct Candidate {
 #[derive(Debug)]
 pub struct ClaimedTask {
     pub attempt: RuntimeAttempt,
+    /// Pemilik dispatch yang dicatat `claim_next`; dipakai runner untuk `start_claimed` tanpa `claim_dispatch` ulang.
+    pub owner: Uuid,
     pub run_id: Uuid,
     pub repository_path: String,
 }
@@ -195,6 +197,7 @@ impl SchedulerStore {
         tx.commit().await.map_err(StoreError::Database)?;
         Ok(Some(ClaimedTask {
             attempt: self.tasks.get_attempt(attempt_id).await?,
+            owner: request.owner,
             run_id,
             repository_path,
         }))

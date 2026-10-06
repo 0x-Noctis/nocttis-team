@@ -10,7 +10,11 @@ use std::{
 
 use ai_team::{
     domain::task::TaskStatus,
-    orchestrator::{Orchestrator, OrchestratorConfig, StartRequest, claim_task},
+    orchestrator::{
+        Orchestrator, OrchestratorConfig, OrchestratorRunner, StartRequest, claim_task,
+        repository_head,
+        scheduler::parallel::{ParallelConfig, ParallelScheduler},
+    },
     runner::git::GitWorktreeManager,
     store::{
         artifact::ArtifactStore,
@@ -27,14 +31,29 @@ const FLOW_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[sqlx::test(migrations = "./migrations")]
 async fn production_orchestrator_conflict_preserves_target(pool: PgPool) {
-    tokio::time::timeout(FLOW_TIMEOUT, production_flow(pool, true))
+    tokio::time::timeout(FLOW_TIMEOUT, production_flow(pool, true, false))
         .await
         .expect("production flow timed out");
 }
 
 #[sqlx::test(migrations = "./migrations")]
 async fn production_orchestrator_completes_full_flow(pool: PgPool) {
-    tokio::time::timeout(FLOW_TIMEOUT, production_flow(pool, false))
+    tokio::time::timeout(FLOW_TIMEOUT, production_flow(pool, false, false))
+        .await
+        .expect("production flow timed out");
+}
+
+/// Pipeline yang sama, tetapi dijalankan lewat `ParallelScheduler` + `OrchestratorRunner` (M4-005B).
+#[sqlx::test(migrations = "./migrations")]
+async fn parallel_scheduler_runs_full_flow_through_production_runner(pool: PgPool) {
+    tokio::time::timeout(FLOW_TIMEOUT, production_flow(pool.clone(), false, true))
+        .await
+        .expect("production flow timed out");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn parallel_scheduler_reports_conflict_through_production_runner(pool: PgPool) {
+    tokio::time::timeout(FLOW_TIMEOUT, production_flow(pool, true, true))
         .await
         .expect("production flow timed out");
 }
@@ -103,7 +122,7 @@ async fn setup_failures_requeue_without_running_event(pool: PgPool) {
                     .unwrap();
             }
         }
-        let mut orchestrator = Orchestrator::new(
+        let orchestrator = Orchestrator::new(
             tasks.clone(),
             providers,
             ArtifactStore::new(&fixture.artifacts, 1024).unwrap(),
@@ -160,7 +179,7 @@ async fn unverified_tools_are_rejected_before_worktree(pool: PgPool) {
         )
         .await
         .unwrap();
-        let mut orchestrator = Orchestrator::new(
+        let orchestrator = Orchestrator::new(
             tasks.clone(),
             providers,
             ArtifactStore::new(&fixture.artifacts, 1024).unwrap(),
@@ -184,7 +203,96 @@ async fn unverified_tools_are_rejected_before_worktree(pool: PgPool) {
     }
 }
 
-async fn production_flow(pool: PgPool, conflict: bool) {
+/// Shutdown harus menghentikan pipeline yang sedang menunggu model (provider macet) tanpa menunggu timeout
+/// request, dan attempt dibiarkan tidak final supaya recovery berikutnya memulihkannya.
+#[sqlx::test(migrations = "./migrations")]
+async fn parallel_shutdown_stops_stalled_pipeline_without_finalizing(pool: PgPool) {
+    let fixture = FlowFixture::new();
+    // Provider yang menerima koneksi tetapi tidak pernah menjawab.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let _stall = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            held.push(stream);
+        }
+    });
+    unsafe { std::env::set_var("STALL_API_KEY", "test-only") };
+    let (project_id, run_id, task_id) =
+        (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4().to_string());
+    sqlx::query("INSERT INTO projects (id,name,repository_path) VALUES ($1,'stall',$2)")
+        .bind(project_id)
+        .bind(fixture.repository.to_string_lossy().as_ref())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO project_runs (id,project_id,objective,status,token_budget) VALUES ($1,$2,'stall','RUNNING',100000)")
+        .bind(run_id).bind(project_id).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO providers (id,base_url,api_key_env,request_timeout_seconds) VALUES ('stall-provider',$1,'STALL_API_KEY',20)")
+        .bind(&base_url).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO models (id,provider_id,remote_name,class,context_window,max_output_tokens,claimed_capabilities,verified_capabilities) VALUES ('stall-model','stall-provider','mock','coding',1000,1000,'{\"chat\":true,\"streaming\":false,\"tools\":true,\"parallel_tools\":false}','{\"chat\":\"unknown\",\"streaming\":\"unknown\",\"tools\":\"supported\",\"parallel_tools\":\"unknown\"}')")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO tasks (id,project_run_id,role,title,objective,status,allowed_paths,acceptance_criteria,verification_commands,max_input_tokens,max_output_tokens,max_attempts,max_tool_calls,timeout_seconds) VALUES ($1,$2,'worker','stall','stall','READY','[\"tracked.txt\"]','[\"works\"]','[\"true\"]',1000,1000,2,10,60)")
+        .bind(&task_id).bind(run_id).execute(&pool).await.unwrap();
+    let tasks = TaskRepository::new(pool.clone());
+    let orchestrator = Orchestrator::new(
+        tasks.clone(),
+        ProviderRepository::new(pool.clone()),
+        ArtifactStore::new(&fixture.artifacts, 1024 * 1024).unwrap(),
+        OrchestratorConfig {
+            worktree_root: fixture.worktrees.clone(),
+            stale_after_seconds: 60,
+            retention_lease_seconds: 60,
+        },
+    );
+    let scheduler = ParallelScheduler::new(
+        pool.clone(),
+        OrchestratorRunner::new(Arc::new(orchestrator)),
+        ParallelConfig {
+            slots: 1,
+            provider_id: "stall-provider".into(),
+            model_id: "stall-model".into(),
+            retention_seconds: 60,
+            lease_ttl_seconds: 60,
+            heartbeat_interval: Duration::from_millis(100),
+            stale_after_seconds: 60,
+            idle_min: Duration::from_millis(10),
+            idle_max: Duration::from_millis(50),
+            shutdown_grace: Duration::from_millis(200),
+            candidate_window: 10,
+            recover_every: Duration::from_secs(60),
+        },
+        repository_head,
+    )
+    .unwrap();
+    assert_eq!(scheduler.step().await.unwrap().started.len(), 1);
+    // Tunggu sampai worker benar-benar berjalan dan menunggu model.
+    let waiting = tokio::time::timeout(Duration::from_secs(10), async {
+        while tasks.get(&task_id).await.unwrap().status != TaskStatus::Running {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(waiting.is_ok(), "task tidak pernah RUNNING");
+    let started = std::time::Instant::now();
+    scheduler.shutdown();
+    tokio::time::timeout(Duration::from_secs(10), scheduler.wait_idle())
+        .await
+        .expect("slot tidak berhenti");
+    // Timeout request provider 20 dtk: berhenti jauh lebih cepat berarti runner menghormati sinyal berhenti.
+    assert!(started.elapsed() < Duration::from_secs(5));
+    let attempt = &tasks.list_attempts(&task_id).await.unwrap()[0];
+    assert_eq!(
+        attempt.status,
+        ai_team::store::event::AttemptStatus::Running
+    );
+    assert_eq!(
+        tasks.get(&task_id).await.unwrap().status,
+        TaskStatus::Running
+    );
+}
+
+async fn production_flow(pool: PgPool, conflict: bool, parallel: bool) {
     let fixture = FlowFixture::new();
     let patch = "diff --git a/tracked.txt b/tracked.txt\n--- a/tracked.txt\n+++ b/tracked.txt\n@@ -1 +1 @@\n-base\n+changed\n";
     let responses = vec![
@@ -235,19 +343,21 @@ async fn production_flow(pool: PgPool, conflict: bool) {
     let tasks = TaskRepository::new(pool.clone());
     let providers = ProviderRepository::new(pool.clone());
     let attempt_id = Uuid::new_v4();
-    claim_task(
-        &tasks,
-        &providers,
-        StartRequest {
-            task_id: &task_id,
-            expected_version: 0,
-            model_id: "flow-e2e-model",
-            retention_seconds: 60,
-            attempt_id,
-        },
-    )
-    .await
-    .unwrap();
+    if !parallel {
+        claim_task(
+            &tasks,
+            &providers,
+            StartRequest {
+                task_id: &task_id,
+                expected_version: 0,
+                model_id: "flow-e2e-model",
+                retention_seconds: 60,
+                attempt_id,
+            },
+        )
+        .await
+        .unwrap();
+    }
     if conflict {
         let manager = GitWorktreeManager::new(&fixture.repository, &fixture.worktrees).unwrap();
         let target_id = format!("{task_id}-integration");
@@ -259,7 +369,7 @@ async fn production_flow(pool: PgPool, conflict: bool) {
         git(target.path(), &["commit", "-m", "target change"]);
     }
     let artifacts = ArtifactStore::new(&fixture.artifacts, 1024 * 1024).unwrap();
-    let mut orchestrator = Orchestrator::new(
+    let orchestrator = Orchestrator::new(
         tasks.clone(),
         providers,
         artifacts,
@@ -269,12 +379,45 @@ async fn production_flow(pool: PgPool, conflict: bool) {
             retention_lease_seconds: 60,
         },
     );
-    assert!(
-        tokio::time::timeout(FLOW_TIMEOUT, orchestrator.dispatch_once())
+    let attempt_id = if parallel {
+        // Scheduler hanya memilih run RUNNING dengan budget cukup untuk task (input + output).
+        sqlx::query("UPDATE project_runs SET status='RUNNING',token_budget=100000 WHERE id=$1")
+            .bind(run_id)
+            .execute(&pool)
             .await
-            .expect("dispatch timed out")
-            .unwrap()
-    );
+            .unwrap();
+        let scheduler = ParallelScheduler::new(
+            pool.clone(),
+            OrchestratorRunner::new(Arc::new(orchestrator)),
+            ParallelConfig {
+                slots: 2,
+                provider_id: "flow-e2e-provider".into(),
+                model_id: "flow-e2e-model".into(),
+                retention_seconds: 60,
+                lease_ttl_seconds: 60,
+                heartbeat_interval: Duration::from_secs(1),
+                stale_after_seconds: 60,
+                idle_min: Duration::from_millis(10),
+                idle_max: Duration::from_millis(50),
+                shutdown_grace: Duration::from_secs(1),
+                candidate_window: 10,
+                recover_every: Duration::from_secs(60),
+            },
+            repository_head,
+        )
+        .unwrap();
+        assert_eq!(scheduler.step().await.unwrap().started.len(), 1);
+        scheduler.wait_idle().await;
+        tasks.list_attempts(&task_id).await.unwrap()[0].id
+    } else {
+        assert!(
+            tokio::time::timeout(FLOW_TIMEOUT, orchestrator.dispatch_once())
+                .await
+                .expect("dispatch timed out")
+                .unwrap()
+        );
+        attempt_id
+    };
     server.finish(3).await;
 
     let stored = tasks.get(&task_id).await.unwrap();

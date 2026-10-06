@@ -255,7 +255,7 @@ async fn sequential_dispatch_runs_m2_setup_lifecycle_before_next_task(pool: PgPo
         .await
         .unwrap();
     let root = std::env::temp_dir().join(format!("scheduler-test-{}", Uuid::new_v4()));
-    let mut orchestrator = Orchestrator::new(
+    let orchestrator = Orchestrator::new(
         TaskRepository::new(pool.clone()),
         ProviderRepository::new(pool.clone()),
         ArtifactStore::new(root.join("artifacts"), 1024).unwrap(),
@@ -411,7 +411,7 @@ async fn multi_task_pipeline_follows_dependencies(pool: PgPool) {
         .unwrap();
     let scheduler = SequentialScheduler::new(pool.clone(), "flow-model".into(), 60);
     let tasks = TaskRepository::new(pool.clone());
-    let mut orchestrator = Orchestrator::new(
+    let orchestrator = Orchestrator::new(
         tasks.clone(),
         ProviderRepository::new(pool.clone()),
         ArtifactStore::new(root.join("artifacts"), 1024 * 1024).unwrap(),
@@ -518,7 +518,7 @@ async fn missing_model_does_not_fail_sequential_dispatch(pool: PgPool) {
     task(&pool, run, "waiting", 0).await;
     let scheduler = SequentialScheduler::new(pool.clone(), "not-registered-yet".into(), 60);
     let root = std::env::temp_dir().join(format!("scheduler-test-{}", Uuid::new_v4()));
-    let mut orchestrator = Orchestrator::new(
+    let orchestrator = Orchestrator::new(
         TaskRepository::new(pool.clone()),
         ProviderRepository::new(pool.clone()),
         ArtifactStore::new(root.join("artifacts"), 1024).unwrap(),

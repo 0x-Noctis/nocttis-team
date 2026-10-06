@@ -278,7 +278,7 @@ impl Orchestrator {
         Ok(recovered)
     }
 
-    pub async fn run(mut self, mut wake: mpsc::Receiver<()>) {
+    pub async fn run(self: std::sync::Arc<Self>, mut wake: mpsc::Receiver<()>) {
         loop {
             loop {
                 match self.dispatch_once().await {
@@ -298,7 +298,7 @@ impl Orchestrator {
         }
     }
 
-    pub async fn dispatch_once(&mut self) -> Result<bool, OrchestratorError> {
+    pub async fn dispatch_once(&self) -> Result<bool, OrchestratorError> {
         let Some(attempt) = self.tasks.next_assigned().await.map_err(store_error)? else {
             return Ok(false);
         };
@@ -306,7 +306,7 @@ impl Orchestrator {
     }
 
     async fn dispatch_claimed(
-        &mut self,
+        &self,
         attempt: crate::store::event::RuntimeAttempt,
     ) -> Result<bool, OrchestratorError> {
         let dispatch_owner = match self.tasks.claim_dispatch(attempt.id).await {
@@ -314,6 +314,18 @@ impl Orchestrator {
             Err(StoreError::Conflict(Conflict::Claim)) => return Ok(true),
             Err(error) => return Err(store_error(error)),
         };
+        self.run_claimed(attempt, dispatch_owner).await?;
+        Ok(true)
+    }
+
+    /// Menjalankan pipeline untuk attempt yang `dispatch_owner`-nya sudah dipegang pemanggil (via
+    /// `claim_dispatch` atau `SchedulerStore::claim_next`). Kegagalan pipeline dicatat ke attempt/task di sini;
+    /// `Err` hanya berarti pencatatan kegagalan itu sendiri gagal.
+    pub async fn run_claimed(
+        &self,
+        attempt: crate::store::event::RuntimeAttempt,
+        dispatch_owner: Uuid,
+    ) -> Result<(), OrchestratorError> {
         let attempt_id = attempt.id;
         if let Err(error) = self.execute(attempt, dispatch_owner).await {
             match self
@@ -331,11 +343,11 @@ impl Orchestrator {
             }
             tracing::error!(%attempt_id, %error, "dispatch attempt gagal");
         }
-        Ok(true)
+        Ok(())
     }
 
     pub async fn run_sequential(
-        &mut self,
+        &self,
         scheduler: &SequentialScheduler,
         mut wake: mpsc::Receiver<()>,
     ) {
@@ -367,7 +379,7 @@ impl Orchestrator {
     }
 
     pub async fn dispatch_sequential_once(
-        &mut self,
+        &self,
         scheduler: &SequentialScheduler,
     ) -> Result<bool, OrchestratorError> {
         let Some(attempt) = scheduler.claim_one().await.map_err(store_error)? else {
@@ -420,7 +432,7 @@ impl Orchestrator {
     }
 
     async fn execute(
-        &mut self,
+        &self,
         attempt: crate::store::event::RuntimeAttempt,
         dispatch_owner: Uuid,
     ) -> Result<(), OrchestratorError> {
@@ -607,7 +619,9 @@ impl Orchestrator {
             ProductionExecutor::new(&runner, &self.artifacts),
         )
         .map_err(|_| OrchestratorError::Verifier)?;
-        let report = verifier.verify().map_err(|_| OrchestratorError::Verifier)?;
+        // Verifier sinkron (menunggu container); di runtime multi-thread lepaskan thread worker supaya slot lain
+        // dan heartbeat tidak kelaparan saat beberapa slot memverifikasi bersamaan.
+        let report = blocking(|| verifier.verify()).map_err(|_| OrchestratorError::Verifier)?;
         for (index, result) in report.results.iter().enumerate() {
             self.tasks
                 .record_event_once(
@@ -826,6 +840,47 @@ impl Orchestrator {
     }
 }
 
+/// Menjalankan pekerjaan sinkron yang lama. `block_in_place` hanya valid di runtime multi-thread.
+fn blocking<T>(work: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current().map(|handle| handle.runtime_flavor()) {
+        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(work),
+        _ => work(),
+    }
+}
+
+/// Adaptor `SlotRunner` produksi: menjalankan pipeline worker -> review -> verify -> integrasi untuk task yang
+/// sudah diklaim `ParallelScheduler`. Permintaan berhenti dari scheduler membatalkan pipeline di titik `await`
+/// berikutnya (future di-drop; transaksi DB otomatis rollback). Attempt yang dihentikan tidak difinalisasi di
+/// sini: Cancel difinalisasi scheduler, Shutdown/Lost dipulihkan oleh recovery.
+pub struct OrchestratorRunner {
+    orchestrator: std::sync::Arc<Orchestrator>,
+}
+
+impl OrchestratorRunner {
+    pub fn new(orchestrator: std::sync::Arc<Orchestrator>) -> Self {
+        Self { orchestrator }
+    }
+}
+
+impl scheduler::parallel::SlotRunner for OrchestratorRunner {
+    async fn run(
+        &self,
+        task: &crate::store::scheduler::ClaimedTask,
+        mut control: scheduler::parallel::SlotControl,
+    ) -> scheduler::parallel::RunOutcome {
+        use scheduler::parallel::RunOutcome;
+        tokio::select! {
+            result = self.orchestrator.run_claimed(task.attempt.clone(), task.owner) => {
+                if let Err(error) = result {
+                    tracing::error!(attempt_id = %task.attempt.id, %error, "pencatatan kegagalan attempt gagal");
+                }
+                RunOutcome::Finished
+            }
+            _ = control.stopped() => RunOutcome::Stopped,
+        }
+    }
+}
+
 fn recovered_integration_status(
     checkpoint: IntegrationStatus,
     target_hash: &str,
@@ -911,7 +966,7 @@ pub async fn claim_task(
     tasks.get(request.task_id).await
 }
 
-fn repository_head(repository: &Path) -> Option<String> {
+pub fn repository_head(repository: &Path) -> Option<String> {
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(repository)

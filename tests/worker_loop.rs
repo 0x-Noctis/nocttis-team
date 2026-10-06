@@ -1,10 +1,9 @@
 use std::{
-    cell::Cell,
     collections::{HashMap, VecDeque},
     fs,
     path::{Path, PathBuf},
     process::Command,
-    rc::Rc,
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -31,17 +30,17 @@ use ai_team::{
 use serde_json::json;
 
 #[derive(Clone, Default)]
-struct TestClock(Rc<Cell<Duration>>);
+struct TestClock(Arc<Mutex<Duration>>);
 
 impl TestClock {
     fn advance(&self, duration: Duration) {
-        self.0.set(self.0.get() + duration);
+        *self.0.lock().unwrap() += duration;
     }
 }
 
 impl WorkerClock for TestClock {
     fn elapsed(&self) -> Duration {
-        self.0.get()
+        *self.0.lock().unwrap()
     }
 }
 

@@ -135,7 +135,7 @@ pub trait CheckpointStore {
     ) -> Result<(), Self::Error>;
 }
 
-pub trait WorkerClock {
+pub trait WorkerClock: Send + Sync {
     fn elapsed(&self) -> Duration;
 }
 
