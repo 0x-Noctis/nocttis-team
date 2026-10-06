@@ -1,6 +1,7 @@
 pub mod artifact;
 pub mod event;
 pub mod idempotency;
+pub mod lease;
 pub mod project;
 pub mod provider;
 pub mod scheduler;
