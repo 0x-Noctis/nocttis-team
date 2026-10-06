@@ -22,6 +22,7 @@
   let decisionError = $state('');
   let confirmingCancel = $state(false);
   let actorId = $state('');
+  let leading = $state(false);
 
   const runId = $derived(page.params.id ?? '');
   const run = $derived(detail?.run);
@@ -31,6 +32,11 @@
   const dagTasks = $derived<TaskView[]>(tasks.length ? tasks : (plan?.tasks ?? []).map((contract) => ({ contract, status: 'PLANNED' })));
   const canPause = $derived(run?.status === 'RUNNING');
   const canResume = $derived(run?.status === 'PAUSED');
+  // Lead hanya boleh dipanggil bila run masih merencanakan dan belum ada proposal yang menunggu keputusan.
+  const canAskLead = $derived(
+    (run?.status === 'PLANNING' || run?.status === 'AWAITING_APPROVAL') && !plans.some((candidate) => candidate.status === 'PROPOSED')
+  );
+  const errorLines = $derived(Object.entries(error?.error.details ?? {}).map(([key, value]) => `${key}: ${String(value)}`));
   const canCancel = $derived(run?.status === 'RUNNING' || run?.status === 'PAUSED');
 
   // Satu siklus baca: run, plan, dan task diambil bersamaan lalu diganti sekaligus agar tampilan konsisten.
@@ -64,6 +70,18 @@
       await refresh().catch(() => undefined);
     } catch (reason) { decisionError = asApiError(reason).error.message; }
     finally { acting = false; }
+  }
+
+  async function askLead() {
+    leading = true;
+    error = null;
+    notice = '';
+    try {
+      await runApi.leadPlan(runId);
+      notice = 'Lead proposed a plan. Review it before approving.';
+      await refresh().catch(() => undefined);
+    } catch (reason) { error = asApiError(reason); }
+    finally { leading = false; }
   }
 
   const transition = (action: 'pause' | 'resume' | 'cancel') => {
@@ -109,7 +127,7 @@
 <svelte:head><title>{run ? `${run.objective} · Runs` : 'Run · Noctis'}</title></svelte:head>
 <main>
   <nav aria-label="Breadcrumb"><a href="/projects">Projects</a><span aria-hidden="true">/</span>{#if run}<a href={`/projects/${encodeURIComponent(run.project_id)}`}>Project</a><span aria-hidden="true">/</span>{/if}<span>Run {runId}</span></nav>
-  {#if error}<section class="error" role="alert"><strong>{error.error.message}</strong><span>Request ID: <code>{error.error.request_id}</code></span></section>{/if}
+  {#if error}<section class="error" role="alert"><strong>{error.error.message}</strong>{#each errorLines as line}<span>{line}</span>{/each}<span>Request ID: <code>{error.error.request_id}</code></span></section>{/if}
   {#if notice}<p class="notice" role="status">{notice}</p>{/if}
   {#if liveError}<p class="warning" role="status">{liveError}</p>{/if}
 
@@ -132,6 +150,13 @@
 
     <BudgetMeter budget={detail.budget} />
 
+    {#if canAskLead}
+      <section class="lead" aria-labelledby="lead-title"><h2 id="lead-title">Lead planner</h2>
+        <p>Ask the Lead agent to draft a task plan from the objective and repository discovery. You still approve it before anything runs.</p>
+        <button type="button" class="primary" disabled={leading || acting} aria-busy={leading} onclick={askLead}>{leading ? 'Lead is planning… this can take a minute' : plan ? 'Ask Lead for a new plan' : 'Ask Lead to plan'}</button>
+      </section>
+    {/if}
+
     {#if plan}
       <PlanReview {plan} availableTokens={detail.budget.limit - detail.budget.reserved} />
       <PlanApprovalPanel {plan} {actorId} submitting={acting} error={decisionError} onsubmit={decide} />
@@ -153,7 +178,7 @@
   .controls { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; padding: 1rem; border: 1px solid #394139; background: #121512; } .live { margin-left: auto; color: #aeb5ad; font-size: .85rem; }
   button { min-height: 2.5rem; padding: .55rem 1rem; border: 1px solid #525b52; background: #202420; color: inherit; font-weight: 800; cursor: pointer; } button:disabled { opacity: .5; cursor: not-allowed; } .danger { border-color: #ff8b8b; background: #291313; color: #ffb0b0; }
   a:focus-visible, button:focus-visible { outline: 3px solid #f4d35e; outline-offset: 3px; }
-  main > section:not(.controls):not(.error) { padding: 0; border: 0; background: none; } #board-title { margin-bottom: .75rem; }
+  main > section:not(.controls):not(.error):not(.lead) { padding: 0; border: 0; background: none; } #board-title { margin-bottom: .75rem; }
   .error, .notice, .warning, .state { margin: 0; padding: 1rem; border: 1px solid #697169; } .error { display: grid; gap: .4rem; border-color: #ff8b8b; color: #ffb0b0; } .notice { border-color: #65a978; } .warning { border-color: #d8c98a; color: #f2e6aa; }
   @media (max-width: 700px) { main { padding: 1rem; } .live { margin-left: 0; } }
 </style>

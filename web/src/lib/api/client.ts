@@ -200,6 +200,12 @@ export const runApi = {
     }
     return tasks;
   },
+  // Meminta Lead Agent menyusun plan (bisa memakan waktu sebesar timeout provider); hasilnya plan PROPOSED.
+  leadPlan: (runId: string, modelId?: string) =>
+    request<{ plan: ProposedPlan }>(
+      `/api/v1/runs/${enc(runId)}/lead-plan`,
+      mutation('POST', modelId ? { model_id: modelId } : {})
+    ).then(({ plan }) => plan),
   decide: (runId: string, approval: PlanApprovalInput) =>
     request<{ plan: ProposedPlan }>(
       `/api/v1/runs/${enc(runId)}/${approval.decision === 'APPROVED' ? 'approve' : 'reject'}-plan`,
