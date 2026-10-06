@@ -3,7 +3,8 @@
 
   let { submitting = false, error = '', onsubmit }: { submitting?: boolean; error?: string; onsubmit?: (project: ProjectInput) => void } = $props();
 
-  let project = $state<ProjectInput>({ id: '', name: '', repository_path: '' });
+  // ID diisi UUID acak karena backend mewajibkan UUID kanonik; tetap bisa diubah bila perlu.
+  let project = $state<ProjectInput>({ id: crypto.randomUUID(), name: '', repository_path: '' });
   let fieldError = $state('');
 
   function submit(event: SubmitEvent) {
@@ -24,7 +25,7 @@
     <h2 id="project-form-title">Register repository</h2>
   </div>
   <div class="fields">
-    <label>Project ID<input bind:value={project.id} name="id" autocomplete="off" required /></label>
+    <label>Project ID<input bind:value={project.id} name="id" autocomplete="off" required /><span>UUID dibuat otomatis.</span></label>
     <label>Name<input bind:value={project.name} name="name" autocomplete="off" required /></label>
     <label class="wide">Repository path
       <input bind:value={project.repository_path} name="repository_path" placeholder="/home/me/work/repo" autocomplete="off" required />

@@ -9,7 +9,8 @@
     onsubmit
   }: { projectId?: string; submitting?: boolean; error?: string; onsubmit?: (run: ProjectRunInput) => void } = $props();
 
-  let id = $state('');
+  // ID diisi UUID acak karena backend mewajibkan UUID kanonik; tetap bisa diubah bila perlu.
+  let id = $state(crypto.randomUUID());
   let project = $state('');
   let objective = $state('');
   let criteria = $state('');
@@ -43,7 +44,8 @@
   </div>
   <div class="fields">
     <label>Run ID
-      <input bind:value={id} name="id" autocomplete="off" aria-invalid={errors.id ? 'true' : undefined} aria-describedby={errors.id ? 'run-id-error' : undefined} required />
+      <input bind:value={id} name="id" autocomplete="off" aria-invalid={errors.id ? 'true' : undefined} aria-describedby={errors.id ? 'run-id-error' : 'run-id-hint'} required />
+      <span id="run-id-hint">UUID dibuat otomatis.</span>
       {#if errors.id}<span id="run-id-error" class="error" role="alert">{errors.id}</span>{/if}
     </label>
     <label>Project ID
