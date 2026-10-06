@@ -41,6 +41,26 @@ npm run e2e -- --grep 'production vertical slice'
 
 The test creates a provider and model against `http://127.0.0.1:7411/v1`, creates and starts a task using keyboard controls, reconnects through page reload and SSE backlog, rejects duplicate event IDs, and checks terminal status, verification, artifacts, diff, usage, persistent failure UI, and sensitive-output boundaries. Because no planning route currently promotes a manual task, the harness changes only its status from `DRAFT` to `READY` in isolated PostgreSQL; verification, usage, artifact, and diff data come from production orchestration and APIs.
 
+## Run Lead/DAG scenarios
+
+`tests/e2e/lead-dag.spec.cjs` memakai runtime yang sama dengan vertical smoke (PostgreSQL terisolasi, backend produksi, fake provider, gateway), tanpa mocking route browser. Jawaban Lead berasal dari skenario deterministik di `tests/scenarios/lead/scenarios.cjs`; fake provider memilihnya dari penanda `[scenario:<nama>]` pada objective run (tanpa penanda = `valid`).
+
+```bash
+cd web
+NOCTIS_E2E_API_KEY='<ephemeral fixture value>' \
+npm run e2e -- --grep 'Lead and task DAG'
+```
+
+| Skenario | Yang diperiksa di UI |
+|---|---|
+| `valid` | Lead menyusun plan 4 task; urutan dependency (3 step), risk flag, reservasi token; tidak ada task sebelum approval; approval via keyboard; board: 1 Queued dan 3 Blocked dengan alasan "Waiting for …" |
+| reject lalu re-plan | reject tanpa alasan ditolak; reject beralasan tidak membuat task; Lead dapat membuat plan versi 2 |
+| `cycle` | plan siklik ditolak; pesan "lead plan is invalid" tampil; tidak ada plan tersimpan; run tetap Planning |
+| `overbudget` | plan melampaui token budget ditolak Lead; pesan tampil; tidak ada plan tersimpan |
+| budget kurang saat approve | plan manual yang butuh lebih dari sisa budget menampilkan "Approval will be refused"; approve ditolak (409) dan tidak ada task |
+
+Model default `e2e-model` hanya didaftarkan selama panggilan Lead lalu provider dihapus. Tanpa model terdaftar scheduler menunggu tenang, jadi task hasil approval tidak dijalankan dan board deterministik (tidak butuh Docker runner untuk skenario ini). Skenario baru ditambahkan dengan menambah builder di `scenarios.cjs` dan penanda di objective.
+
 ## Full manual vertical flow
 
 1. Start PostgreSQL and backend on `127.0.0.1:7410`.

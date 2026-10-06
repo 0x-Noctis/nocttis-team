@@ -1,4 +1,5 @@
 const http = require('node:http');
+const lead = require('../scenarios/lead/scenarios.cjs');
 
 const host = '127.0.0.1';
 const port = 7411;
@@ -16,6 +17,8 @@ function response(body) {
 }
 
 function modelReply(request) {
+  // Request Lead dijawab lebih dulu dan tidak menambah `calls`, supaya urutan reviewer worker tidak bergeser.
+  if (lead.isLeadRequest(request)) return response({ role: 'assistant', content: lead.leadReply(request) });
   const probe = request.tools?.some(({ function: definition }) =>
     definition?.name === 'noctis_capability_probe'
   );
