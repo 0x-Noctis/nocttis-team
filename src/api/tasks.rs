@@ -27,6 +27,7 @@ use crate::{
     orchestrator::{StartRequest, claim_task},
     store::{
         artifact::ArtifactStore,
+        event::DecisionNote,
         idempotency::{IdempotencyRepository, Reservation},
         provider::ProviderRepository,
         task::{Conflict, StoreError, StoredTask, TaskRepository},
@@ -67,6 +68,51 @@ struct Pagination {
 #[serde(deny_unknown_fields)]
 struct VersionInput {
     expected_version: i64,
+    /// Identitas manusia yang memutuskan; bila ada, aksi dicatat sebagai keputusan manusia (audit).
+    #[serde(default)]
+    actor_id: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+const MAX_ACTOR_CHARS: usize = 128;
+const MAX_REASON_CHARS: usize = 500;
+
+/// Validasi catatan keputusan: aktor wajib bila ada alasan; tanpa karakter kontrol dan dengan batas panjang.
+fn decision_note(
+    input: &VersionInput,
+    request_id: RequestId,
+) -> Result<Option<DecisionNote>, AppError> {
+    let clean = |value: &str, max: usize| {
+        let value = value.trim();
+        (!value.is_empty() && value.chars().count() <= max && !value.chars().any(char::is_control))
+            .then(|| value.to_owned())
+    };
+    match (&input.actor_id, &input.reason) {
+        (None, None) => Ok(None),
+        (None, Some(_)) => Err(AppError::unprocessable(
+            request_id,
+            json!({"actor_id":"required when a reason is given"}),
+        )),
+        (Some(actor), reason) => {
+            let actor_id = clean(actor, MAX_ACTOR_CHARS).ok_or_else(|| {
+                AppError::unprocessable(
+                    request_id,
+                    json!({"actor_id":"must be 1-128 characters without control characters"}),
+                )
+            })?;
+            let reason = match reason {
+                Some(reason) => Some(clean(reason, MAX_REASON_CHARS).ok_or_else(|| {
+                    AppError::unprocessable(
+                        request_id,
+                        json!({"reason":"must be 1-500 characters without control characters"}),
+                    )
+                })?),
+                None => None,
+            };
+            Ok(Some(DecisionNote { actor_id, reason }))
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -361,9 +407,21 @@ async fn transition_task(
         request_id,
         || async {
             let input: VersionInput = parse(&body, request_id)?;
+            let note = decision_note(&input, request_id)?;
+            // Keputusan beridentitas dicatat sebagai manusia bila sah: pembatalan boleh oleh manusia dari status
+            // non-terminal mana pun, dan NEEDS_HUMAN -> READY hanya sah oleh manusia. Selain itu (mis.
+            // FAILED -> READY) perilaku lama (Actor::System) dipertahankan.
+            let human = note.is_some()
+                && (status == TaskStatus::Cancelled
+                    || state
+                        .tasks
+                        .get(&id)
+                        .await
+                        .is_ok_and(|task| task.status == TaskStatus::NeedsHuman));
+            let actor = if human { Actor::Human } else { Actor::System };
             let task = state
                 .tasks
-                .transition(&id, input.expected_version, status, Actor::System)
+                .transition_noted(&id, input.expected_version, status, actor, note.as_ref())
                 .await
                 .map_err(|error| store_error(error, request_id))?;
             Ok((StatusCode::OK, TaskResponse::from(task)))

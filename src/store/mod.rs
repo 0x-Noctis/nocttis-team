@@ -1,3 +1,4 @@
+pub mod approvals;
 pub mod artifact;
 pub mod budget;
 pub mod event;

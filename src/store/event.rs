@@ -11,10 +11,19 @@ pub struct TaskEvent {
     pub id: i64,
     pub task_id: NonEmptyString,
     pub actor: Actor,
+    /// Identitas pelaku bila dicatat (keputusan manusia); `None` untuk aktor sistem/agent.
+    pub actor_id: Option<String>,
     pub event_type: NonEmptyString,
     pub from_status: Option<TaskStatus>,
     pub to_status: Option<TaskStatus>,
     pub payload: Value,
+}
+
+/// Catatan audit untuk transisi yang diputuskan manusia: siapa dan kenapa.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecisionNote {
+    pub actor_id: String,
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

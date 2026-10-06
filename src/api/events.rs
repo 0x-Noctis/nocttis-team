@@ -115,6 +115,7 @@ fn event_json(event: crate::store::event::TaskEvent) -> Value {
         "id": event.id,
         "task_id": event.task_id,
         "actor": event.actor,
+        "actor_id": event.actor_id,
         "event_type": event.event_type,
         "from_status": event.from_status,
         "to_status": event.to_status,

@@ -63,6 +63,7 @@ pub fn router_with_scheduler(
             "/api/v1/projects/{id}",
             route_get(get).put(update).delete(delete),
         )
+        .route("/api/v1/approvals", route_get(approvals))
         .route("/api/v1/projects/{id}/discover", post(discovery))
         .route(
             "/api/v1/projects/{id}/runs",
@@ -196,6 +197,17 @@ async fn list(
         );
     }
     Ok(Json(json!({"items":items})))
+}
+
+/// Antrean keputusan manusia: plan menunggu, task NEEDS_HUMAN/CONFLICT, dan riwayat keputusan (hanya baca).
+async fn approvals(
+    State(state): State<StateData>,
+    Extension(id): Extension<RequestId>,
+) -> Result<Json<Value>, AppError> {
+    let snapshot = crate::store::approvals::approvals_snapshot(&state.pool)
+        .await
+        .map_err(|error| AppError::internal(id, error))?;
+    Ok(Json(json!(snapshot)))
 }
 
 async fn get(

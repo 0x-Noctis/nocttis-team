@@ -17,10 +17,10 @@ use crate::domain::{
 };
 
 use super::event::{
-    AgentAttempt, ArtifactRecord, AttemptStatus, AttemptUpdate, ClaimAttempt, DispatchClaim,
-    DurableEvent, IntegrationOperation, IntegrationStatus, NumericError, RecoveryDisposition,
-    RecoveryResult, RetentionClaim, RuntimeAttempt, TaskEvent, ToolCallMetadata,
-    ToolCallReservation, ToolOutcome, Usage,
+    AgentAttempt, ArtifactRecord, AttemptStatus, AttemptUpdate, ClaimAttempt, DecisionNote,
+    DispatchClaim, DurableEvent, IntegrationOperation, IntegrationStatus, NumericError,
+    RecoveryDisposition, RecoveryResult, RetentionClaim, RuntimeAttempt, TaskEvent,
+    ToolCallMetadata, ToolCallReservation, ToolOutcome, Usage,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -390,6 +390,19 @@ impl TaskRepository {
         to: TaskStatus,
         actor: Actor,
     ) -> Result<StoredTask, StoreError> {
+        self.transition_noted(id, expected_version, to, actor, None)
+            .await
+    }
+
+    /// Seperti `transition`, tetapi event-nya membawa identitas pelaku dan alasan (audit keputusan manusia).
+    pub async fn transition_noted(
+        &self,
+        id: &str,
+        expected_version: i64,
+        to: TaskStatus,
+        actor: Actor,
+        note: Option<&DecisionNote>,
+    ) -> Result<StoredTask, StoreError> {
         let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
         let row = task_query("WHERE t.id=$1 FOR UPDATE")
             .bind(id.to_owned())
@@ -404,12 +417,13 @@ impl TaskRepository {
         transition(&current.contract, current.status, to, actor)?;
         sqlx::query("UPDATE tasks SET status=$2,version=version+1,updated_at=now() WHERE id=$1 AND version=$3")
             .bind(id).bind(enum_text(&to)?).bind(expected_version).execute(&mut *transaction).await.map_err(StoreError::Database)?;
-        insert_event(
+        insert_event_noted(
             &mut transaction,
             &current.contract,
             actor,
             current.status,
             to,
+            note,
         )
         .await?;
         transaction.commit().await.map_err(StoreError::Database)?;
@@ -421,7 +435,7 @@ impl TaskRepository {
     }
 
     pub async fn events(&self, task_id: &str) -> Result<Vec<TaskEvent>, StoreError> {
-        let rows = sqlx::query("SELECT id,task_id,actor_type,event_type,from_status::text,to_status::text,payload FROM events WHERE task_id=$1 ORDER BY id")
+        let rows = sqlx::query("SELECT id,task_id,actor_type,actor_id,event_type,from_status::text,to_status::text,payload FROM events WHERE task_id=$1 ORDER BY id")
             .bind(task_id).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
         rows.iter().map(event_from_row).collect()
     }
@@ -431,7 +445,7 @@ impl TaskRepository {
         task_id: &str,
         cursor: i64,
     ) -> Result<Vec<TaskEvent>, StoreError> {
-        let rows = sqlx::query("SELECT id,task_id,actor_type,event_type,from_status::text,to_status::text,payload FROM events WHERE task_id=$1 AND id>$2 ORDER BY id LIMIT 100")
+        let rows = sqlx::query("SELECT id,task_id,actor_type,actor_id,event_type,from_status::text,to_status::text,payload FROM events WHERE task_id=$1 AND id>$2 ORDER BY id LIMIT 100")
             .bind(task_id).bind(cursor).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
         rows.iter().map(event_from_row).collect()
     }
@@ -1620,9 +1634,25 @@ async fn insert_event(
     from: TaskStatus,
     to: TaskStatus,
 ) -> Result<(), StoreError> {
-    sqlx::query("INSERT INTO events (project_run_id,task_id,actor_type,event_type,from_status,to_status,payload) VALUES ($1,$2,$3,'status_transition',$4,$5,'{}')")
+    insert_event_noted(transaction, contract, actor, from, to, None).await
+}
+
+async fn insert_event_noted(
+    transaction: &mut Transaction<'_, Postgres>,
+    contract: &TaskContract,
+    actor: Actor,
+    from: TaskStatus,
+    to: TaskStatus,
+    note: Option<&DecisionNote>,
+) -> Result<(), StoreError> {
+    let payload = match note.and_then(|note| note.reason.as_deref()) {
+        Some(reason) => serde_json::json!({ "reason": reason }),
+        None => serde_json::json!({}),
+    };
+    sqlx::query("INSERT INTO events (project_run_id,task_id,actor_type,actor_id,event_type,from_status,to_status,payload) VALUES ($1,$2,$3,$4,'status_transition',$5,$6,$7)")
         .bind(uuid("project_run_id", contract.project_run_id.as_str())?).bind(contract.id.as_str())
-        .bind(enum_text(&actor)?).bind(enum_text(&from)?).bind(enum_text(&to)?)
+        .bind(enum_text(&actor)?).bind(note.map(|note| note.actor_id.as_str()))
+        .bind(enum_text(&from)?).bind(enum_text(&to)?).bind(payload)
         .execute(&mut **transaction).await.map_err(StoreError::Database)?;
     Ok(())
 }
@@ -1689,6 +1719,7 @@ fn event_from_row(row: &PgRow) -> Result<TaskEvent, StoreError> {
         id: row.get("id"),
         task_id: text(row, "task_id", "task_id")?,
         actor: parse_enum(row.get("actor_type"))?,
+        actor_id: row.get("actor_id"),
         event_type: text(row, "event_type", "event_type")?,
         from_status: row
             .get::<Option<String>, _>("from_status")

@@ -520,6 +520,16 @@ GET    /runs/:id/events          (belum diimplementasikan)
 GET    /runs/:id/events/stream   (belum diimplementasikan; UI memakai polling)
 ```
 
+### Approval
+
+```text
+GET    /approvals           -> { pending_plans, attention_tasks, plan_decisions, task_decisions } (hanya baca)
+POST   /tasks/:id/retry|cancel   body { expected_version, actor_id?, reason? }
+```
+
+`actor_id` dan `reason` membuat aksi tercatat sebagai keputusan manusia (event `actor=human`, `actor_id`, `payload.reason`);
+`NEEDS_HUMAN -> READY` hanya sah dengan identitas. Versi yang basi ditolak (409).
+
 ### Task
 
 ```text
