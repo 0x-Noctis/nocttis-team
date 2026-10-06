@@ -510,6 +510,7 @@ GET    /runs/:id            -> { run, budget: { limit, reserved, used, estimated
 POST   /runs/:id/plan
 POST   /runs/:id/lead-plan  -> Lead Agent menyusun plan PROPOSED; body {} atau {"model_id"}
 GET    /runs/:id/plans      -> { items }  versi terbaru dulu
+GET    /runs/:id/scheduler  -> { run_status, max_slots, budget, slots, queue, leases, conflicts, attempts, task_budgets } (hanya baca; untuk dashboard)
 POST   /runs/:id/approve-plan
 POST   /runs/:id/reject-plan
 POST   /runs/:id/pause

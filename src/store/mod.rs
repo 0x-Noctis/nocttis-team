@@ -6,4 +6,5 @@ pub mod lease;
 pub mod project;
 pub mod provider;
 pub mod scheduler;
+pub mod snapshot;
 pub mod task;

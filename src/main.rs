@@ -68,9 +68,10 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/api/v1/health", get(health))
         .merge(api::providers::router(database.clone()))
-        .merge(api::projects::router_with_default_model(
+        .merge(api::projects::router_with_scheduler(
             database.clone(),
             Some(config.provider.model.clone()),
+            config.scheduler.max_parallel_agents,
         ))
         .merge(api::tasks::router_with_start(
             database.clone(),

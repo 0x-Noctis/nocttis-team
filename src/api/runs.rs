@@ -15,6 +15,7 @@ use super::{
 use crate::{
     api::contracts::plan::{PlanApprovalInput, ProposedPlanInput},
     domain::project::{ApprovalDecision, PlanApproval, ProposedPlan, RunStatus},
+    store::snapshot::{SnapshotError, run_snapshot},
 };
 
 pub(crate) fn routes() -> Router<StateData> {
@@ -22,6 +23,7 @@ pub(crate) fn routes() -> Router<StateData> {
         .route("/api/v1/runs/{id}", route_get(get))
         .route("/api/v1/runs/{id}/plan", post(propose))
         .route("/api/v1/runs/{id}/plans", route_get(list_plans))
+        .route("/api/v1/runs/{id}/scheduler", route_get(scheduler_view))
         .route("/api/v1/runs/{id}/lead-plan", post(super::lead::lead_plan))
         .route("/api/v1/runs/{id}/approve-plan", post(approve))
         .route("/api/v1/runs/{id}/reject-plan", post(reject))
@@ -46,6 +48,22 @@ async fn get(
         .await
         .map_err(|error| store_error(error, request_id))?;
     Ok(Json(json!({"run":run,"budget":budget})))
+}
+
+/// Status scheduler satu run (slot, antrean beralasan, lease, attempt, budget) untuk dashboard; hanya membaca.
+async fn scheduler_view(
+    State(state): State<StateData>,
+    Extension(request_id): Extension<RequestId>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let run_id = canonical_uuid(&id, request_id)?;
+    let snapshot = run_snapshot(&state.pool, run_id, state.max_slots)
+        .await
+        .map_err(|error| match error {
+            SnapshotError::NotFound => AppError::not_found(request_id, Value::Null),
+            SnapshotError::Database(error) => AppError::internal(request_id, error),
+        })?;
+    Ok(Json(json!(snapshot)))
 }
 
 async fn list_plans(

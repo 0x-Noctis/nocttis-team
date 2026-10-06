@@ -31,14 +31,27 @@ pub(crate) struct StateData {
     pub pool: PgPool,
     /// Model untuk Lead Agent bila request tidak menyebut `model_id`.
     pub default_model: Option<String>,
+    /// Jumlah slot worker yang dikonfigurasi (`scheduler.max_parallel_agents`), untuk tampilan dashboard.
+    pub max_slots: usize,
 }
+
+const DEFAULT_MAX_SLOTS: usize = 2;
 
 pub fn router(pool: PgPool) -> Router {
     router_with_default_model(pool, None)
 }
 
 pub fn router_with_default_model(pool: PgPool, default_model: Option<String>) -> Router {
+    router_with_scheduler(pool, default_model, DEFAULT_MAX_SLOTS)
+}
+
+pub fn router_with_scheduler(
+    pool: PgPool,
+    default_model: Option<String>,
+    max_slots: usize,
+) -> Router {
     let state = StateData {
+        max_slots,
         store: ProjectRepository::new(pool.clone()),
         idempotency: IdempotencyRepository::new(pool.clone()),
         pool,
