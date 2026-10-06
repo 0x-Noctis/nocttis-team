@@ -41,6 +41,8 @@
   <h1>AI Team</h1>
   <p class="intro">Validasi koneksi OpenAI-compatible sebelum worker, scheduler, dan Lead Agent dibuat.</p>
   <a class="providers-link" href="/providers">Kelola providers</a>
+  <a class="providers-link" href="/projects">Projects &amp; runs</a>
+  <a class="providers-link" href="/tasks">Tasks</a>
 
   <section aria-labelledby="provider-title">
     <div>
@@ -87,6 +89,7 @@
   .success { background: #102217; border-color: #90e0a8; } .error { background: #291313; border-color: #ff7474; }
   code { color: #90e0a8; }
   .providers-link { display: inline-block; margin-top: 18px; color: #90e0a8; font-weight: 800; }
+  .providers-link + .providers-link { margin-left: 24px; }
   .providers-link:focus-visible { outline: 3px solid #fff; outline-offset: 3px; }
   .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; margin-top: 72px; background: #303630; border: 1px solid #303630; }
   article { min-height: 190px; padding: 26px; background: #0b0d0c; } article span { color: #687068; font-family: ui-monospace, monospace; } h3 { margin: 36px 0 8px; }
