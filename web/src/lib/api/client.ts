@@ -9,6 +9,7 @@ import type {
   TaskContract,
   TaskStatus
 } from './types';
+import type { ApprovalsView } from '$lib/components/approval/types';
 import type {
   AttemptRecord,
   GaugeValue,
@@ -242,4 +243,19 @@ export interface SchedulerView {
 
 export const schedulerApi = {
   view: (runId: string) => request<SchedulerView>(`/api/v1/runs/${enc(runId)}/scheduler`)
+};
+
+export const approvalsApi = {
+  list: () => request<ApprovalsView>('/api/v1/approvals'),
+  // Keputusan task selalu membawa identitas dan versi yang dilihat operator; versi basi ditolak server (409).
+  retryTask: (taskId: string, expectedVersion: number, actorId: string, reason: string | null) =>
+    request<TaskResponse>(
+      `/api/v1/tasks/${enc(taskId)}/retry`,
+      mutation('POST', { expected_version: expectedVersion, actor_id: actorId, ...(reason ? { reason } : {}) })
+    ),
+  cancelTask: (taskId: string, expectedVersion: number, actorId: string, reason: string | null) =>
+    request<TaskResponse>(
+      `/api/v1/tasks/${enc(taskId)}/cancel`,
+      mutation('POST', { expected_version: expectedVersion, actor_id: actorId, ...(reason ? { reason } : {}) })
+    )
 };
