@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 #[path = "scheduler/mod.rs"]
-mod scheduler;
+pub mod scheduler;
 pub use scheduler::SequentialScheduler;
 
 use crate::{

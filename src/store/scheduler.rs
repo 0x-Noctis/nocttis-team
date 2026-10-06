@@ -16,6 +16,17 @@ use crate::store::{
     task::{Conflict, StoreError, TaskRepository},
 };
 
+/// Syarat sebuah task boleh diklaim; dipakai bersama oleh `claim_next` dan `ready_candidates` supaya
+/// daftar kandidat selalu sama dengan yang benar-benar bisa diklaim.
+const ELIGIBLE: &str = "WHERE pr.status='RUNNING' AND t.status='READY'
+               AND (t.plan_id IS NULL OR EXISTS (SELECT 1 FROM plans plan
+                   WHERE plan.id=t.plan_id AND plan.project_run_id=pr.id AND plan.status='APPROVED'))
+               AND (SELECT count(*) FROM agent_runs ar WHERE ar.task_id=t.id) < t.max_attempts
+               AND NOT EXISTS (SELECT 1 FROM task_dependencies d JOIN tasks required ON required.id=d.dependency_id
+                               WHERE d.task_id=t.id AND required.status <> 'DONE')
+               AND ((t.plan_id IS NOT NULL AND pr.reserved_tokens >= t.max_input_tokens + t.max_output_tokens)
+                    OR (t.plan_id IS NULL AND pr.reserved_tokens + t.max_input_tokens + t.max_output_tokens <= pr.token_budget))";
+
 /// Parameter satu kali claim. `owner` identik dengan `agent_runs.dispatch_owner` dan menjadi bukti
 /// kepemilikan untuk heartbeat berikutnya.
 pub struct ClaimRequest<'a> {
@@ -23,6 +34,17 @@ pub struct ClaimRequest<'a> {
     pub provider_id: &'a str,
     pub model_id: &'a str,
     pub retention_seconds: i64,
+    /// Batasi claim ke task ini (setelah scheduler lebih dulu memegang file lease-nya). `None` = kandidat teratas.
+    pub only_task: Option<&'a str>,
+}
+
+/// Task yang bisa diklaim sekarang beserta scope file-nya.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Candidate {
+    pub task_id: String,
+    pub run_id: Uuid,
+    pub priority: i32,
+    pub allowed_paths: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -72,23 +94,17 @@ impl SchedulerStore {
         let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
         // Kandidat dikunci per task. Syarat budget ikut di SQL supaya task yang tak muat tidak menutup
         // jalan task berprioritas lebih rendah yang muat (tidak ada starvation oleh kandidat teratas).
-        let candidate = sqlx::query(
+        let candidate = sqlx::query(&format!(
             "SELECT t.id,t.role,t.version,t.max_input_tokens,t.max_output_tokens,t.plan_id,
                     pr.id AS run_id,p.repository_path
              FROM tasks t
              JOIN project_runs pr ON pr.id=t.project_run_id
              JOIN projects p ON p.id=pr.project_id
-             WHERE pr.status='RUNNING' AND t.status='READY'
-               AND (t.plan_id IS NULL OR EXISTS (SELECT 1 FROM plans plan
-                   WHERE plan.id=t.plan_id AND plan.project_run_id=pr.id AND plan.status='APPROVED'))
-               AND (SELECT count(*) FROM agent_runs ar WHERE ar.task_id=t.id) < t.max_attempts
-               AND NOT EXISTS (SELECT 1 FROM task_dependencies d JOIN tasks required ON required.id=d.dependency_id
-                               WHERE d.task_id=t.id AND required.status <> 'DONE')
-               AND ((t.plan_id IS NOT NULL AND pr.reserved_tokens >= t.max_input_tokens + t.max_output_tokens)
-                    OR (t.plan_id IS NULL AND pr.reserved_tokens + t.max_input_tokens + t.max_output_tokens <= pr.token_budget))
+             {ELIGIBLE} AND ($1::text IS NULL OR t.id=$1)
              ORDER BY t.priority DESC,t.created_at,t.id
-             FOR UPDATE OF t SKIP LOCKED LIMIT 1",
-        )
+             FOR UPDATE OF t SKIP LOCKED LIMIT 1"
+        ))
+        .bind(request.only_task)
         .fetch_optional(&mut *tx)
         .await
         .map_err(StoreError::Database)?;
@@ -182,6 +198,53 @@ impl SchedulerStore {
             run_id,
             repository_path,
         }))
+    }
+
+    /// Task yang saat ini memenuhi syarat klaim, urut seperti `claim_next` (priority, umur, id). Hanya membaca
+    /// dan tidak mengunci: hasilnya petunjuk bagi scheduler (mis. untuk memegang file lease lebih dulu);
+    /// keputusan akhir tetap di `claim_next`, yang bisa saja mengembalikan `None` bila task sudah diambil.
+    pub async fn ready_candidates(&self, limit: i64) -> Result<Vec<Candidate>, StoreError> {
+        if !(1..=200).contains(&limit) {
+            return Err(StoreError::InvalidId("limit"));
+        }
+        let rows = sqlx::query(&format!(
+            "SELECT t.id,t.priority,t.allowed_paths,pr.id AS run_id
+             FROM tasks t JOIN project_runs pr ON pr.id=t.project_run_id
+             {ELIGIBLE}
+             ORDER BY t.priority DESC,t.created_at,t.id LIMIT $1"
+        ))
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter()
+            .map(|row| {
+                let paths: Vec<String> = serde_json::from_value(row.get("allowed_paths"))
+                    .map_err(StoreError::InvalidJson)?;
+                Ok(Candidate {
+                    task_id: row.get("id"),
+                    run_id: row.get("run_id"),
+                    priority: row.get("priority"),
+                    allowed_paths: paths,
+                })
+            })
+            .collect()
+    }
+
+    /// Jumlah task aktif (sedang dikerjakan) per run, lintas semua scheduler; dasar keadilan antar run.
+    pub async fn active_counts(&self) -> Result<std::collections::HashMap<Uuid, i64>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT project_run_id,count(*) AS active FROM tasks
+             WHERE status IN ('ASSIGNED','RUNNING','SELF_CHECK','REVIEW','VERIFY','INTEGRATE')
+             GROUP BY project_run_id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        Ok(rows
+            .iter()
+            .map(|row| (row.get("project_run_id"), row.get("active")))
+            .collect())
     }
 
     /// Perpanjang kepemilikan claim. `Conflict::Claim` berarti claim sudah hilang (dipulihkan scheduler

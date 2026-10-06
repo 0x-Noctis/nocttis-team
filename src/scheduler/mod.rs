@@ -1,3 +1,5 @@
+pub mod parallel;
+
 use std::path::Path;
 
 use sqlx::{PgPool, Row};

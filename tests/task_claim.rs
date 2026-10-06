@@ -102,6 +102,7 @@ async fn claim(store: &SchedulerStore, owner: Uuid) -> Option<ClaimedTask> {
                 provider_id: "provider",
                 model_id: "model",
                 retention_seconds: 60,
+                only_task: None,
             },
             |_| Some(COMMIT.to_owned()),
         )
@@ -401,4 +402,71 @@ async fn locked_top_candidate_is_skipped_not_waited_on(pool: PgPool) {
     assert_eq!(id_of(&claimed), "next");
     holder.rollback().await.unwrap();
     assert_eq!(id_of(&claim(&store, Uuid::new_v4()).await.unwrap()), "top");
+}
+
+// Claim per-task dan daftar kandidat dipakai scheduler paralel (M4-005): lease dipegang lebih dulu untuk
+// kandidat tertentu, baru task itu saja yang diklaim.
+#[sqlx::test(migrations = "./migrations")]
+async fn candidates_match_claimable_tasks_and_claim_can_target_one(pool: PgPool) {
+    let (project, run) = run_with_budget(&pool, 1_000_000).await;
+    ready_task(&pool, "dep", project, run, 0, &[]).await;
+    sqlx::query("UPDATE tasks SET status='RUNNING' WHERE id='dep'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    ready_task(&pool, "blocked", project, run, 9, &["dep"]).await;
+    ready_task(&pool, "high", project, run, 5, &[]).await;
+    ready_task(&pool, "low", project, run, 1, &[]).await;
+    let store = SchedulerStore::new(pool.clone());
+
+    // Kandidat = persis yang bisa diklaim, urut seperti claim_next; scope file ikut dikembalikan.
+    let candidates = store.ready_candidates(10).await.unwrap();
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|c| c.task_id.as_str())
+            .collect::<Vec<_>>(),
+        ["high", "low"]
+    );
+    assert_eq!(candidates[0].allowed_paths, ["src/high/**"]);
+    assert_eq!((candidates[0].run_id, candidates[0].priority), (run, 5));
+    assert!(store.ready_candidates(0).await.is_err());
+
+    // Claim dibatasi ke satu task walaupun ada kandidat berprioritas lebih tinggi.
+    let request = |only: &'static str| ClaimRequest {
+        owner: Uuid::new_v4(),
+        provider_id: "p",
+        model_id: "m",
+        retention_seconds: 60,
+        only_task: Some(only),
+    };
+    assert_eq!(
+        id_of(
+            &store
+                .claim_next(&request("low"), |_| Some(COMMIT.to_owned()))
+                .await
+                .unwrap()
+                .unwrap()
+        ),
+        "low"
+    );
+    // Task tak layak (dependency belum DONE) atau tak dikenal tidak bisa dipaksa diklaim.
+    assert!(
+        store
+            .claim_next(&request("blocked"), |_| Some(COMMIT.to_owned()))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .claim_next(&request("ghost"), |_| Some(COMMIT.to_owned()))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(store.ready_candidates(10).await.unwrap().len(), 1);
+
+    // Hitungan aktif per run: dep (RUNNING) + low (ASSIGNED).
+    assert_eq!(store.active_counts().await.unwrap().get(&run), Some(&2));
 }
