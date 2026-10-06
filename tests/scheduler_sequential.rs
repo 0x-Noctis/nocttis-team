@@ -366,9 +366,13 @@ async fn multi_task_pipeline_follows_dependencies(pool: PgPool) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/v1", listener.local_addr().unwrap());
     let mut responses = Vec::new();
-    for (i, value) in ["first", "second"].into_iter().enumerate() {
+    // "second" bergantung pada "first": worker-nya mulai dari hasil terintegrasi, jadi patch-nya relatif ke "first".
+    for (i, (before, value)) in [("base", "first"), ("first", "second")]
+        .into_iter()
+        .enumerate()
+    {
         let patch = format!(
-            "diff --git a/tracked.txt b/tracked.txt\n--- a/tracked.txt\n+++ b/tracked.txt\n@@ -1 +1 @@\n-base\n+{value}\n"
+            "diff --git a/tracked.txt b/tracked.txt\n--- a/tracked.txt\n+++ b/tracked.txt\n@@ -1 +1 @@\n-{before}\n+{value}\n"
         );
         responses.push(json!({"choices":[{"message":{"content":null,"tool_calls":[{"id":format!("patch-{i}"),"type":"function","function":{"name":"apply_patch","arguments":json!({"patch":patch}).to_string()}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}));
         responses.push(json!({"choices":[{"message":{"content":json!({"summary":"patched","status":"self_check"}).to_string()},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}));

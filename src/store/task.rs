@@ -1242,6 +1242,43 @@ impl TaskRepository {
         Ok(stored)
     }
 
+    /// Pindahkan commit dasar attempt yang baru diklaim (belum mulai) ke `base_commit`, mis. head cabang integrasi.
+    pub async fn rebase_assigned_attempt(
+        &self,
+        attempt_id: Uuid,
+        dispatch_owner: Uuid,
+        base_commit: &str,
+    ) -> Result<(), StoreError> {
+        validate_base_commit(base_commit)?;
+        let result = sqlx::query(
+            "UPDATE agent_runs SET base_commit=$3 WHERE id=$1 AND dispatch_owner=$2 AND status='assigned' AND finished_at IS NULL",
+        )
+        .bind(attempt_id)
+        .bind(dispatch_owner)
+        .bind(base_commit)
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        if result.rows_affected() != 1 {
+            return Err(StoreError::Conflict(Conflict::Claim));
+        }
+        Ok(())
+    }
+
+    /// Commit dasar branch integrasi `target_id` sesuai operasi pertama yang memakainya (None bila belum ada).
+    pub async fn integration_target_base(
+        &self,
+        target_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        sqlx::query_scalar(
+            "SELECT target_base_commit FROM integration_operations WHERE target_id=$1 ORDER BY created_at,id LIMIT 1",
+        )
+        .bind(target_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::Database)
+    }
+
     pub async fn integration_for_attempt(
         &self,
         attempt_id: Uuid,

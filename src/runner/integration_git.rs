@@ -67,6 +67,40 @@ impl IntegrationBranch {
         Ok(Self { worktree })
     }
 
+    /// Buka branch integrasi run yang sudah ada (mis. saat recovery). `base_commit` harus commit dasar saat dibuat.
+    pub fn open(
+        manager: &GitWorktreeManager,
+        run_id: &str,
+        base_commit: &str,
+    ) -> Result<Self, GitError> {
+        let worktree = manager.open(
+            &format!("integration-{run_id}"),
+            &format!("noctis-integration-{run_id}"),
+            base_commit,
+        )?;
+        Ok(Self { worktree })
+    }
+
+    /// Buka branch integrasi run bila sudah ada, kalau belum buat dari `base_commit`.
+    pub fn open_or_create(
+        manager: &GitWorktreeManager,
+        run_id: &str,
+        base_commit: &str,
+    ) -> Result<Self, GitError> {
+        Self::open(manager, run_id, base_commit)
+            .or_else(|_| Self::create(manager, run_id, base_commit))
+    }
+
+    /// True bila sudah ada commit di branch ini (sejak commit dasar) dengan subject persis `subject`.
+    pub fn has_commit_with_subject(&self, subject: &str) -> Result<bool, GitError> {
+        let range = format!("{}..HEAD", self.base_commit());
+        let output = self.git(&["log", "--format=%s", &range], None)?;
+        require(&output, "could not read integration log")?;
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line == subject))
+    }
+
     pub fn path(&self) -> &Path {
         self.worktree.path()
     }

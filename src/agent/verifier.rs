@@ -114,6 +114,7 @@ pub struct Verifier<'a, E> {
     status: TaskStatus,
     repository: PathBuf,
     executor: E,
+    artifact_scope: String,
 }
 
 impl<'a, E: ProcessExecutor> Verifier<'a, E> {
@@ -141,7 +142,15 @@ impl<'a, E: ProcessExecutor> Verifier<'a, E> {
             status,
             repository,
             executor,
+            artifact_scope: String::new(),
         })
+    }
+
+    /// Membedakan id artifact keluaran dari verifikasi lain atas task yang sama (mis. pemeriksaan integrasi).
+    /// Scope kosong menghasilkan id yang sama seperti sebelumnya.
+    pub fn with_artifact_scope(mut self, scope: impl Into<String>) -> Self {
+        self.artifact_scope = scope.into();
+        self
     }
 
     pub fn verify(mut self) -> Result<VerificationReport, VerifierError> {
@@ -150,7 +159,8 @@ impl<'a, E: ProcessExecutor> Verifier<'a, E> {
         let mut verdict = VerificationVerdict::Integrate;
         for (index, raw) in self.contract.verification_commands.iter().enumerate() {
             let command = parse_command(raw.as_str())?;
-            let targets = artifact_targets(self.contract, index, raw.as_str());
+            let targets =
+                artifact_targets(self.contract, index, raw.as_str(), &self.artifact_scope);
             let execution = self.executor.execute(
                 &CommandRequest {
                     command,
@@ -217,7 +227,12 @@ fn parse_command(value: &str) -> Result<VerificationCommand, VerifierError> {
     })
 }
 
-fn artifact_targets(contract: &TaskContract, index: usize, command: &str) -> ArtifactTargets {
+fn artifact_targets(
+    contract: &TaskContract,
+    index: usize,
+    command: &str,
+    scope: &str,
+) -> ArtifactTargets {
     let mut digest = Sha256::new();
     digest.update(contract.project_run_id.as_str());
     digest.update([0]);
@@ -225,6 +240,10 @@ fn artifact_targets(contract: &TaskContract, index: usize, command: &str) -> Art
     digest.update([0]);
     digest.update(index.to_le_bytes());
     digest.update(command);
+    if !scope.is_empty() {
+        digest.update([0]);
+        digest.update(scope);
+    }
     let digest = format!("{:x}", digest.finalize());
     ArtifactTargets {
         stdout_id: format!("verify-{}-stdout", &digest[..24]),

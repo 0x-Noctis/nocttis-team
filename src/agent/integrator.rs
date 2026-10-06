@@ -186,6 +186,11 @@ pub struct IntegrationReport {
     pub results: Vec<(String, TaskIntegration)>,
 }
 
+/// Subject commit untuk patch satu task; recovery mencarinya di cabang integrasi untuk memastikan patch sudah masuk.
+pub fn commit_subject(task_id: &str) -> String {
+    format!("integrate {task_id}")
+}
+
 pub struct Integrator;
 
 impl Integrator {
@@ -306,7 +311,7 @@ impl Integrator {
                 result.summary,
             ));
         }
-        let commit = branch.commit(&format!("integrate {}", patch.task_id))?;
+        let commit = branch.commit(&commit_subject(&patch.task_id))?;
         Ok(TaskIntegration::Integrated { commit, three_way })
     }
 }

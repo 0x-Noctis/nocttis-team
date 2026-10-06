@@ -15,7 +15,7 @@ use ai_team::{
         repository_head,
         scheduler::parallel::{ParallelConfig, ParallelScheduler},
     },
-    runner::git::GitWorktreeManager,
+    runner::{git::GitWorktreeManager, integration_git::IntegrationBranch},
     store::{
         artifact::ArtifactStore,
         provider::ProviderRepository,
@@ -203,6 +203,91 @@ async fn unverified_tools_are_rejected_before_worktree(pool: PgPool) {
     }
 }
 
+/// Crash setelah `prepare_integration`: recovery memeriksa cabang integrasi run. Commit `integrate <task>` ada =>
+/// patch sudah masuk (DONE); tidak ada => sisa staging dibuang dan manusia memutuskan (NEEDS_HUMAN).
+#[sqlx::test(migrations = "./migrations")]
+async fn run_branch_integration_recovery_follows_commit_presence(pool: PgPool) {
+    use ai_team::store::event::{IntegrationOperation, IntegrationStatus};
+    for landed in [true, false] {
+        let fixture = FlowFixture::new();
+        let (project_id, run_id, task_id) =
+            (Uuid::new_v4(), Uuid::new_v4(), format!("recover-{landed}"));
+        sqlx::query("INSERT INTO projects (id,name,repository_path) VALUES ($1,$2,$3)")
+            .bind(project_id)
+            .bind(format!("recover-{landed}"))
+            .bind(fixture.repository.to_string_lossy().as_ref())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO project_runs (id,project_id,objective,status,token_budget) VALUES ($1,$2,'recover','RUNNING',100000)")
+            .bind(run_id).bind(project_id).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO providers (id,base_url,api_key_env,request_timeout_seconds) VALUES ($1,'http://127.0.0.1:1','X',1)")
+            .bind(format!("p-{landed}")).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO models (id,provider_id,remote_name,class,context_window,max_output_tokens) VALUES ($1,$2,'mock','coding',1000,1000)")
+            .bind(format!("m-{landed}")).bind(format!("p-{landed}")).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO tasks (id,project_run_id,role,title,objective,status,allowed_paths,acceptance_criteria,verification_commands,max_input_tokens,max_output_tokens,max_attempts) VALUES ($1,$2,'worker','recover','recover','INTEGRATE','[\"tracked.txt\"]','[\"works\"]','[\"true\"]',1000,1000,2)")
+            .bind(&task_id).bind(run_id).execute(&pool).await.unwrap();
+        let attempt_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO agent_runs (id,task_id,role,provider_id,model_id,attempt,status,branch,base_commit,heartbeat_at,retain_until) VALUES ($1,$2,'worker',$3,$4,1,'running',$5,$6,now(),now()+interval '1 hour')")
+            .bind(attempt_id).bind(&task_id).bind(format!("p-{landed}")).bind(format!("m-{landed}"))
+            .bind(format!("noctis-{task_id}")).bind(&fixture.base).execute(&pool).await.unwrap();
+        let manager = GitWorktreeManager::new(&fixture.repository, &fixture.worktrees).unwrap();
+        let target =
+            IntegrationBranch::create(&manager, &run_id.to_string(), &fixture.base).unwrap();
+        if landed {
+            git(
+                target.path(),
+                &[
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    &format!("integrate {task_id}"),
+                ],
+            );
+        } else {
+            fs::write(target.path().join("tracked.txt"), "half-applied\n").unwrap();
+            git(target.path(), &["add", "tracked.txt"]);
+        }
+        let tasks = TaskRepository::new(pool.clone());
+        tasks
+            .prepare_integration(&IntegrationOperation {
+                id: Uuid::new_v4(),
+                attempt_id,
+                task_id: ai_team::domain::task::NonEmptyString::parse("task_id", &task_id).unwrap(),
+                source_branch: format!("noctis-{task_id}"),
+                source_base_commit: fixture.base.clone(),
+                target_id: format!("integration-{run_id}"),
+                target_branch: target.branch().to_owned(),
+                target_base_commit: fixture.base.clone(),
+                patch_sha256: "0".repeat(64),
+                owner_token: Uuid::new_v4(),
+                status: IntegrationStatus::Prepared,
+            })
+            .await
+            .unwrap();
+        let orchestrator = Orchestrator::new(
+            tasks.clone(),
+            ProviderRepository::new(pool.clone()),
+            ArtifactStore::new(&fixture.artifacts, 1024).unwrap(),
+            OrchestratorConfig {
+                worktree_root: fixture.worktrees.clone(),
+                stale_after_seconds: 60,
+                retention_lease_seconds: 60,
+            },
+        );
+        assert_eq!(orchestrator.startup_recovery().await.unwrap(), 1);
+        assert_eq!(
+            tasks.get(&task_id).await.unwrap().status,
+            if landed {
+                TaskStatus::Done
+            } else {
+                TaskStatus::NeedsHuman
+            }
+        );
+        assert!(target.is_clean().unwrap(), "sisa staging harus dibuang");
+    }
+}
+
 /// Shutdown harus menghentikan pipeline yang sedang menunggu model (provider macet) tanpa menunggu timeout
 /// request, dan attempt dibiarkan tidak final supaya recovery berikutnya memulihkannya.
 #[sqlx::test(migrations = "./migrations")]
@@ -359,11 +444,10 @@ async fn production_flow(pool: PgPool, conflict: bool, parallel: bool) {
         .unwrap();
     }
     if conflict {
+        // Cabang integrasi run sudah berisi perubahan lain di file yang sama.
         let manager = GitWorktreeManager::new(&fixture.repository, &fixture.worktrees).unwrap();
-        let target_id = format!("{task_id}-integration");
-        let target = manager
-            .create(&target_id, &format!("integration-{task_id}"), &fixture.base)
-            .unwrap();
+        let target =
+            IntegrationBranch::create(&manager, &run_id.to_string(), &fixture.base).unwrap();
         fs::write(target.path().join("tracked.txt"), "target\n").unwrap();
         git(target.path(), &["add", "tracked.txt"]);
         git(target.path(), &["commit", "-m", "target change"]);
@@ -424,7 +508,7 @@ async fn production_flow(pool: PgPool, conflict: bool, parallel: bool) {
     assert_eq!(
         stored.status,
         if conflict {
-            TaskStatus::Conflict
+            TaskStatus::NeedsHuman
         } else {
             TaskStatus::Done
         }
@@ -453,12 +537,14 @@ async fn production_flow(pool: PgPool, conflict: bool, parallel: bool) {
             TaskStatus::Review,
             TaskStatus::Verify,
             TaskStatus::Integrate,
-            if conflict {
-                TaskStatus::Conflict
-            } else {
-                TaskStatus::Done
-            }
         ]
+        .into_iter()
+        .chain(if conflict {
+            vec![TaskStatus::Conflict, TaskStatus::NeedsHuman]
+        } else {
+            vec![TaskStatus::Done]
+        })
+        .collect::<Vec<_>>()
     );
     assert_eq!(
         transitions
@@ -467,7 +553,7 @@ async fn production_flow(pool: PgPool, conflict: bool, parallel: bool) {
             .count(),
         1
     );
-    let target = fixture.worktrees.join(format!("{task_id}-integration"));
+    let target = fixture.worktrees.join(format!("integration-{run_id}"));
     assert_eq!(
         fs::read_to_string(target.join("tracked.txt")).unwrap(),
         if conflict { "target\n" } else { "changed\n" }
@@ -475,6 +561,17 @@ async fn production_flow(pool: PgPool, conflict: bool, parallel: bool) {
     assert_eq!(
         git_output(&fixture.repository, &["rev-parse", "main"]),
         fixture.base
+    );
+    // Konflik meninggalkan laporan untuk manusia; integrasi sukses tidak.
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM artifacts WHERE task_id=$1 AND kind='conflict_report'"
+        )
+        .bind(&task_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        i64::from(conflict)
     );
     assert!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM model_usage WHERE agent_run_id=$1")

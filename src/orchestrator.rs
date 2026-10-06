@@ -14,8 +14,12 @@ pub use scheduler::SequentialScheduler;
 
 use crate::{
     agent::{
+        integrator::{
+            ApprovedPatch, CheckResult, ConflictReport, IntegrationCheck, Integrator,
+            TaskIntegration, commit_subject,
+        },
         reviewer::{ReviewDecision, Reviewer, SourceExcerpt, VerificationEvidence},
-        verifier::{ProductionExecutor, VerificationVerdict, Verifier},
+        verifier::{ProductionExecutor, VerificationReport, VerificationVerdict, Verifier},
         worker::{TokenUsage, Worker, WorkerConfig},
     },
     context::{ContextBuilder, ContextLimits, ContextRequest},
@@ -28,6 +32,7 @@ use crate::{
     runner::{
         container::ContainerLimits,
         git::{GitWorktreeManager, IntegrationResult},
+        integration_git::IntegrationBranch,
         policy::{ToolPolicy, ToolRole},
         process::{ProcessRunner, VerificationCommand},
         tools::StructuredTools,
@@ -97,6 +102,11 @@ pub struct Orchestrator {
     providers: ProviderRepository,
     artifacts: ArtifactStore,
     config: OrchestratorConfig,
+    /// Integrasi ke cabang run harus berurutan; satu mutex per run.
+    // ponytail: peta tumbuh satu entri kecil per run dan hanya menjaga satu proses; lintas proses dijaga
+    // pemeriksaan `DirtyBranch` milik Integrator.
+    run_locks:
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl Orchestrator {
@@ -111,7 +121,17 @@ impl Orchestrator {
             providers,
             artifacts,
             config,
+            run_locks: std::sync::Mutex::default(),
         }
+    }
+
+    fn run_lock(&self, run_id: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        self.run_locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(run_id.to_owned())
+            .or_default()
+            .clone()
     }
 
     pub async fn startup_recovery(&self) -> Result<usize, OrchestratorError> {
@@ -201,6 +221,45 @@ impl Orchestrator {
                         operation.owner_token,
                         IntegrationStatus::Conflict,
                         TaskStatus::Conflict,
+                    )
+                    .await
+                    .map_err(store_error)?;
+                recovered += 1;
+                continue;
+            }
+            if let Some(run_id) = operation.target_id.strip_prefix("integration-") {
+                // Cabang integrasi run: patch sudah masuk bila commit `integrate <task>` ada di cabang. Kalau tidak,
+                // sisa staging dibuang dan manusia memutuskan (mengulang integrasi butuh bukti review/verify baru).
+                let repository = self
+                    .tasks
+                    .project_repository(operation.task_id.as_str())
+                    .await
+                    .map_err(store_error)?;
+                let landed = GitWorktreeManager::new(repository, &self.config.worktree_root)
+                    .ok()
+                    .and_then(|git| {
+                        IntegrationBranch::open(&git, run_id, &operation.target_base_commit).ok()
+                    })
+                    .map(|branch| {
+                        let found = branch
+                            .has_commit_with_subject(&commit_subject(operation.task_id.as_str()))
+                            .unwrap_or(false);
+                        if !found {
+                            let _ = branch.discard();
+                        }
+                        found
+                    });
+                let terminal = if landed == Some(true) {
+                    TaskStatus::Done
+                } else {
+                    TaskStatus::NeedsHuman
+                };
+                self.tasks
+                    .finalize_integration(
+                        operation.id,
+                        operation.owner_token,
+                        operation.status,
+                        terminal,
                     )
                     .await
                     .map_err(store_error)?;
@@ -487,6 +546,15 @@ impl Orchestrator {
             .map_err(store_error)?;
         let git = GitWorktreeManager::new(&repository, &self.config.worktree_root)
             .map_err(|_| OrchestratorError::Git)?;
+        // Task mulai dari hasil terintegrasi run ini (bukan HEAD lama) supaya melihat pekerjaan dependency-nya.
+        let attempt = self
+            .rebase_on_integration_head(
+                attempt,
+                dispatch_owner,
+                &git,
+                task.contract.project_run_id.as_str(),
+            )
+            .await?;
         let worktree = git
             .create(
                 attempt.task_id.as_str(),
@@ -597,31 +665,7 @@ impl Orchestrator {
         if remaining.is_zero() {
             return Err(OrchestratorError::Deadline);
         }
-        let commands = verification_commands(&current)?;
-        let runner = ProcessRunner::new(
-            worktree.path(),
-            env::var("NOCTIS_RUNNER_IMAGE").unwrap_or_else(|_| "rust:1".to_owned()),
-            commands,
-            Vec::new(),
-            remaining,
-            1024 * 1024,
-            ContainerLimits {
-                cpu_count: "1".to_owned(),
-                memory_bytes: 1024 * 1024 * 1024,
-                process_limit: 256,
-            },
-        )
-        .map_err(|_| OrchestratorError::Verifier)?;
-        let verifier = Verifier::new(
-            &current.contract,
-            TaskStatus::Verify,
-            worktree.path(),
-            ProductionExecutor::new(&runner, &self.artifacts),
-        )
-        .map_err(|_| OrchestratorError::Verifier)?;
-        // Verifier sinkron (menunggu container); di runtime multi-thread lepaskan thread worker supaya slot lain
-        // dan heartbeat tidak kelaparan saat beberapa slot memverifikasi bersamaan.
-        let report = blocking(|| verifier.verify()).map_err(|_| OrchestratorError::Verifier)?;
+        let report = self.run_verification(&current, worktree.path(), remaining, "")?;
         for (index, result) in report.results.iter().enumerate() {
             self.tasks
                 .record_event_once(
@@ -651,18 +695,24 @@ impl Orchestrator {
                 .close_failed_attempt(attempt.id, "verification.failed")
                 .await;
         }
-        let target_id = format!("{}-integration", attempt.task_id.as_str());
-        let target_branch = format!("integration-{}", attempt.task_id.as_str());
-        let target = git
-            .create(&target_id, &target_branch, &attempt.base_commit)
-            .or_else(|_| git.open(&target_id, &target_branch, &attempt.base_commit))
-            .map_err(|_| OrchestratorError::Git)?;
         let patch = git
             .diff_binary(&worktree)
             .map_err(|_| OrchestratorError::Git)?;
         let patch_sha256 = format!("{:x}", Sha256::digest(&patch));
         self.persist_diff(attempt.task_id.as_str(), attempt.id, &patch)
             .await?;
+        // Cabang integrasi tingkat run: patch task diterapkan berurutan di atas hasil task lain.
+        let run_id = current.contract.project_run_id.as_str().to_owned();
+        let lock = self.run_lock(&run_id).lock_owned().await;
+        let target_id = format!("integration-{run_id}");
+        let target_base = self
+            .tasks
+            .integration_target_base(&target_id)
+            .await
+            .map_err(store_error)?
+            .unwrap_or_else(|| attempt.base_commit.clone());
+        let target = IntegrationBranch::open_or_create(&git, &run_id, &target_base)
+            .map_err(|_| OrchestratorError::Git)?;
         let operation = self
             .tasks
             .prepare_integration(&IntegrationOperation {
@@ -671,32 +721,179 @@ impl Orchestrator {
                 task_id: attempt.task_id.clone(),
                 source_branch: attempt.branch.clone(),
                 source_base_commit: attempt.base_commit.clone(),
-                target_id: target_id.clone(),
-                target_branch: target_branch.clone(),
-                target_base_commit: attempt.base_commit.clone(),
+                target_id,
+                target_branch: target.branch().to_owned(),
+                target_base_commit: target.base_commit().to_owned(),
                 patch_sha256,
                 owner_token: Uuid::new_v4(),
                 status: IntegrationStatus::Prepared,
             })
             .await
             .map_err(store_error)?;
-        let integrated = git
-            .integrate_verified(&worktree, &target)
-            .map_err(|_| OrchestratorError::Git)?;
-        let terminal = match integrated {
-            IntegrationResult::Integrated => TaskStatus::Done,
-            IntegrationResult::Conflict => TaskStatus::Conflict,
-        };
-        self.tasks
-            .finalize_integration(
-                operation.id,
-                operation.owner_token,
-                IntegrationStatus::Prepared,
-                terminal,
+        let integration = if patch.is_empty() {
+            // Worker tidak mengubah apa pun: tidak ada yang diterapkan, task tetap dianggap terintegrasi.
+            None
+        } else {
+            let approved = ApprovedPatch::new(
+                attempt.task_id.as_str(),
+                Vec::new(),
+                patch,
+                current
+                    .contract
+                    .allowed_paths
+                    .iter()
+                    .map(|path| path.as_str().to_owned())
+                    .collect(),
+                &outcome,
+                &report,
             )
-            .await
-            .map_err(store_error)?;
+            .map_err(|error| {
+                tracing::error!(%error, "patch tidak layak diintegrasikan");
+                OrchestratorError::Git
+            })?;
+            let check = ProductionIntegrationCheck {
+                orchestrator: self,
+                task: &current,
+                scope: format!("integration-{}", attempt.id),
+                deadline,
+            };
+            let mut results = blocking(|| Integrator::integrate(&target, &[approved], &check))
+                .map_err(|error| {
+                    tracing::error!(%error, "integrasi gagal");
+                    OrchestratorError::Git
+                })?
+                .results;
+            Some(results.remove(0).1)
+        };
+        drop(lock);
+        match integration {
+            None | Some(TaskIntegration::Integrated { .. }) => {
+                self.tasks
+                    .finalize_integration(
+                        operation.id,
+                        operation.owner_token,
+                        IntegrationStatus::Prepared,
+                        TaskStatus::Done,
+                    )
+                    .await
+                    .map_err(store_error)?;
+            }
+            Some(TaskIntegration::Conflict(report)) => {
+                self.persist_conflict_report(attempt.task_id.as_str(), &report)
+                    .await?;
+                let stored = self
+                    .tasks
+                    .finalize_integration(
+                        operation.id,
+                        operation.owner_token,
+                        IntegrationStatus::Prepared,
+                        TaskStatus::Conflict,
+                    )
+                    .await
+                    .map_err(store_error)?;
+                // Konflik tidak bisa dilanjutkan otomatis: serahkan ke manusia (Integrator memegang transisi ini).
+                self.transition(&stored, TaskStatus::NeedsHuman, Actor::Integrator)
+                    .await?;
+            }
+            Some(TaskIntegration::Skipped { .. }) => return Err(OrchestratorError::Git),
+        }
         Ok(())
+    }
+
+    /// Bila cabang integrasi run sudah ada, pindahkan dasar attempt ke head-nya. Cabang yang tidak bisa dibuka
+    /// (mis. sudah dibersihkan) tidak menggagalkan attempt: dasar dari claim tetap dipakai.
+    async fn rebase_on_integration_head(
+        &self,
+        mut attempt: crate::store::event::RuntimeAttempt,
+        dispatch_owner: Uuid,
+        git: &GitWorktreeManager,
+        run_id: &str,
+    ) -> Result<crate::store::event::RuntimeAttempt, OrchestratorError> {
+        let Some(base) = self
+            .tasks
+            .integration_target_base(&format!("integration-{run_id}"))
+            .await
+            .map_err(store_error)?
+        else {
+            return Ok(attempt);
+        };
+        let Some(head) = IntegrationBranch::open(git, run_id, &base)
+            .and_then(|branch| branch.head())
+            .ok()
+        else {
+            return Ok(attempt);
+        };
+        if head != attempt.base_commit {
+            self.tasks
+                .rebase_assigned_attempt(attempt.id, dispatch_owner, &head)
+                .await
+                .map_err(store_error)?;
+            attempt.base_commit = head;
+        }
+        Ok(attempt)
+    }
+
+    /// Menjalankan perintah verifikasi task di `path` (worktree task atau cabang integrasi) dengan batas waktu.
+    fn run_verification(
+        &self,
+        task: &StoredTask,
+        path: &Path,
+        remaining: Duration,
+        artifact_scope: &str,
+    ) -> Result<VerificationReport, OrchestratorError> {
+        let runner = ProcessRunner::new(
+            path,
+            env::var("NOCTIS_RUNNER_IMAGE").unwrap_or_else(|_| "rust:1".to_owned()),
+            verification_commands(task)?,
+            Vec::new(),
+            remaining,
+            1024 * 1024,
+            ContainerLimits {
+                cpu_count: "1".to_owned(),
+                memory_bytes: 1024 * 1024 * 1024,
+                process_limit: 256,
+            },
+        )
+        .map_err(|_| OrchestratorError::Verifier)?;
+        let verifier = Verifier::new(
+            &task.contract,
+            TaskStatus::Verify,
+            path,
+            ProductionExecutor::new(&runner, &self.artifacts),
+        )
+        .map_err(|_| OrchestratorError::Verifier)?
+        .with_artifact_scope(artifact_scope);
+        // Verifier sinkron (menunggu container); di runtime multi-thread lepaskan thread worker supaya slot lain
+        // dan heartbeat tidak kelaparan saat beberapa slot memverifikasi bersamaan.
+        blocking(|| verifier.verify()).map_err(|error| {
+            tracing::error!(?error, "verifikasi gagal dijalankan");
+            OrchestratorError::Verifier
+        })
+    }
+
+    async fn persist_conflict_report(
+        &self,
+        task_id: &str,
+        report: &ConflictReport,
+    ) -> Result<(), OrchestratorError> {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "task_id": report.task_id,
+            "kind": format!("{:?}", report.kind),
+            "files": report.files,
+            "detail": report.detail,
+        }))
+        .map_err(store_error)?;
+        self.persist_artifact(
+            task_id,
+            Uuid::new_v4(),
+            (
+                "conflict_report",
+                "conflict-report.json",
+                "application/json",
+            ),
+            &body,
+        )
+        .await
     }
 
     async fn transition(
@@ -773,12 +970,28 @@ impl Orchestrator {
         attempt_id: Uuid,
         patch: &[u8],
     ) -> Result<(), OrchestratorError> {
-        let artifact_id = attempt_id;
+        self.persist_artifact(
+            task_id,
+            attempt_id,
+            ("diff", "official.diff", "text/x-diff"),
+            patch,
+        )
+        .await
+    }
+
+    /// Menulis artifact lalu mencatatnya di DB secara idempoten; `(kind, logical_name, media_type)`.
+    async fn persist_artifact(
+        &self,
+        task_id: &str,
+        artifact_id: Uuid,
+        (kind, logical_name, media_type): (&str, &str, &str),
+        patch: &[u8],
+    ) -> Result<(), OrchestratorError> {
         let checksum = format!("{:x}", Sha256::digest(patch));
         let created = match self.artifacts.write(
             &artifact_id.to_string(),
-            "official.diff",
-            "text/x-diff",
+            logical_name,
+            media_type,
             patch,
             |_| Ok::<_, ()>(()),
         ) {
@@ -801,11 +1014,10 @@ impl Orchestrator {
             .persist_artifact_once(&ArtifactRecord {
                 id: artifact_id,
                 task_id: NonEmptyString::parse("task_id", task_id).map_err(store_error)?,
-                kind: NonEmptyString::parse("kind", "diff").map_err(store_error)?,
-                logical_name: NonEmptyString::parse("logical_name", "official.diff")
+                kind: NonEmptyString::parse("kind", kind).map_err(store_error)?,
+                logical_name: NonEmptyString::parse("logical_name", logical_name)
                     .map_err(store_error)?,
-                media_type: NonEmptyString::parse("media_type", "text/x-diff")
-                    .map_err(store_error)?,
+                media_type: NonEmptyString::parse("media_type", media_type).map_err(store_error)?,
                 size: patch.len().try_into().map_err(store_error)?,
                 checksum,
             })
@@ -837,6 +1049,45 @@ impl Orchestrator {
             .close_failed_attempt(attempt_id, error_code)
             .await
             .map_err(store_error)
+    }
+}
+
+/// Pemeriksaan integrasi produksi: perintah verifikasi task dijalankan ulang di cabang integrasi, yaitu pada
+/// gabungan hasil task ini dengan task lain yang sudah terintegrasi. Gagal berarti tabrakan semantik.
+struct ProductionIntegrationCheck<'a> {
+    orchestrator: &'a Orchestrator,
+    task: &'a StoredTask,
+    /// Membedakan artifact pemeriksaan ini dari verifikasi task (id artifact verifikasi deterministik).
+    scope: String,
+    deadline: Instant,
+}
+
+impl IntegrationCheck for ProductionIntegrationCheck<'_> {
+    fn check(&self, worktree: &Path) -> CheckResult {
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return CheckResult {
+                passed: false,
+                summary: "deadline task habis sebelum pemeriksaan integrasi".to_owned(),
+            };
+        }
+        match self
+            .orchestrator
+            .run_verification(self.task, worktree, remaining, &self.scope)
+        {
+            Ok(report) => CheckResult {
+                passed: report.verdict == VerificationVerdict::Integrate,
+                summary: format!(
+                    "verifikasi di cabang integrasi: {} dari {} perintah lulus",
+                    report.results.iter().filter(|result| result.passed).count(),
+                    report.results.len()
+                ),
+            },
+            Err(error) => CheckResult {
+                passed: false,
+                summary: format!("verifikasi di cabang integrasi tidak bisa dijalankan: {error}"),
+            },
+        }
     }
 }
 
