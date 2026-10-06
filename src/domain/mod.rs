@@ -1,3 +1,4 @@
+pub mod budget;
 pub mod dag;
 pub mod path_scope;
 pub mod project;

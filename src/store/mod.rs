@@ -1,4 +1,5 @@
 pub mod artifact;
+pub mod budget;
 pub mod event;
 pub mod idempotency;
 pub mod lease;
