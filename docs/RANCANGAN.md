@@ -508,6 +508,7 @@ GET    /projects/:id/runs
 ```text
 GET    /runs/:id            -> { run, budget: { limit, reserved, used, estimated } }
 POST   /runs/:id/plan
+POST   /runs/:id/lead-plan  -> Lead Agent menyusun plan PROPOSED; body {} atau {"model_id"}
 GET    /runs/:id/plans      -> { items }  versi terbaru dulu
 POST   /runs/:id/approve-plan
 POST   /runs/:id/reject-plan

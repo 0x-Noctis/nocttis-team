@@ -29,13 +29,20 @@ pub(crate) struct StateData {
     pub store: ProjectRepository,
     pub idempotency: IdempotencyRepository,
     pub pool: PgPool,
+    /// Model untuk Lead Agent bila request tidak menyebut `model_id`.
+    pub default_model: Option<String>,
 }
 
 pub fn router(pool: PgPool) -> Router {
+    router_with_default_model(pool, None)
+}
+
+pub fn router_with_default_model(pool: PgPool, default_model: Option<String>) -> Router {
     let state = StateData {
         store: ProjectRepository::new(pool.clone()),
         idempotency: IdempotencyRepository::new(pool.clone()),
         pool,
+        default_model,
     };
     Router::new()
         .route("/api/v1/projects", route_get(list).post(create))

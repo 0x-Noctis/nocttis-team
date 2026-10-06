@@ -68,7 +68,10 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/api/v1/health", get(health))
         .merge(api::providers::router(database.clone()))
-        .merge(api::projects::router(database.clone()))
+        .merge(api::projects::router_with_default_model(
+            database.clone(),
+            Some(config.provider.model.clone()),
+        ))
         .merge(api::tasks::router_with_start(
             database.clone(),
             artifact_store,

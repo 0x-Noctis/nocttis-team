@@ -116,6 +116,17 @@ impl AppError {
         )
     }
 
+    /// Dependensi upstream (provider model) gagal; bukan salah klien dan bukan bug server.
+    pub fn bad_gateway(request_id: RequestId, details: Value) -> Self {
+        Self::public(
+            StatusCode::BAD_GATEWAY,
+            "BAD_GATEWAY",
+            "Upstream service failed",
+            details,
+            request_id,
+        )
+    }
+
     pub fn internal(request_id: RequestId, cause: impl Into<Error>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,

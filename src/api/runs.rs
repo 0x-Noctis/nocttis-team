@@ -22,6 +22,7 @@ pub(crate) fn routes() -> Router<StateData> {
         .route("/api/v1/runs/{id}", route_get(get))
         .route("/api/v1/runs/{id}/plan", post(propose))
         .route("/api/v1/runs/{id}/plans", route_get(list_plans))
+        .route("/api/v1/runs/{id}/lead-plan", post(super::lead::lead_plan))
         .route("/api/v1/runs/{id}/approve-plan", post(approve))
         .route("/api/v1/runs/{id}/reject-plan", post(reject))
         .route("/api/v1/runs/{id}/pause", post(pause))
