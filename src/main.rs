@@ -56,6 +56,18 @@ async fn main() -> anyhow::Result<()> {
             retention_lease_seconds: config.scheduler.heartbeat_seconds.max(1) as i64,
         },
     );
+    // Pulihkan attempt yang ditinggalkan (termasuk lease dan reservasi budget-nya) sebelum recovery integrasi
+    // milik orchestrator, supaya crash tepat setelah claim tidak menggagalkan startup.
+    let recovered = ai_team::recovery::recover(
+        &database,
+        &ai_team::recovery::RecoveryConfig {
+            worktree_root: config.git.worktree_root.clone(),
+            stale_after_seconds: i64::try_from(config.scheduler.stale_after_seconds)
+                .unwrap_or(i64::MAX),
+        },
+    )
+    .await?;
+    info!(?recovered, "startup recovery attempt selesai");
     orchestrator.startup_recovery().await?;
     let scheduler = SequentialScheduler::new(
         database.clone(),

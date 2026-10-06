@@ -6,5 +6,6 @@ pub mod model;
 #[path = "model/openai/mod.rs"]
 pub mod openai;
 pub mod orchestrator;
+pub mod recovery;
 pub mod runner;
 pub mod store;
