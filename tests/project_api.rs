@@ -491,3 +491,112 @@ async fn mutation_boundaries_and_paused_cancel(pool: PgPool) {
     );
     handle.abort();
 }
+
+// M3-007B: UI harus bisa membaca ulang run, plan, dan budget setelah reload.
+#[sqlx::test(migrations = "./migrations")]
+async fn read_endpoints_list_runs_plans_and_budget(pool: PgPool) {
+    let (base, client, handle) = server(pool).await;
+    let (project, run) = (Uuid::new_v4(), Uuid::new_v4());
+    let path = std::fs::canonicalize(".")
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let get = |url: String| {
+        let client = client.clone();
+        async move {
+            let response = client.get(url).send().await.unwrap();
+            (response.status(), response.json::<Value>().await.unwrap())
+        }
+    };
+    send(
+        &client,
+        Method::POST,
+        &format!("{base}/projects"),
+        "project",
+        json!({"id":project,"name":"Project","repository_path":path}),
+    )
+    .await;
+
+    // Project tanpa run -> list kosong; project tak dikenal -> 404; ID tidak kanonik -> 422.
+    let runs_url = format!("{base}/projects/{project}/runs");
+    assert_eq!(
+        get(runs_url.clone()).await,
+        (StatusCode::OK, json!({"items":[]}))
+    );
+    assert_eq!(
+        get(format!("{base}/projects/{}/runs", Uuid::new_v4()))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get(format!("{base}/projects/NOPE/runs")).await.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+
+    send(&client, Method::POST, &runs_url, "run", json!({"id":run,"project_id":project,"objective":"Ship","acceptance_criteria":["Tests pass"],"token_budget":100})).await;
+    let (status, listed) = get(runs_url).await;
+    assert_eq!(
+        (
+            status,
+            listed["items"][0]["id"].clone(),
+            listed["items"].as_array().unwrap().len()
+        ),
+        (StatusCode::OK, json!(run), 1)
+    );
+
+    // Belum ada plan -> []; run tak dikenal -> 404.
+    let plans_url = format!("{base}/runs/{run}/plans");
+    assert_eq!(
+        get(plans_url.clone()).await,
+        (StatusCode::OK, json!({"items":[]}))
+    );
+    assert_eq!(
+        get(format!("{base}/runs/{}/plans", Uuid::new_v4())).await.0,
+        StatusCode::NOT_FOUND
+    );
+
+    let plan_id = format!("plan-{run}");
+    let proposal = json!({"id":plan_id,"project_run_id":run,"version":1,"tasks":[task(project,run)],"risk_flags":["risk"]});
+    send(
+        &client,
+        Method::POST,
+        &format!("{base}/runs/{run}/plan"),
+        "proposal",
+        proposal,
+    )
+    .await;
+    let (_, plans) = get(plans_url.clone()).await;
+    assert_eq!(
+        (
+            plans["items"][0]["id"].clone(),
+            plans["items"][0]["status"].clone(),
+            plans["items"][0]["risk_flags"].clone()
+        ),
+        (json!(plan_id), json!("PROPOSED"), json!(["risk"]))
+    );
+
+    // Budget belum dipesan sebelum approval.
+    let (status, detail) = get(format!("{base}/runs/{run}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["run"]["status"], "AWAITING_APPROVAL");
+    assert_eq!(
+        detail["budget"],
+        json!({"limit":100,"reserved":0,"used":0,"estimated":false})
+    );
+
+    send(
+        &client,
+        Method::POST,
+        &format!("{base}/runs/{run}/approve-plan"),
+        "approve",
+        json!({"plan_id":plan_id,"actor_id":"human","decision":"APPROVED"}),
+    )
+    .await;
+    let (_, plans) = get(plans_url).await;
+    assert_eq!(plans["items"][0]["status"], "APPROVED");
+    // Reservasi = max_input (20) + max_output (10) dari task di plan.
+    let (_, detail) = get(format!("{base}/runs/{run}")).await;
+    assert_eq!(detail["budget"]["reserved"], 30);
+    handle.abort();
+}

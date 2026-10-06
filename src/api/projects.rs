@@ -44,7 +44,10 @@ pub fn router(pool: PgPool) -> Router {
             route_get(get).put(update).delete(delete),
         )
         .route("/api/v1/projects/{id}/discover", post(discovery))
-        .route("/api/v1/projects/{id}/runs", post(create_run))
+        .route(
+            "/api/v1/projects/{id}/runs",
+            route_get(list_runs).post(create_run),
+        )
         .merge(super::runs::routes())
         .layer(DefaultBodyLimit::max(64 * 1024))
         .with_state(state)
@@ -338,6 +341,25 @@ async fn discovery(
         },
     )
     .await
+}
+
+async fn list_runs(
+    State(state): State<StateData>,
+    Extension(id): Extension<RequestId>,
+    RoutePath(project_id): RoutePath<String>,
+) -> Result<Json<Value>, AppError> {
+    // get_project dulu supaya project yang tidak ada menjadi 404, bukan list kosong.
+    state
+        .store
+        .get_project(&project_id)
+        .await
+        .map_err(|error| store_error(error, id))?;
+    let runs = state
+        .store
+        .list_runs(&project_id)
+        .await
+        .map_err(|error| store_error(error, id))?;
+    Ok(Json(json!({"items":runs})))
 }
 
 async fn create_run(

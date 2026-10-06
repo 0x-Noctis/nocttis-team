@@ -290,3 +290,60 @@ async fn approval_race_and_budget_rollback(pool: PgPool) {
         .unwrap();
     assert_eq!(count, 1);
 }
+
+// M3-007B: pembacaan ulang untuk UI. Plan terbaru harus muncul pertama, dan reservasi budget terlihat setelah approve.
+#[sqlx::test(migrations = "./migrations")]
+async fn list_runs_plans_and_budget_after_decisions(pool: PgPool) {
+    let (store, project, run) = setup(pool).await;
+    let (project, run) = (project.to_string(), run.to_string());
+    assert_eq!(store.list_runs(&project).await.unwrap().len(), 1);
+    assert!(
+        store
+            .list_runs(&Uuid::new_v4().to_string())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(matches!(
+        store.list_runs("not-a-uuid").await,
+        Err(ProjectStoreError::InvalidId(_))
+    ));
+    assert!(store.list_plans(&run).await.unwrap().is_empty());
+    assert!(matches!(
+        store.list_plans(&Uuid::new_v4().to_string()).await,
+        Err(ProjectStoreError::NotFound)
+    ));
+
+    let (project_id, run_id) = (project.parse().unwrap(), run.parse().unwrap());
+    store
+        .propose(&plan(project_id, run_id, 1, &["a"]))
+        .await
+        .unwrap();
+    store
+        .decide(&decision("plan-1", ApprovalDecision::Rejected))
+        .await
+        .unwrap();
+    store
+        .propose(&plan(project_id, run_id, 2, &["b"]))
+        .await
+        .unwrap();
+    let statuses: Vec<_> = store
+        .list_plans(&run)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|plan| (plan.version.get(), plan.status))
+        .collect();
+    assert_eq!(
+        statuses,
+        [(2, PlanStatus::Proposed), (1, PlanStatus::Rejected)]
+    );
+
+    assert_eq!(store.run_budget(&run).await.unwrap().reserved, 0);
+    store
+        .decide(&decision("plan-2", ApprovalDecision::Approved))
+        .await
+        .unwrap();
+    let budget = store.run_budget(&run).await.unwrap();
+    assert_eq!((budget.limit, budget.reserved, budget.used), (100, 30, 0));
+}

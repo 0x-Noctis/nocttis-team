@@ -8,6 +8,7 @@ use ai_team::{
     },
     store::{
         event::{AgentAttempt, Usage},
+        project::ProjectRepository,
         task::{Conflict, StoreError, TaskRepository},
     },
 };
@@ -436,4 +437,100 @@ async fn pagination_is_deterministic(pool: PgPool) {
         .unwrap();
     assert_eq!(second.items[0].contract.id.as_str(), "task-c");
     assert!(second.next_cursor.is_none());
+}
+
+// Regression untuk M3-007B: budget run menjumlah input+output semua attempt task run itu,
+// dan filter per run tidak membocorkan task run lain.
+#[sqlx::test(migrations = "./migrations")]
+async fn run_budget_sums_usage_and_task_list_filters_by_run(pool: PgPool) {
+    let (project_id, run_id) = ownership(&pool).await;
+    let other_run = Uuid::parse_str("cccccccc-cccc-4ccc-8ccc-cccccccccccc").unwrap();
+    sqlx::query("INSERT INTO project_runs (id,project_id,objective,status,token_budget) VALUES ($1,$2,'other','running',50)")
+        .bind(other_run).bind(project_id).execute(&pool).await.unwrap();
+    let repository = TaskRepository::new(pool.clone());
+    repository
+        .create(&contract("in-run", project_id, run_id))
+        .await
+        .unwrap();
+    repository
+        .create(&contract("elsewhere", project_id, other_run))
+        .await
+        .unwrap();
+    let projects = ProjectRepository::new(pool);
+
+    let empty = projects.run_budget(&run_id.to_string()).await.unwrap();
+    assert_eq!(
+        (empty.limit, empty.reserved, empty.used, empty.estimated),
+        (1, 0, 0, false)
+    );
+
+    let attempt = AgentAttempt {
+        id: Uuid::new_v4(),
+        task_id: text("task_id", "in-run"),
+        role: text("role", "worker"),
+        attempt: 1,
+        provider_id: text("provider_id", "provider"),
+        model_id: text("model_id", "model"),
+        status: text("status", "running"),
+    };
+    repository.create_attempt(&attempt).await.unwrap();
+    for (input, estimated) in [(10, false), (5, true)] {
+        let usage = Usage {
+            input_tokens: input,
+            cached_tokens: 99,
+            output_tokens: 2,
+            tool_calls: 0,
+            latency_ms: 1,
+            estimated,
+        };
+        repository.record_usage(attempt.id, &usage).await.unwrap();
+    }
+    // (10 + 2) + (5 + 2); cached tidak dihitung dua kali; estimated menyala bila salah satu estimasi.
+    let budget = projects.run_budget(&run_id.to_string()).await.unwrap();
+    assert_eq!((budget.used, budget.estimated), (19, true));
+    assert_eq!(
+        projects
+            .run_budget(&other_run.to_string())
+            .await
+            .unwrap()
+            .used,
+        0
+    );
+    assert!(matches!(
+        projects.run_budget(&Uuid::new_v4().to_string()).await,
+        Err(ai_team::store::project::ProjectStoreError::NotFound)
+    ));
+
+    let ids = |page: ai_team::store::task::Page<_>| -> Vec<String> {
+        page.items
+            .into_iter()
+            .map(|task: ai_team::store::task::StoredTask| task.contract.id.as_str().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        ids(repository
+            .list_in_run(Some(&run_id.to_string()), None, 10)
+            .await
+            .unwrap()),
+        ["in-run"]
+    );
+    assert_eq!(
+        ids(repository
+            .list_in_run(Some(&other_run.to_string()), None, 10)
+            .await
+            .unwrap()),
+        ["elsewhere"]
+    );
+    assert_eq!(
+        ids(repository.list(None, 10).await.unwrap()),
+        ["elsewhere", "in-run"]
+    );
+    assert!(
+        repository
+            .list_in_run(Some(&Uuid::new_v4().to_string()), None, 10)
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
 }

@@ -274,6 +274,19 @@ async fn crud_pagination_idempotency_validation_and_request_id(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(next["items"].as_array().unwrap().len(), 1);
+    // Filter per run: run milik task ini mengembalikan semuanya; run lain mengembalikan kosong.
+    for (run, expected) in [(run_id, 2), (uuid::Uuid::new_v4(), 0)] {
+        let filtered: Value = server
+            .client
+            .get(format!("{tasks}?project_run_id={run}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(filtered["items"].as_array().unwrap().len(), expected);
+    }
 
     let mut update = body.clone();
     update["expected_version"] = json!(0);

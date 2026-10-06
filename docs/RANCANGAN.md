@@ -500,25 +500,28 @@ GET    /projects
 GET    /projects/:id
 POST   /projects/:id/discover
 POST   /projects/:id/runs
+GET    /projects/:id/runs
 ```
 
 ### Run dan Plan
 
 ```text
-GET    /runs/:id
+GET    /runs/:id            -> { run, budget: { limit, reserved, used, estimated } }
 POST   /runs/:id/plan
+GET    /runs/:id/plans      -> { items }  versi terbaru dulu
 POST   /runs/:id/approve-plan
+POST   /runs/:id/reject-plan
 POST   /runs/:id/pause
 POST   /runs/:id/resume
 POST   /runs/:id/cancel
-GET    /runs/:id/events
-GET    /runs/:id/events/stream
+GET    /runs/:id/events          (belum diimplementasikan)
+GET    /runs/:id/events/stream   (belum diimplementasikan; UI memakai polling)
 ```
 
 ### Task
 
 ```text
-GET    /runs/:id/tasks
+GET    /runs/:id/tasks      (diimplementasikan sebagai GET /tasks?project_run_id=:id)
 GET    /tasks/:id
 GET    /tasks/:id/artifacts
 GET    /tasks/:id/diff

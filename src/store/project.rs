@@ -89,6 +89,16 @@ fn conflict(error: sqlx::Error) -> ProjectStoreError {
     }
 }
 
+/// Ringkasan pemakaian token satu run. `used` dijumlah dari `model_usage`
+/// (input + output); `reserved` adalah token yang sudah dipesan saat plan disetujui.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct RunBudget {
+    pub limit: i64,
+    pub reserved: i64,
+    pub used: i64,
+    pub estimated: bool,
+}
+
 #[derive(Clone)]
 pub struct ProjectRepository {
     pool: PgPool,
@@ -162,6 +172,65 @@ impl ProjectRepository {
             acceptance_criteria: serde_json::from_value(row.get("acceptance_criteria"))?,
             token_budget: PositiveLimit::new("token_budget", row.get("token_budget"))?,
             status: state,
+        })
+    }
+
+    /// Semua run milik satu project, terlama dulu (urutan stabil untuk UI).
+    pub async fn list_runs(&self, project_id: &str) -> Result<Vec<ProjectRun>, ProjectStoreError> {
+        let ids: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM project_runs WHERE project_id=$1 ORDER BY created_at,id LIMIT 100",
+        )
+        .bind(uuid("project_id", project_id)?)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut runs = Vec::with_capacity(ids.len());
+        for id in ids {
+            runs.push(self.get_run(&id.to_string()).await?);
+        }
+        Ok(runs)
+    }
+
+    /// Semua versi plan satu run, versi terbaru dulu. NotFound bila run tidak ada,
+    /// supaya run tanpa plan (list kosong) berbeda dari run yang salah ID.
+    pub async fn list_plans(&self, run_id: &str) -> Result<Vec<ProposedPlan>, ProjectStoreError> {
+        let key = uuid("id", run_id)?;
+        self.get_run(run_id).await?;
+        let ids: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM plans WHERE project_run_id=$1 ORDER BY version DESC LIMIT 100",
+        )
+        .bind(key)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut plans = Vec::with_capacity(ids.len());
+        for id in ids {
+            plans.push(self.get_plan(&id).await?);
+        }
+        Ok(plans)
+    }
+
+    pub async fn run_budget(&self, run_id: &str) -> Result<RunBudget, ProjectStoreError> {
+        let key = uuid("id", run_id)?;
+        let run = sqlx::query("SELECT token_budget,reserved_tokens FROM project_runs WHERE id=$1")
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(ProjectStoreError::NotFound)?;
+        let usage = sqlx::query(
+            "SELECT COALESCE(SUM(u.input_tokens+u.output_tokens),0)::bigint AS used,
+                    COALESCE(bool_or(u.estimated),false) AS estimated
+             FROM model_usage u
+             JOIN agent_runs a ON a.id=u.agent_run_id
+             JOIN tasks t ON t.id::text=a.task_id::text
+             WHERE t.project_run_id=$1",
+        )
+        .bind(key)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(RunBudget {
+            limit: run.get("token_budget"),
+            reserved: run.get("reserved_tokens"),
+            used: usage.get("used"),
+            estimated: usage.get("estimated"),
         })
     }
 

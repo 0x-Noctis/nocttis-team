@@ -345,6 +345,16 @@ impl TaskRepository {
         cursor: Option<&str>,
         limit: i64,
     ) -> Result<Page<StoredTask>, StoreError> {
+        self.list_in_run(None, cursor, limit).await
+    }
+
+    /// Seperti `list`, tetapi dibatasi ke satu project run bila `run_id` diberikan.
+    pub async fn list_in_run(
+        &self,
+        run_id: Option<&str>,
+        cursor: Option<&str>,
+        limit: i64,
+    ) -> Result<Page<StoredTask>, StoreError> {
         if limit <= 0 {
             return Err(StoreError::InvalidRow(ValidationError {
                 field: "limit",
@@ -353,10 +363,11 @@ impl TaskRepository {
         }
         let limit = limit.min(100);
         let ids: Vec<String> = sqlx::query_scalar(
-            "SELECT id FROM tasks WHERE ($1::text IS NULL OR id>$1) ORDER BY id LIMIT $2",
+            "SELECT id FROM tasks WHERE ($1::text IS NULL OR id>$1) AND ($3::text IS NULL OR project_run_id::text=$3) ORDER BY id LIMIT $2",
         )
         .bind(cursor)
         .bind(limit + 1)
+        .bind(run_id)
         .fetch_all(&self.pool)
         .await
         .map_err(StoreError::Database)?;

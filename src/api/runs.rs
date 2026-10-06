@@ -21,6 +21,7 @@ pub(crate) fn routes() -> Router<StateData> {
     Router::new()
         .route("/api/v1/runs/{id}", route_get(get))
         .route("/api/v1/runs/{id}/plan", post(propose))
+        .route("/api/v1/runs/{id}/plans", route_get(list_plans))
         .route("/api/v1/runs/{id}/approve-plan", post(approve))
         .route("/api/v1/runs/{id}/reject-plan", post(reject))
         .route("/api/v1/runs/{id}/pause", post(pause))
@@ -38,7 +39,25 @@ async fn get(
         .get_run(&id)
         .await
         .map_err(|error| store_error(error, request_id))?;
-    Ok(Json(json!({"run":run})))
+    let budget = state
+        .store
+        .run_budget(&id)
+        .await
+        .map_err(|error| store_error(error, request_id))?;
+    Ok(Json(json!({"run":run,"budget":budget})))
+}
+
+async fn list_plans(
+    State(state): State<StateData>,
+    Extension(request_id): Extension<RequestId>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let plans = state
+        .store
+        .list_plans(&id)
+        .await
+        .map_err(|error| store_error(error, request_id))?;
+    Ok(Json(json!({"items":plans})))
 }
 
 async fn propose(

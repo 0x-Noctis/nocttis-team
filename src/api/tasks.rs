@@ -58,6 +58,7 @@ pub struct StartState {
 #[serde(deny_unknown_fields)]
 struct Pagination {
     cursor: Option<String>,
+    project_run_id: Option<String>,
     #[serde(default = "default_limit")]
     limit: i64,
 }
@@ -139,7 +140,11 @@ async fn list_tasks(
         page.map_err(|_| AppError::bad_request(request_id, json!({"query":"invalid pagination"})))?;
     let page = state
         .tasks
-        .list(page.cursor.as_deref(), page.limit)
+        .list_in_run(
+            page.project_run_id.as_deref(),
+            page.cursor.as_deref(),
+            page.limit,
+        )
         .await
         .map_err(|error| store_error(error, request_id))?;
     Ok(Json(
