@@ -108,7 +108,7 @@ cargo test --test integration -- --test-threads=1
 | M0 | Baseline dan fondasi repo | `[x]` | lingkungan repeatable, baseline tersimpan |
 | M1 | Provider foundation | `[x]` | provider dikelola dan seluruh probe lulus |
 | M2 | Single-worker vertical slice | `[x]` | satu task menghasilkan patch terverifikasi |
-| M3 | Lead Agent dan task DAG | `[ ]` | plan disetujui dan dependency dipatuhi |
+| M3 | Lead Agent dan task DAG | `[x]` | plan disetujui dan dependency dipatuhi |
 | M4 | Parallel workers dan integrasi | `[ ]` | 2–4 task independen berjalan aman |
 | M5 | Hardening dan MVP release | `[ ]` | recovery, security, E2E, docs lulus |
 
@@ -485,7 +485,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: tool-first tanpa model jika cukup; file besar/binary/ignored dikecualikan; output artifact ringkas.
   - Verify: fixture polyglot dan nested instructions.
 
-- [ ] **M3-004 — Project board UI fixtures** · Lane C
+- [x] **M3-004 — Project board UI fixtures** · Lane C
   - Depends On: M2 exit gate
   - Parallel With: M3-001, M3-002, M3-003
   - Allowed Paths: `web/src/lib/components/project/**`, `web/src/lib/components/board/**`, `web/src/lib/fixtures/project.ts`
@@ -537,7 +537,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: tiap role hanya menerima artifact/source yang dibutuhkan; over-limit memicu trim atau task split request.
   - Verify: snapshot metadata/size per role tanpa menyimpan secret.
 
-- [ ] **M3-010 — Project Run WebApp** · Lane C
+- [x] **M3-010 — Project Run WebApp** · Lane C
   - Depends On: M3-004, M3-007
   - Parallel With: M3-008, M3-009
   - Allowed Paths: `web/src/routes/projects/**`, `web/src/routes/runs/**`, `web/src/lib/api/client.ts`, `web/src/lib/realtime/**`
@@ -555,7 +555,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: task blocked tidak diambil; pause/cancel dihormati; project budget direservasi sebelum run.
   - Verify: multi-task fixture selesai dalam topological order.
 
-- [ ] **M3-012 — Lead/DAG E2E scenarios** · Lane D
+- [x] **M3-012 — Lead/DAG E2E scenarios** · Lane D
   - Depends On: M3-010
   - Parallel With: M3-011
   - Allowed Paths: `tests/e2e/**`, `tests/scenarios/lead/**`, `docs/manual-test.md`
@@ -565,11 +565,11 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
 
 ### Exit Gate M3
 
-- [ ] Lead menghasilkan plan terstruktur dari repository discovery.
-- [ ] Manusia menyetujui plan sebelum eksekusi.
-- [ ] Scheduler menjalankan task sesuai dependency.
-- [ ] Skill dimuat lazy dan context limit dipatuhi.
-- [ ] Full validation dan E2E lulus.
+- [x] Lead menghasilkan plan terstruktur dari repository discovery.
+- [x] Manusia menyetujui plan sebelum eksekusi.
+- [x] Scheduler menjalankan task sesuai dependency.
+- [x] Skill dimuat lazy dan context limit dipatuhi.
+- [x] Full validation dan E2E lulus.
 
 ---
 
@@ -848,6 +848,9 @@ Catat keputusan yang memengaruhi lebih dari satu task. Jangan menyimpan diskusi 
 | Date | Task | Decision/Blocker | Owner | Follow-up |
 |---|---|---|---|---|
 | 2026-09-19 | PROJECT | Rust + Axum, SvelteKit, PostgreSQL 16, OpenAI-compatible API, container runner, approval setiap plan, tanpa Git push | Human | Implement M0–M5 |
+| 2026-10-06 | M3-007B | Tambah endpoint baca di luar daftar task: `GET /projects/:id/runs`, `GET /runs/:id/plans`, `budget` pada `GET /runs/:id`, filter `GET /tasks?project_run_id=`. Filter ini menggantikan `GET /runs/:id/tasks` dari rancangan; SSE level run (`/runs/:id/events[/stream]`) belum ada dan UI memakai polling | Human | SSE run bila polling tidak cukup; RANCANGAN.md sudah disesuaikan |
+| 2026-10-06 | M3-006B | Tambah `POST /runs/:id/lead-plan`: ID plan/task dari model diberi prefix run dan versi dipaksa urut database (ID task unik global) | Human | Usage panggilan Lead belum masuk `model_usage` dan endpoint belum di-rate-limit; selesaikan di M4-003 / M5-001 |
+| 2026-10-06 | M3-004, M3-010 | Form project/run mengisi UUID otomatis; `PlanReview` menampilkan reservasi Σ(input+output) sama dengan backend (bukan × attempts) | Human | Lead tetap menolak plan bila Σ × attempts > budget (lebih ketat dari reservasi approval) |
 
 # 10. Progress Log
 
@@ -872,3 +875,13 @@ Tambahkan satu baris saat task selesai atau diblokir.
 | 2026-09-20 | M2-011 | Reviewer read-only terintegrasi dengan bounded mutation snapshot | `cargo test --test reviewer -- --test-threads=1 --nocapture`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo fmt --check`; `git diff --check` | Test memakai production crate; tracked dan untracked mutation menghasilkan typed policy failure |
 | 2026-09-20 | M2-013 | Halaman task dan live events terintegrasi dengan lifecycle SSE aman | `npm run check`; `npm run build`; `git diff --check` | Native `EventSource` mengejar event tertinggal dan ditutup saat navigasi; destructive cancel wajib konfirmasi |
 | 2026-09-21 | M2-014, M2-015, Exit Gate M2 | Orchestrator crash-safe dan vertical browser smoke production terintegrasi | `cargo fmt --check`; `cargo test -- --test-threads=1`; `cargo clippy --all-targets --all-features -- -D warnings`; `npm run check`; `npm run build`; `npm run e2e`; `git diff --check` | E2E 2 passed tanpa skip; integration checkpoint, recovery, retention lease, SSE reconnect, artifact, diff, verification, dan usage terverifikasi |
+| 2026-09-27 | M3-001, M3-002, M3-003 | Kontrak project/plan, validasi DAG, dan repository discovery terintegrasi (`c2edf29`, `6e48380`, tracker `2416e58`) | Bukti per-task di commit tersebut; suite penuh lulus pada 2026-10-06 (lihat baris Exit Gate M3) | Command per task tidak dicatat saat integrasi |
+| 2026-09-27 | M3-005, M3-006, M3-009 | Store project/plan, Lead planner terstruktur, dan policy context per role terintegrasi (`262d2dd`, `a8adc26`, `3fdcdfc`, tracker `2407293`) | Bukti per-task di commit tersebut; suite penuh lulus pada 2026-10-06 | Plan immutable setelah approval; budget direservasi atomik |
+| 2026-09-28 | M3-007, M3-008, M3-011 | HTTP API project/run, skill registry lazy loading, dan scheduler sequential terintegrasi (`0d1807d`, `7bb05ab`, `b7f4079`, `5671182`, `3c8fb9d`, `7c82261`, tracker `3ed9eb4`) | Bukti per-task di commit tersebut; suite penuh lulus pada 2026-10-06 | Scheduler hanya mengambil task READY dengan dependency DONE |
+| 2026-10-05 | M3-011 | Scheduler tidak lagi error saat model default belum terdaftar (`1d234c8`) | `cargo test --test scheduler_sequential` (dua regression test) | Penyebab error kini tercatat lewat `tracing` |
+| 2026-10-06 | M3-004 | Komponen project board berbasis fixture terintegrasi (`a796db0`) | `npm run check`; `node web/src/lib/components/board/graph.test.mjs` | Render SSR komponen diperiksa lewat route sementara |
+| 2026-10-06 | M3-007B | Endpoint baca run/plan/budget dan filter task per run (`76d2838`) | `cargo test` penuh 310 passed; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo fmt --check` | Prasyarat M3-010; bentuk endpoint berbeda dari rancangan, lihat Keputusan |
+| 2026-10-06 | M3-010 | Halaman Projects dan Runs terintegrasi (`4518990`) | `npm run check`; `npm run build`; `node web/src/lib/realtime/run-poller.test.mjs`; `npm run e2e` (2 passed) | Update run lewat polling 3 detik dengan backoff |
+| 2026-10-06 | M3-006B, M3-010 follow-up | Route Lead Agent, UUID otomatis, angka reservasi, link beranda, tombol Ask Lead (`2d17276`..`c64fd4c`) | `cargo test --test lead_api` (3 passed); `cargo test` penuh 313 passed; `npm run check`; `npm run build`; `npm run e2e` | Pengecekan mutasi pada `namespace_plan` membuat 2 test gagal |
+| 2026-10-06 | M3-012 | E2E skenario Lead/DAG: plan valid, reject lalu re-plan, siklus, over-budget Lead, budget kurang saat approve (`3081dde`) | `NOCTIS_E2E_API_KEY=… npm run e2e` dijalankan 3 kali berturut-turut: 7 passed tiap kali | Pengecekan mutasi pada skenario `cycle` membuat test gagal |
+| 2026-10-06 | Exit Gate M3 | Milestone M3 selesai | `cargo fmt --check`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo test -- --test-threads=1` (313 passed, 0 failed); `npm run check`; `npm run build`; `docker compose config --quiet`; `git diff --check`; `npm run e2e` (7 passed) | Plan hanya masuk lewat Lead atau API; belum ada dependensi M4 |
