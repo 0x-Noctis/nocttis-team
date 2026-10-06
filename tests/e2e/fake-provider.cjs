@@ -1,20 +1,24 @@
 const http = require('node:http');
 const lead = require('../scenarios/lead/scenarios.cjs');
+const parallel = require('../scenarios/parallel/scenarios.cjs');
 
 const host = '127.0.0.1';
 const port = 7411;
 let calls = 0;
 
-function response(body) {
+function response(body, tokens = 20) {
   return {
     id: 'fixture-response',
     object: 'chat.completion',
     created: 0,
     model: 'fixture-model',
     choices: [{ index: 0, message: body, finish_reason: body.tool_calls ? 'tool_calls' : 'stop' }],
-    usage: { prompt_tokens: 12, completion_tokens: 8, total_tokens: 20 }
+    usage: { prompt_tokens: tokens - 8, completion_tokens: 8, total_tokens: tokens }
   };
 }
+
+const isProbe = (request) =>
+  request.tools?.some(({ function: definition }) => definition?.name === 'noctis_capability_probe');
 
 function modelReply(request) {
   // Request Lead dijawab lebih dulu dan tidak menambah `calls`, supaya urutan reviewer worker tidak bergeser.
@@ -86,6 +90,15 @@ const server = http.createServer((request, result) => {
       body = JSON.parse(raw);
     } catch {
       result.writeHead(400).end();
+      return;
+    }
+    // Task paralel (M4-010) dijawab per task, tanpa penghitung global, dan boleh ditunda (delay) agar tumpang tindih.
+    if (!isProbe(body) && !lead.isLeadRequest(body) && parallel.isParallelRequest(body)) {
+      const { message, delayMs, tokens } = parallel.reply(body);
+      setTimeout(() => {
+        result.writeHead(200, { 'content-type': 'application/json' });
+        result.end(JSON.stringify(response(message, tokens)));
+      }, delayMs);
       return;
     }
     result.writeHead(200, { 'content-type': 'application/json' });

@@ -653,7 +653,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: destructive/risky action memerlukan explicit confirmation; stale approval ditolak; audit actor terlihat.
   - Verify: `npm run check && npm run build`.
 
-- [ ] **M4-010 — Parallel E2E suite** · Lane D
+- [x] **M4-010 — Parallel E2E suite** · Lane D
   - Depends On: M4-005, M4-006, M4-007
   - Parallel With: M4-008, M4-009
   - Allowed Paths: `tests/e2e/**`, `tests/scenarios/parallel/**`
@@ -663,12 +663,12 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
 
 ### Exit Gate M4
 
-- [ ] Dua sampai empat task independen berjalan paralel.
-- [ ] Task overlap tidak berjalan bersama.
-- [ ] Patch lolos review+verify sebelum integrasi.
-- [ ] Conflict memerlukan manusia; branch dasar tetap aman.
-- [ ] Restart memulihkan run tanpa duplicate side effect.
-- [ ] Full validation dan E2E lulus.
+- [x] Dua sampai empat task independen berjalan paralel.
+- [x] Task overlap tidak berjalan bersama.
+- [x] Patch lolos review+verify sebelum integrasi.
+- [x] Conflict memerlukan manusia; branch dasar tetap aman.
+- [x] Restart memulihkan run tanpa duplicate side effect.
+- [x] Full validation dan E2E lulus.
 
 ---
 
@@ -856,7 +856,10 @@ Catat keputusan yang memengaruhi lebih dari satu task. Jangan menyimpan diskusi 
 | 2026-10-06 | M4-006 | Integrator hanya MENGUSULKAN transisi (Done, atau Conflict lalu NeedsHuman); belum dipanggil orchestrator dan `IntegrationCheck` produksi (build/test di container) belum ada. Regresi pemeriksaan integrasi diperlakukan sebagai konflik semantik (NEEDS_HUMAN) | Human | Task integrasi: ambil patch + hasil review/verify dari DB, terapkan transisi, simpan laporan konflik sebagai artifact |
 | 2026-10-06 | M4-007B, M4-009B | Endpoint baca tambahan di luar daftar task: `GET /runs/:id/scheduler` dan `GET /approvals`; `retry`/`cancel` menerima `actor_id`/`reason` dan dijalankan sebagai `Actor::Human` bila sah (sebelumnya `NEEDS_HUMAN -> READY` tidak mungkin lewat API) | Human | Identitas masih nama yang diketik, belum autentikasi |
 | 2026-10-06 | M4-008 | `recovery::recover` dipanggil dari `main.rs` sebelum recovery integrasi orchestrator; memperbaiki crash tepat setelah claim (ASSIGNED tanpa worktree sebelumnya membuat startup gagal) dan diserialkan dengan advisory lock sesi. Attempt baru dipulihkan setelah `stale_after_seconds` | Human | `ParallelScheduler::recover` belum memakai inspeksi worktree |
-| 2026-10-06 | M4 | Exit Gate M4 belum terpenuhi: M4-010 (E2E paralel) belum dikerjakan, dan scheduler paralel + Integrator belum terhubung ke jalur produksi sehingga "2–4 task independen berjalan paralel" baru teruji dengan runner palsu | Human | Kerjakan adaptor `SlotRunner` + wiring Integrator sebelum M4-010 |
+| 2026-10-06 | M4-005B | `OrchestratorRunner` (adaptor `SlotRunner` produksi) menjalankan pipeline untuk task yang diklaim `ParallelScheduler`; `ClaimedTask` membawa `owner`; `WorkerClock` kini `Send + Sync`; `main.rs` memakai `ParallelScheduler` (provider dicari setelah model terdaftar). Attempt yang dimulai manual lewat API tetap dilayani `Orchestrator::run` dan tidak dihitung dalam batas slot | Human | Budget guard belum dipanggil dari worker |
+| 2026-10-06 | M4-006B | Integrator dipakai pipeline: patch task ditumpuk di cabang integrasi per run (`noctis-integration-<run>`), pemeriksaan integrasi = verifikasi task diulang di cabang itu, konflik berakhir CONFLICT lalu NEEDS_HUMAN dengan artifact `conflict_report`, task dimulai dari head cabang integrasi, recovery operasi cabang run (commit `integrate <task>` ada = DONE, selain itu NEEDS_HUMAN). `Verifier::with_artifact_scope` membedakan artifact pemeriksaan integrasi | Human | Laporan konflik belum tampil di UI |
+| 2026-10-06 | M4-010 | E2E paralel menemukan bug: retry setelah `changes_requested` selalu gagal `orchestrator.git` karena worktree attempt lama menempati path task. Diperbaiki di `src/orchestrator.rs` (`release_previous_worktree`, di luar Allowed Paths task) | Human | Skenario retry E2E menjadi regression test |
+| 2026-10-06 | M4 | Exit Gate M4 terpenuhi: scheduler paralel dan Integrator terhubung ke jalur produksi (M4-005B, M4-006B) dan diuji E2E 2–4 worker (M4-010) | Human | Lanjut M5 |
 
 # 10. Progress Log
 
@@ -900,3 +903,6 @@ Tambahkan satu baris saat task selesai atau diblokir.
 | 2026-10-06 | M4-007 | Dashboard paralel live di halaman run, termasuk backend baca M4-007B (`ef9c485`, `3036662`) | `cargo test --test scheduler_view` (3 passed); suite penuh 375 passed; `npm run check`; `npm run build`; `npm run e2e` (7 passed, 3×) | Polling 3 detik; hasil pause/cancel tetap terlihat sampai slot kosong; satu regresi locator E2E M3-012 diperbaiki |
 | 2026-10-06 | M4-008 | Recovery startup terintegrasi (`e3599cb`) | `cargo test --test recovery -- --test-threads=1` (9 passed, 20× stabil); suite penuh 385 passed | Memperbaiki startup gagal setelah crash tepat setelah claim; balapan pemulih diserialkan dengan advisory lock |
 | 2026-10-06 | M4-009 | Halaman Approvals dengan konfirmasi eksplisit dan audit, termasuk backend M4-009B (`d97c50c`, `c4658af`) | `cargo test --test approvals_api` (3 passed); suite penuh 388 passed; `npm run check`; `npm run build`; `node web/src/lib/components/approval/helpers.test.mjs`; `npm run e2e` (7 passed, 2×) | Keputusan basi (409) ditolak dan dijelaskan; identitas belum diautentikasi |
+| 2026-10-06 | M4-005B | Adaptor `SlotRunner` produksi terintegrasi (`f443e4b`) | `cargo test --test single_worker_flow -- --test-threads=1` (8 passed); suite penuh; clippy; `npm run e2e` (7 passed) | `ParallelScheduler` kini menjalankan pipeline asli di `main.rs`; berhenti kooperatif via `SlotControl` |
+| 2026-10-06 | M4-006B | Integrator tersambung ke pipeline produksi (`89865ee`) | `cargo test --test single_worker_flow --test scheduler_sequential -- --test-threads=1`; suite penuh; clippy; `npm run e2e` (7 passed); mutation check recovery/discard/rebase | Cabang integrasi per run, konflik → NEEDS_HUMAN + `conflict_report`; task mulai dari head cabang integrasi |
+| 2026-10-07 | M4-010, Exit Gate M4 | E2E paralel 2–4 worker lulus; Exit Gate M4 terpenuhi | `npm run e2e` (13 passed, 3× berturut-turut tanpa flaky); `cargo fmt --check`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo test -- --test-threads=1` (43 binary lulus); mutation check budget stop | Menemukan dan memperbaiki bug retry (worktree attempt lama); skenario: independen 2 dan 4 worker, overlap ditahan, retry, regresi integrasi, budget stop |

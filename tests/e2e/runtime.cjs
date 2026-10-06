@@ -95,6 +95,8 @@ async function main() {
       NOCTIS__ARTIFACTS__ROOT: artifacts,
       NOCTIS__PROVIDER__BASE_URL: 'http://127.0.0.1:7411/v1',
       NOCTIS__PROVIDER__MODEL: 'e2e-model',
+      // M4-010: suite paralel butuh 4 slot (skenario 2 dan 4 worker).
+      NOCTIS__SCHEDULER__MAX_PARALLEL_AGENTS: '4',
       NOCTIS_PROVIDER_HOST_ALLOWLIST: '127.0.0.1',
       NOCTIS_RUNNER_IMAGE: 'rust:1'
     }

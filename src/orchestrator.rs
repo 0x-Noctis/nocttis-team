@@ -555,6 +555,7 @@ impl Orchestrator {
                 task.contract.project_run_id.as_str(),
             )
             .await?;
+        self.release_previous_worktree(&git, &attempt).await?;
         let worktree = git
             .create(
                 attempt.task_id.as_str(),
@@ -796,6 +797,32 @@ impl Orchestrator {
                     .await?;
             }
             Some(TaskIntegration::Skipped { .. }) => return Err(OrchestratorError::Git),
+        }
+        Ok(())
+    }
+
+    /// Worktree task berada di satu path (`worktree_root/<task>`) yang dipakai ulang tiap attempt. Attempt lama yang
+    /// sudah selesai (mis. review meminta perubahan) menahan path itu sampai retensi habis, sehingga retry langsung
+    /// gagal `orchestrator.git`. Bersihkan di sini; diff attempt lama tetap tersimpan sebagai artifact.
+    async fn release_previous_worktree(
+        &self,
+        git: &GitWorktreeManager,
+        attempt: &crate::store::event::RuntimeAttempt,
+    ) -> Result<(), OrchestratorError> {
+        let previous = self
+            .tasks
+            .list_attempts(attempt.task_id.as_str())
+            .await
+            .map_err(store_error)?;
+        for old in previous
+            .iter()
+            .filter(|old| old.id != attempt.id && old.finished_unix_ms.is_some())
+        {
+            if let Ok(worktree) = git.open(attempt.task_id.as_str(), &old.branch, &old.base_commit)
+            {
+                git.cleanup(&worktree).map_err(|_| OrchestratorError::Git)?;
+                break;
+            }
         }
         Ok(())
     }
