@@ -1,7 +1,7 @@
 // Cek cepat logika graf: `node web/src/lib/components/board/graph.test.mjs` (Node 22.18+ membaca .ts langsung).
 import assert from 'node:assert/strict';
 import { blockedBy, columnOf, dependencyLevels, indexTasks } from './graph.ts';
-import { budgetLevel, parseCriteria, worstCaseTokens } from '../project/types.ts';
+import { budgetLevel, parseCriteria, reservedTokens } from '../project/types.ts';
 
 const task = (id, status, depends_on = []) => ({ contract: { id, depends_on }, status });
 const ids = (list) => list.map((t) => t.contract.id);
@@ -31,7 +31,8 @@ assert.equal(columnOf(task('v', 'VERIFY'), byId), 'checking');
 // Budget dan helper form.
 assert.deepEqual([0, 69.9, 70, 85, 100, 140].map(budgetLevel), ['ok', 'ok', 'warning', 'checkpoint', 'exhausted', 'exhausted']);
 const limits = (i, o, a) => ({ limits: { max_input_tokens: i, max_output_tokens: o, max_attempts: a } });
-assert.equal(worstCaseTokens([limits(100, 50, 2), limits(10, 5, 1)]), 315);
-assert.equal(worstCaseTokens([limits(Number.MAX_SAFE_INTEGER, 1, 2)]), null);
+// Reservasi backend = Σ (input + output), attempts tidak ikut dikalikan.
+assert.equal(reservedTokens([limits(100, 50, 2), limits(10, 5, 1)]), 165);
+assert.equal(reservedTokens([limits(Number.MAX_SAFE_INTEGER, 1, 2)]), null);
 assert.deepEqual(parseCriteria(' a \n\n  \nb\n'), ['a', 'b']);
 console.log('graph.test.mjs OK');

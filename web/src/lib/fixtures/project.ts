@@ -57,7 +57,7 @@ export const approvedPlan: ProposedPlan = { ...proposedPlan, status: 'APPROVED' 
 export const rejectedPlan: ProposedPlan = { ...proposedPlan, status: 'REJECTED' };
 export const noRiskPlan: ProposedPlan = { ...proposedPlan, risk_flags: [] };
 
-// Worst case = 4 * (30000 + 8000) * 2 = 304000, melebihi budget 200000.
+// Reservasi = 4 * (30000 + 8000) = 152000; melebihi sisa budget bila hanya 100000 tersisa.
 export const overBudgetPlan: ProposedPlan = proposedPlan;
 
 export const approveInput: PlanApprovalInput = { plan_id: 'PLAN-1', actor_id: 'human', decision: 'APPROVED', reason: null };

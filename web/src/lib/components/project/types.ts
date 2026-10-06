@@ -66,12 +66,13 @@ export function budgetLevel(percent: number): BudgetLevel {
   return 'ok';
 }
 
-// Token terburuk satu plan: tiap task boleh memakai (input + output) per attempt.
-// Mengembalikan null bila hasilnya bukan safe integer supaya UI menampilkan "Invalid", bukan angka salah.
-export function worstCaseTokens(tasks: TaskContract[]): number | null {
+// Token yang dipesan backend saat plan disetujui: Σ (max_input + max_output) per task, tanpa × attempts
+// (lihat ProjectRepository::decide). Mengembalikan null bila hasilnya bukan safe integer
+// supaya UI menampilkan "Invalid", bukan angka salah.
+export function reservedTokens(tasks: TaskContract[]): number | null {
   let total = 0;
   for (const { limits } of tasks) {
-    total += (limits.max_input_tokens + limits.max_output_tokens) * limits.max_attempts;
+    total += limits.max_input_tokens + limits.max_output_tokens;
     if (!Number.isSafeInteger(total)) return null;
   }
   return total;

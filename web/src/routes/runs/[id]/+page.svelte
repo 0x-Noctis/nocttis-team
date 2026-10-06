@@ -133,7 +133,7 @@
     <BudgetMeter budget={detail.budget} />
 
     {#if plan}
-      <PlanReview {plan} tokenBudget={run.token_budget} />
+      <PlanReview {plan} availableTokens={detail.budget.limit - detail.budget.reserved} />
       <PlanApprovalPanel {plan} {actorId} submitting={acting} error={decisionError} onsubmit={decide} />
     {:else}
       <PlanReview />

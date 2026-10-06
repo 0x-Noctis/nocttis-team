@@ -1,11 +1,12 @@
 <script lang="ts">
   import { isValidTaskLimits } from '$lib/api/types';
-  import { worstCaseTokens, type ProposedPlan } from './types';
+  import { reservedTokens, type ProposedPlan } from './types';
 
-  let { plan, tokenBudget, loading = false, error = '' }: { plan?: ProposedPlan; tokenBudget?: number; loading?: boolean; error?: string } = $props();
+  // availableTokens = sisa budget run (limit - reserved); approval ditolak backend bila reservasi plan melebihinya.
+  let { plan, availableTokens, loading = false, error = '' }: { plan?: ProposedPlan; availableTokens?: number; loading?: boolean; error?: string } = $props();
 
-  const worstCase = $derived(plan ? worstCaseTokens(plan.tasks) : null);
-  const overBudget = $derived(worstCase !== null && tokenBudget !== undefined && worstCase > tokenBudget);
+  const reserved = $derived(plan ? reservedTokens(plan.tasks) : null);
+  const overBudget = $derived(reserved !== null && availableTokens !== undefined && reserved > availableTokens);
   const statusLabel = { PROPOSED: '? Proposed', APPROVED: '✓ Approved', REJECTED: '× Rejected' } as const;
 </script>
 
@@ -23,10 +24,10 @@
       {#if plan.risk_flags.length}<ul class="risks">{#each plan.risk_flags as flag}<li><span aria-hidden="true">⚠</span> {flag}</li>{/each}</ul>{:else}<p>No risk flags raised.</p>{/if}
     </section>
 
-    <section aria-labelledby="plan-cost"><h3 id="plan-cost">Worst-case tokens</h3>
-      {#if worstCase === null}<p class="error" role="alert">Task limits produce an unsafe total.</p>
-      {:else}<p>{worstCase.toLocaleString()} <small>(Σ input + output × attempts)</small>{#if tokenBudget !== undefined} of {tokenBudget.toLocaleString()} budget{/if}</p>
-        {#if overBudget}<p class="error" role="alert">Worst case exceeds the run budget. Budget guard will stop work at 100%.</p>{/if}
+    <section aria-labelledby="plan-cost"><h3 id="plan-cost">Tokens reserved on approval</h3>
+      {#if reserved === null}<p class="error" role="alert">Task limits produce an unsafe total.</p>
+      {:else}<p>{reserved.toLocaleString()} <small>(Σ input + output per task)</small>{#if availableTokens !== undefined} of {availableTokens.toLocaleString()} remaining{/if}</p>
+        {#if overBudget && plan.status === 'PROPOSED'}<p class="error" role="alert">Approval will be refused: this plan needs more tokens than the run has left.</p>{/if}
       {/if}
     </section>
 
