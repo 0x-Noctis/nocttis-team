@@ -4,6 +4,7 @@ import type {
   LeaseConflict,
   ParallelViewState,
   QueueItem,
+  RunLease,
   SlotLease,
   WorkerSlot
 } from '$lib/components/workers/types';
@@ -50,12 +51,18 @@ export const queueItems: QueueItem[] = [
   { task_id: 'integration-test', title: 'Cover search with a test', priority: 5, reason: 'dependency', detail: 'Waiting for backend-search (running), frontend-search (review).' },
   { task_id: 'refactor-products', title: 'Refactor products module', priority: 3, reason: 'lease', detail: 'src/products.js is leased by backend-search.' },
   { task_id: 'perf-pass', title: 'Performance pass', priority: 2, reason: 'budget', detail: 'Needs 12,000 tokens; 9,000 remain before the reserve.' },
-  { task_id: 'cleanup', title: 'Remove dead code', priority: 0, reason: 'slot', detail: 'All 3 worker slots are busy.' }
+  { task_id: 'cleanup', title: 'Remove dead code', priority: 0, reason: 'slot', detail: 'All 3 worker slots are busy.' },
+  { task_id: 'flaky-migration', title: 'Run migration', priority: 0, reason: 'attempts', detail: 'No attempts left (2 of 2 used).' }
 ];
 
 export const queuePaused: QueueItem[] = queueItems.map((item) => ({ ...item, reason: 'paused' as const, detail: 'Resume the run to schedule this task.' }));
 
-export const activeLeases: SlotLease[] = [lease('src/backend.js', 52), lease('src/products.js', 52), lease('src/frontend/**', 19), lease('docs/**', 8)];
+export const activeLeases: RunLease[] = [
+  { pattern: 'src/backend.js', task_id: 'backend-search', expires_in_seconds: 52 },
+  { pattern: 'src/products.js', task_id: 'backend-search', expires_in_seconds: 52 },
+  { pattern: 'src/frontend/**', task_id: 'frontend-search', expires_in_seconds: 19 },
+  { pattern: 'docs/**', task_id: 'docs-update', expires_in_seconds: 8 }
+];
 export const conflicts: LeaseConflict[] = [{ task_id: 'refactor-products', pattern: 'src/products.js', holder_task_id: 'backend-search' }];
 
 export const attempts: AttemptRecord[] = [

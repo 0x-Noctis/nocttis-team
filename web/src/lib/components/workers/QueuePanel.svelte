@@ -8,7 +8,8 @@
     dependency: { icon: '⛓', label: 'Waiting for a dependency' },
     lease: { icon: '🔒', label: 'Waiting for a file lease' },
     budget: { icon: '◔', label: 'Waiting for token budget' },
-    paused: { icon: '‖', label: 'Run is paused' }
+    paused: { icon: '‖', label: 'Run is paused' },
+    attempts: { icon: '∅', label: 'No attempts left' }
   };
 </script>
 

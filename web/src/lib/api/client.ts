@@ -10,6 +10,14 @@ import type {
   TaskStatus
 } from './types';
 import type {
+  AttemptRecord,
+  GaugeValue,
+  LeaseConflict,
+  QueueItem,
+  RunLease,
+  WorkerSlot
+} from '$lib/components/workers/types';
+import type {
   PlanApprovalInput,
   ProjectInput,
   ProjectRunInput,
@@ -216,4 +224,22 @@ export const runApi = {
     request<{ run: ProjectRunView }>(`/api/v1/runs/${enc(runId)}/${action}`, mutation('POST', { expected_status: expectedStatus })).then(
       ({ run }) => run
     )
+};
+
+/** Status scheduler satu run (GET /runs/:id/scheduler); hanya slot aktif, sisanya diisi UI sampai `max_slots`. */
+export interface SchedulerView {
+  run_id: string;
+  run_status: RunStatus;
+  max_slots: number;
+  budget: GaugeValue;
+  slots: WorkerSlot[];
+  queue: QueueItem[];
+  leases: RunLease[];
+  conflicts: LeaseConflict[];
+  attempts: AttemptRecord[];
+  task_budgets: GaugeValue[];
+}
+
+export const schedulerApi = {
+  view: (runId: string) => request<SchedulerView>(`/api/v1/runs/${enc(runId)}/scheduler`)
 };

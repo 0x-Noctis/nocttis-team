@@ -117,8 +117,10 @@ test.describe('Lead and task DAG', () => {
     // Root menunggu giliran; tiga task lain terblokir dengan alasan yang terbaca.
     await expect(page.getByRole('heading', { name: /Queued/ })).toContainText('(1)');
     await expect(page.getByRole('heading', { name: /Blocked/ })).toContainText('(3)');
-    await expect(page.getByText(/Waiting for [0-9a-f]{8}-contract \(/).first()).toBeVisible();
-    await expect(page.getByText(/Waiting for [0-9a-f]{8}-backend \(.*\), [0-9a-f]{8}-frontend \(/)).toBeVisible();
+    // Alasan yang sama juga tampil di panel antrean dashboard paralel; periksa kartu di board saja.
+    const board = page.locator('section[aria-labelledby="board-title"]');
+    await expect(board.getByText(/Waiting for [0-9a-f]{8}-contract \(/).first()).toBeVisible();
+    await expect(board.getByText(/Waiting for [0-9a-f]{8}-backend \(.*\), [0-9a-f]{8}-frontend \(/)).toBeVisible();
   });
 
   test('rejected plan creates no tasks and Lead can re-plan as version 2', async ({ page, request }) => {

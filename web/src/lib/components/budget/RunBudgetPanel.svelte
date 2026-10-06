@@ -2,11 +2,11 @@
   import TokenGauge from './TokenGauge.svelte';
   import type { GaugeValue } from '../workers/types';
 
-  let { run, tasks = [], loading = false, error = '' }: { run?: GaugeValue; tasks?: GaugeValue[]; loading?: boolean; error?: string } = $props();
+  let { run, tasks = [], title = 'Token budget', loading = false, error = '' }: { run?: GaugeValue; tasks?: GaugeValue[]; title?: string; loading?: boolean; error?: string } = $props();
 </script>
 
 <section aria-labelledby="run-budget-title">
-  <h2 id="run-budget-title">Token budget</h2>
+  <h2 id="run-budget-title">{title}</h2>
   {#if loading}<p aria-live="polite" aria-busy="true">Loading budget…</p>
   {:else if error}<p class="bad" role="alert">Budget unavailable: {error}</p>
   {:else if !run}<p>No budget data for this run.</p>

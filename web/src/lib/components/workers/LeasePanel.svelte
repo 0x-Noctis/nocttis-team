@@ -1,7 +1,7 @@
 <script lang="ts">
-  import type { LeaseConflict, SlotLease } from './types';
+  import type { LeaseConflict, RunLease } from './types';
 
-  let { leases, conflicts = [], loading = false, error = '' }: { leases: SlotLease[]; conflicts?: LeaseConflict[]; loading?: boolean; error?: string } = $props();
+  let { leases, conflicts = [], loading = false, error = '' }: { leases: RunLease[]; conflicts?: LeaseConflict[]; loading?: boolean; error?: string } = $props();
 </script>
 
 <section aria-labelledby="leases-title">
@@ -14,8 +14,8 @@
         <ul>{#each conflicts as conflict (conflict.task_id + conflict.pattern)}<li><strong>{conflict.task_id}</strong> needs <code>{conflict.pattern}</code>, held by <strong>{conflict.holder_task_id}</strong>.</li>{/each}</ul></div>
     {/if}
     {#if leases.length}
-      <table><caption class="sr">Active file leases</caption><thead><tr><th scope="col">Scope</th><th scope="col">Expires in</th></tr></thead>
-        <tbody>{#each leases as lease (lease.pattern)}<tr><td><code>{lease.pattern}</code></td><td>{lease.expires_in_seconds}s</td></tr>{/each}</tbody></table>
+      <table><caption class="sr">Active file leases</caption><thead><tr><th scope="col">Scope</th><th scope="col">Held by</th><th scope="col">Expires in</th></tr></thead>
+        <tbody>{#each leases as lease (lease.task_id + lease.pattern)}<tr><td><code>{lease.pattern}</code></td><td>{lease.task_id}</td><td>{lease.expires_in_seconds}s</td></tr>{/each}</tbody></table>
     {:else}<p>No active leases.</p>{/if}
   {/if}
 </section>

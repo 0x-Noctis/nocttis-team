@@ -35,7 +35,12 @@ export interface WorkerSlot {
   tokens?: GaugeValue;
 }
 
-export type QueueReason = 'slot' | 'dependency' | 'lease' | 'budget' | 'paused';
+export type QueueReason = 'slot' | 'dependency' | 'lease' | 'budget' | 'paused' | 'attempts';
+
+/** Lease aktif milik satu task di dalam run (tampilan tingkat run). */
+export interface RunLease extends SlotLease {
+  task_id: string;
+}
 
 export interface QueueItem {
   task_id: string;
@@ -66,4 +71,4 @@ export type ParallelViewState =
   | { state: 'loading' }
   | { state: 'empty' }
   | { state: 'error'; message: string }
-  | { state: 'ready'; slots: WorkerSlot[]; queue: QueueItem[]; leases: SlotLease[]; conflicts: LeaseConflict[]; attempts: AttemptRecord[]; run: GaugeValue };
+  | { state: 'ready'; slots: WorkerSlot[]; queue: QueueItem[]; leases: RunLease[]; conflicts: LeaseConflict[]; attempts: AttemptRecord[]; run: GaugeValue };

@@ -2,10 +2,12 @@
   import { onMount } from 'svelte';
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
-  import { asApiError, runApi, type RunDetail } from '$lib/api/client';
+  import { asApiError, runApi, schedulerApi, type RunDetail, type SchedulerView } from '$lib/api/client';
   import type { ApiError, TaskView } from '$lib/api/types';
   import { startPoller } from '$lib/realtime/run-poller';
   import { DagSummary, RunBoard } from '$lib/components/board';
+  import { RunBudgetPanel } from '$lib/components/budget';
+  import { AttemptList, LeasePanel, QueuePanel, WorkerGrid, controlNotice, padSlots, uniqueBy } from '$lib/components/workers';
   import { BudgetMeter, PlanApprovalPanel, PlanReview, RunSummary, type PlanApprovalInput, type ProposedPlan, type RunStatus } from '$lib/components/project';
 
   const POLL_MS = 3000;
@@ -23,6 +25,10 @@
   let confirmingCancel = $state(false);
   let actorId = $state('');
   let leading = $state(false);
+  let scheduler = $state<SchedulerView | null>(null);
+  let schedulerError = $state('');
+  // Aksi kontrol yang sedang dikirim; tombol dikunci dan hasilnya ditunggu sampai server menjawab.
+  let pendingAction = $state<'pause' | 'resume' | 'cancel' | null>(null);
 
   const runId = $derived(page.params.id ?? '');
   const run = $derived(detail?.run);
@@ -39,13 +45,33 @@
   const errorLines = $derived(Object.entries(error?.error.details ?? {}).map(([key, value]) => `${key}: ${String(value)}`));
   const canCancel = $derived(run?.status === 'RUNNING' || run?.status === 'PAUSED');
 
+  // Data scheduler diganti utuh tiap poll (bukan ditambahkan), dan kuncinya dijaga unik agar refresh atau
+  // reconnect tidak pernah menggandakan baris.
+  const slots = $derived(scheduler ? padSlots(scheduler.slots, scheduler.max_slots, scheduler.run_status) : []);
+  const activeSlots = $derived(scheduler?.slots.length ?? 0);
+  const queue = $derived(uniqueBy(scheduler?.queue ?? [], (item) => item.task_id));
+  const leases = $derived(uniqueBy(scheduler?.leases ?? [], (lease) => `${lease.task_id}|${lease.pattern}`));
+  const conflicts = $derived(uniqueBy(scheduler?.conflicts ?? [], (conflict) => `${conflict.task_id}|${conflict.pattern}`));
+  const attempts = $derived(uniqueBy(scheduler?.attempts ?? [], (attempt) => `${attempt.task_id}|${attempt.number}`));
+  const taskBudgets = $derived(uniqueBy(scheduler?.task_budgets ?? [], (gauge) => gauge.label));
+  const showParallel = $derived(!!run && run.status !== 'PLANNING' && run.status !== 'AWAITING_APPROVAL');
+  const controlText = $derived(run ? controlNotice(run.status, activeSlots) : '');
+
   // Satu siklus baca: run, plan, dan task diambil bersamaan lalu diganti sekaligus agar tampilan konsisten.
   async function refresh(): Promise<'stop' | undefined> {
-    const [loadedDetail, loadedPlans, loadedTasks] = await Promise.all([runApi.get(runId), runApi.plans(runId), runApi.tasks(runId)]);
+    // Kegagalan membaca status scheduler tidak boleh mematikan seluruh halaman; ditampilkan di panelnya.
+    const loadedScheduler = schedulerApi
+      .view(runId)
+      .then((view) => ({ view, message: '' }))
+      .catch((reason) => ({ view: null, message: asApiError(reason).error.message }));
+    const [loadedDetail, loadedPlans, loadedTasks, loadedView] = await Promise.all([runApi.get(runId), runApi.plans(runId), runApi.tasks(runId), loadedScheduler]);
     detail = loadedDetail;
     plans = loadedPlans;
     tasks = loadedTasks;
-    return terminal.includes(loadedDetail.run.status) ? 'stop' : undefined;
+    scheduler = loadedView.view ?? scheduler;
+    schedulerError = loadedView.message;
+    // Berhenti polling hanya bila run selesai DAN semua worker sudah berhenti (cancel butuh waktu).
+    return terminal.includes(loadedDetail.run.status) && (loadedView.view?.slots.length ?? 0) === 0 ? 'stop' : undefined;
   }
 
   async function act(work: () => Promise<string>) {
@@ -88,10 +114,11 @@
     const expected = run?.status;
     if (!expected) return;
     confirmingCancel = false;
+    pendingAction = action;
     return act(async () => {
       await runApi.transition(runId, action, expected);
       return `Run ${action} accepted.`;
-    });
+    }).finally(() => (pendingAction = null));
   };
 
   onMount(() => {
@@ -145,10 +172,20 @@
       {:else}
         <button type="button" class="danger" disabled={acting || !canCancel} onclick={() => (confirmingCancel = true)}>Cancel run…</button>
       {/if}
-      <span class="live">{terminal.includes(run.status) ? 'Run finished; updates stopped.' : `Live updates every ${POLL_MS / 1000} s`}</span>
+      <span class="live">{terminal.includes(run.status) && activeSlots === 0 ? 'Run finished; updates stopped.' : `Live updates every ${POLL_MS / 1000} s`}</span>
     </section>
+    {#if pendingAction}<p class="pending" role="status" aria-live="polite">Sending {pendingAction} request… waiting for the result.</p>{/if}
+    {#if controlText}<p class="pending" role="status" aria-live="polite">{controlText}</p>{/if}
 
     <BudgetMeter budget={detail.budget} />
+
+    {#if showParallel}
+      <WorkerGrid {slots} error={schedulerError} />
+      <QueuePanel items={queue} error={schedulerError} />
+      <LeasePanel {leases} {conflicts} error={schedulerError} />
+      <AttemptList {attempts} error={schedulerError} />
+      <RunBudgetPanel title="Budget guard (live)" run={scheduler?.budget} tasks={taskBudgets} error={schedulerError} />
+    {/if}
 
     {#if canAskLead}
       <section class="lead" aria-labelledby="lead-title"><h2 id="lead-title">Lead planner</h2>
