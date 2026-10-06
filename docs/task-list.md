@@ -577,7 +577,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
 
 ## Gelombang M4-A — Claim, Lease, dan Budget
 
-- [ ] **M4-001 — Atomic task claim** · Lane A
+- [x] **M4-001 — Atomic task claim** · Lane A
   - Depends On: M3 exit gate
   - Parallel With: M4-002, M4-003, M4-004
   - Allowed Paths: `src/store/scheduler.rs`, `tests/task_claim.rs`
@@ -585,7 +585,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: beberapa scheduler tidak mengambil task sama; ordering priority stabil; abandoned claim dapat dipulihkan.
   - Verify: concurrent PostgreSQL integration test.
 
-- [ ] **M4-002 — File lease dan overlap detection** · Lane A
+- [x] **M4-002 — File lease dan overlap detection** · Lane A
   - Depends On: M3 exit gate
   - Parallel With: M4-001, M4-003, M4-004
   - Allowed Paths: `migrations/0005_file_leases.sql`, `src/store/lease.rs`, `src/domain/path_scope.rs`, `tests/file_lease.rs`
@@ -593,7 +593,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: glob overlap konservatif; exact conflict ditolak atomik; stale lease dapat direbut setelah recovery.
   - Verify: concurrent lease tests dan tricky path cases.
 
-- [ ] **M4-003 — Hierarchical budget guard** · Lane A
+- [x] **M4-003 — Hierarchical budget guard** · Lane A
   - Depends On: M3 exit gate
   - Parallel With: M4-001, M4-002, M4-004
   - Allowed Paths: `src/domain/budget.rs`, `src/store/budget.rs`, `tests/budget.rs`
@@ -601,7 +601,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: warning 70%, checkpoint 85%, stop 100%, reserve 15%; concurrent spend tidak oversubscribe.
   - Verify: race, provider estimated usage, refund, dan hard-stop tests.
 
-- [ ] **M4-004 — Parallel dashboard fixtures** · Lane C
+- [x] **M4-004 — Parallel dashboard fixtures** · Lane C
   - Depends On: M3 exit gate
   - Parallel With: M4-001, M4-002, M4-003
   - Allowed Paths: `web/src/lib/components/workers/**`, `web/src/lib/components/budget/**`, `web/src/lib/fixtures/parallel.ts`
@@ -611,7 +611,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
 
 ## Gelombang M4-B — Parallel Scheduler dan Integration
 
-- [ ] **M4-005 — Parallel scheduler** · Lane A
+- [x] **M4-005 — Parallel scheduler** · Lane A
   - Depends On: M4-001, M4-002, M4-003
   - Parallel With: M4-006, M4-007
   - Allowed Paths: `src/scheduler/parallel.rs`, `src/scheduler/mod.rs`, `tests/scheduler_parallel.rs`
@@ -619,7 +619,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: hanya dependency-ready, lease-safe, budget-safe task berjalan; idle slot diisi; shutdown tidak mengambil task baru.
   - Verify: deterministic concurrent scenarios dengan dua scheduler instance.
 
-- [ ] **M4-006 — Integrator dan integration branch** · Lane B
+- [x] **M4-006 — Integrator dan integration branch** · Lane B
   - Depends On: M2-003, M3 exit gate
   - Parallel With: M4-005, M4-007
   - Allowed Paths: `src/agent/integrator.rs`, `src/runner/integration_git.rs`, `tests/integrator.rs`
@@ -627,7 +627,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: hanya patch task approved+verified; konflik semantik `NEEDS_HUMAN`; base branch tidak dimutasi; tanpa push.
   - Verify: clean apply, mechanical conflict, semantic marker, rollback, dan failed regression.
 
-- [ ] **M4-007 — Dashboard parallel live data** · Lane C
+- [x] **M4-007 — Dashboard parallel live data** · Lane C
   - Depends On: M4-004 dan API/event contract M4-001..M4-003
   - Parallel With: M4-005, M4-006
   - Allowed Paths: `web/src/routes/runs/**`, `web/src/lib/components/workers/**`, `web/src/lib/components/budget/**`, `web/src/lib/api/**`
@@ -637,7 +637,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
 
 ## Gelombang M4-C — Recovery dan Multi-Agent E2E
 
-- [ ] **M4-008 — Startup recovery** · Lane A
+- [x] **M4-008 — Startup recovery** · Lane A
   - Depends On: M4-005, M4-006
   - Parallel With: M4-009, M4-010
   - Allowed Paths: `src/recovery.rs`, `src/main.rs`, `tests/recovery.rs`
@@ -645,7 +645,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: tool side effect tidak diulang tanpa idempotency proof; lease dilepas/renew tepat; event recovery tercatat.
   - Verify: kill/restart tests pada setiap state penting.
 
-- [ ] **M4-009 — Approval dan conflict UI** · Lane C
+- [x] **M4-009 — Approval dan conflict UI** · Lane C
   - Depends On: M4-006, M4-007
   - Parallel With: M4-008, M4-010
   - Allowed Paths: `web/src/routes/approvals/**`, `web/src/lib/components/approval/**`, `web/src/lib/api/**`
@@ -851,6 +851,12 @@ Catat keputusan yang memengaruhi lebih dari satu task. Jangan menyimpan diskusi 
 | 2026-10-06 | M3-007B | Tambah endpoint baca di luar daftar task: `GET /projects/:id/runs`, `GET /runs/:id/plans`, `budget` pada `GET /runs/:id`, filter `GET /tasks?project_run_id=`. Filter ini menggantikan `GET /runs/:id/tasks` dari rancangan; SSE level run (`/runs/:id/events[/stream]`) belum ada dan UI memakai polling | Human | SSE run bila polling tidak cukup; RANCANGAN.md sudah disesuaikan |
 | 2026-10-06 | M3-006B | Tambah `POST /runs/:id/lead-plan`: ID plan/task dari model diberi prefix run dan versi dipaksa urut database (ID task unik global) | Human | Usage panggilan Lead belum masuk `model_usage` dan endpoint belum di-rate-limit; selesaikan di M4-003 / M5-001 |
 | 2026-10-06 | M3-004, M3-010 | Form project/run mengisi UUID otomatis; `PlanReview` menampilkan reservasi Σ(input+output) sama dengan backend (bukan × attempts) | Human | Lead tetap menolak plan bila Σ × attempts > budget (lebih ketat dari reservasi approval) |
+| 2026-10-06 | M4-002, M4-003 | Penyimpangan dari Allowed Paths yang dibenarkan: migration `0013_file_leases.sql` (nomor 0005 di tracker sudah terpakai) dan `0014_budget_reservations.sql` (M4-003 tidak mencantumkan `migrations/`, tetapi reservasi per request harus tahan lama dan terlihat semua scheduler) | Human | Migration tetap append-only |
+| 2026-10-06 | M4-005 | `ParallelScheduler` mendelegasikan eksekusi ke trait `SlotRunner` (karena `Orchestrator::dispatch_claimed` memakai `&mut self`). Perubahan di luar Allowed Paths: `src/store/scheduler.rs` (claim per-task, daftar kandidat, hitungan aktif) dan satu baris `src/orchestrator.rs` (`pub mod scheduler`) | Human | Buat adaptor `SlotRunner` produksi + wiring `main.rs`; saat ini produksi masih `SequentialScheduler` |
+| 2026-10-06 | M4-006 | Integrator hanya MENGUSULKAN transisi (Done, atau Conflict lalu NeedsHuman); belum dipanggil orchestrator dan `IntegrationCheck` produksi (build/test di container) belum ada. Regresi pemeriksaan integrasi diperlakukan sebagai konflik semantik (NEEDS_HUMAN) | Human | Task integrasi: ambil patch + hasil review/verify dari DB, terapkan transisi, simpan laporan konflik sebagai artifact |
+| 2026-10-06 | M4-007B, M4-009B | Endpoint baca tambahan di luar daftar task: `GET /runs/:id/scheduler` dan `GET /approvals`; `retry`/`cancel` menerima `actor_id`/`reason` dan dijalankan sebagai `Actor::Human` bila sah (sebelumnya `NEEDS_HUMAN -> READY` tidak mungkin lewat API) | Human | Identitas masih nama yang diketik, belum autentikasi |
+| 2026-10-06 | M4-008 | `recovery::recover` dipanggil dari `main.rs` sebelum recovery integrasi orchestrator; memperbaiki crash tepat setelah claim (ASSIGNED tanpa worktree sebelumnya membuat startup gagal) dan diserialkan dengan advisory lock sesi. Attempt baru dipulihkan setelah `stale_after_seconds` | Human | `ParallelScheduler::recover` belum memakai inspeksi worktree |
+| 2026-10-06 | M4 | Exit Gate M4 belum terpenuhi: M4-010 (E2E paralel) belum dikerjakan, dan scheduler paralel + Integrator belum terhubung ke jalur produksi sehingga "2–4 task independen berjalan paralel" baru teruji dengan runner palsu | Human | Kerjakan adaptor `SlotRunner` + wiring Integrator sebelum M4-010 |
 
 # 10. Progress Log
 
@@ -885,3 +891,12 @@ Tambahkan satu baris saat task selesai atau diblokir.
 | 2026-10-06 | M3-006B, M3-010 follow-up | Route Lead Agent, UUID otomatis, angka reservasi, link beranda, tombol Ask Lead (`2d17276`..`c64fd4c`) | `cargo test --test lead_api` (3 passed); `cargo test` penuh 313 passed; `npm run check`; `npm run build`; `npm run e2e` | Pengecekan mutasi pada `namespace_plan` membuat 2 test gagal |
 | 2026-10-06 | M3-012 | E2E skenario Lead/DAG: plan valid, reject lalu re-plan, siklus, over-budget Lead, budget kurang saat approve (`3081dde`) | `NOCTIS_E2E_API_KEY=… npm run e2e` dijalankan 3 kali berturut-turut: 7 passed tiap kali | Pengecekan mutasi pada skenario `cycle` membuat test gagal |
 | 2026-10-06 | Exit Gate M3 | Milestone M3 selesai | `cargo fmt --check`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo test -- --test-threads=1` (313 passed, 0 failed); `npm run check`; `npm run build`; `docker compose config --quiet`; `git diff --check`; `npm run e2e` (7 passed) | Plan hanya masuk lewat Lead atau API; belum ada dependensi M4 |
+| 2026-10-06 | M4-001 | Claim task atomik `SKIP LOCKED` terintegrasi (`5544eaf`; perluasan di M4-005) | `cargo test --test task_claim -- --test-threads=1` (8 passed); `cargo fmt --check`; `cargo clippy --all-targets --all-features -- -D warnings` | Mutasi pada `SKIP LOCKED` dan kunci run ditangkap test; test deterministik "kandidat teratas dikunci → dilewati" |
+| 2026-10-06 | M4-002 | `PathScope` dan file lease atomik per run terintegrasi (`55b3033`) | `cargo test --test file_lease` (9 passed); `cargo test --lib path_scope` (3 passed); suite penuh `cargo test -- --test-threads=1` | Overlap glob konservatif; mutasi pada advisory lock ditangkap |
+| 2026-10-06 | M4-003 | Budget guard hierarkis dengan reservasi token terintegrasi (`edc40ef`) | `cargo test --test budget` (8 passed); `cargo test --lib budget` (7 passed); suite penuh 346 passed | Belum dipanggil worker/orchestrator; hindari mengaktifkannya bersamaan dengan `record_usage_once` agar usage tak terhitung dua kali |
+| 2026-10-06 | M4-004 | Komponen dashboard paralel berbasis fixture terintegrasi (`b348eee`) | `npm run check`; `npm run build`; `node web/src/lib/components/workers/helpers.test.mjs`; render Chromium 360/768/1440 px tanpa overflow horizontal | Route sementara untuk render dihapus |
+| 2026-10-06 | M4-005 | Scheduler paralel 1–4 slot terintegrasi (`ddafaad`) | `cargo test --test scheduler_parallel -- --test-threads=1` (12 passed, diulang 15×); `cargo test --lib pick`; suite penuh 360 passed | Diuji dengan `SlotRunner` palsu; belum tersambung ke produksi (lihat Keputusan) |
+| 2026-10-06 | M4-006 | Integrator dan cabang integrasi per run terintegrasi (`1208ac4`) | `cargo test --test integrator` (12 passed, diulang 10×); suite penuh 372 passed | Branch dasar tak dimutasi dan tanpa push (diuji dengan remote bare); belum dipanggil orchestrator |
+| 2026-10-06 | M4-007 | Dashboard paralel live di halaman run, termasuk backend baca M4-007B (`ef9c485`, `3036662`) | `cargo test --test scheduler_view` (3 passed); suite penuh 375 passed; `npm run check`; `npm run build`; `npm run e2e` (7 passed, 3×) | Polling 3 detik; hasil pause/cancel tetap terlihat sampai slot kosong; satu regresi locator E2E M3-012 diperbaiki |
+| 2026-10-06 | M4-008 | Recovery startup terintegrasi (`e3599cb`) | `cargo test --test recovery -- --test-threads=1` (9 passed, 20× stabil); suite penuh 385 passed | Memperbaiki startup gagal setelah crash tepat setelah claim; balapan pemulih diserialkan dengan advisory lock |
+| 2026-10-06 | M4-009 | Halaman Approvals dengan konfirmasi eksplisit dan audit, termasuk backend M4-009B (`d97c50c`, `c4658af`) | `cargo test --test approvals_api` (3 passed); suite penuh 388 passed; `npm run check`; `npm run build`; `node web/src/lib/components/approval/helpers.test.mjs`; `npm run e2e` (7 passed, 2×) | Keputusan basi (409) ditolak dan dijelaskan; identitas belum diautentikasi |
