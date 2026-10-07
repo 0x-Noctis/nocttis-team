@@ -91,7 +91,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 cd web && npm run check
 cd web && npm run build
-docker compose config --quiet
+PRIMARY_API_KEY=dummy docker compose config --quiet
 ```
 
 Integration test yang memerlukan PostgreSQL:
@@ -109,7 +109,7 @@ cargo test --test integration -- --test-threads=1
 | M1 | Provider foundation | `[x]` | provider dikelola dan seluruh probe lulus |
 | M2 | Single-worker vertical slice | `[x]` | satu task menghasilkan patch terverifikasi |
 | M3 | Lead Agent dan task DAG | `[x]` | plan disetujui dan dependency dipatuhi |
-| M4 | Parallel workers dan integrasi | `[ ]` | 2–4 task independen berjalan aman |
+| M4 | Parallel workers dan integrasi | `[x]` | 2–4 task independen berjalan aman |
 | M5 | Hardening dan MVP release | `[ ]` | recovery, security, E2E, docs lulus |
 
 ## 6. Pekerjaan yang Sudah Ada
@@ -768,7 +768,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: fresh install dapat dilakukan hanya dari docs; semua env/config terdokumentasi; batas keamanan dinyatakan jujur.
   - Verify: fresh-install walkthrough.
 
-- [ ] **M5-012 — MVP release gate** · Integrator
+- [ ] **M5-012 — MVP release gate** · Integrator _(gate otomatis lulus; rilis DITAHAN sampai benchmark nyata M5-010 lulus — lihat docs/release-notes.md)_
   - Depends On: M5-009, M5-010, M5-011
   - Parallel With: —
   - Allowed Paths: seluruh repository hanya untuk fix blocker terverifikasi dan release notes
@@ -786,9 +786,9 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
 ### Exit Gate M5 / MVP Selesai
 
 - [ ] Semua acceptance M5-012 terpenuhi.
-- [ ] Tidak ada blocker severity tinggi.
-- [ ] Known limitations terdokumentasi.
-- [ ] Deployment lokal/self-hosted dapat diulang dari environment kosong.
+- [ ] Tidak ada blocker severity tinggi. (belum disepakati: API tanpa autentikasi/TLS dan SSRF provider hanya pada probe; lihat docs/release-notes.md)
+- [x] Known limitations terdokumentasi. (docs/release-notes.md)
+- [x] Deployment lokal/self-hosted dapat diulang dari environment kosong. (fresh-install walkthrough M5-011)
 
 ---
 
@@ -930,3 +930,5 @@ Tambahkan satu baris saat task selesai atau diblokir.
 | 2026-10-07 | M5-009 | Matriks E2E deterministik penuh terintegrasi | `npm run e2e` (58 passed, 5× berturut-turut tanpa flaky setelah perbaikan keep-alive gateway); `cargo test -- --test-threads=1`; `cargo fmt --check`; `cargo clippy --all-targets --all-features -- -D warnings`; `npm run check`; regresi bug 1 dan 2 terbukti gagal di kode lama; penjaga cakupan terbukti menangkap tag hilang | Menemukan 2 bug produk (direktori baru, file baru hilang) dan satu flaky infrastruktur (keep-alive gateway) |
 | 2026-10-07 | M5-010 | Harness benchmark dibuat; pengukuran nyata belum dijalankan | `node --test tests/baseline/*.test.cjs` (8 pass, mutation check ambang gate dan hitungan test gagal tertangkap); `node tests/baseline/verify.mjs`; satu run kolektor lawan stack E2E+fake provider membuktikan pipa data (proxy 60 token = `model_usage` 36 + Lead 24) | Run yang mencapai DONE di kolektor belum teramati; `mvp-results.json` belum ada |
 | 2026-10-07 | M5-011 | Dokumentasi operator dan pengguna selesai | fresh-install walkthrough di clone bersih hanya dari dokumen: `cp .env.example .env` + `docker compose up -d --build` → `health/ready` 200, UI `/` dan `/providers` 200, `operations/config` sesuai tabel, container non-root uid 10001 read-only, port hanya 127.0.0.1, header CSP/X-Frame-Options ada; klaim yang salah ditemukan dan dikoreksi (X-Request-Id, cakupan SSRF); stack dimatikan | Alur provider→run→approval dengan model nyata tidak diulang di walkthrough (dicakup E2E M5-009 dan benchmark M5-010); `extra_hosts` ke host belum diuji |
+| 2026-10-07 | M5-012 | Gate rilis dijalankan; rilis DITAHAN | `cargo fmt --check`; `cargo clippy -D warnings`; `cargo test --no-fail-fast -- --test-threads=1` = 440 lulus/0 gagal/51 binary (termasuk drill backup 4 test); `npm run check` + `build`; `PRIMARY_API_KEY=dummy docker compose config --quiet`; `npm run e2e` = 60 lulus (audit `zz-release-audit`: 21 task DONE hasil orkestrasi berbukti lengkap, 4 seeding fixture; mutation check `diffx` membuat audit gagal) | Median token ≥ 50% dan ≥ 80% tanpa intervensi BELUM TERUKUR (benchmark butuh API key provider); blocker keamanan belum disepakati |
+| 2026-10-07 | M5-012 | Penyimpangan dari Allowed Paths yang dibenarkan: dokumentasi gate diperbaiki (`docker compose config` butuh `PRIMARY_API_KEY`; `cargo test` butuh `--no-fail-fast` dan superuser `postgres` untuk drill backup, sebelumnya hanya binary pertama yang gagal terlihat dan drill dilewati/gagal tanpa petunjuk). Status M4 di tabel ringkas yang basi (`[ ]`) dikoreksi menjadi `[x]` sesuai Exit Gate M4 | Human | Jalankan benchmark nyata dengan provider/API key; putuskan blocker keamanan; setelah itu tandai M5-012 dan rilis |

@@ -28,8 +28,21 @@ cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 (cd web && npm ci && npm run check && npm run build)
-docker compose config --quiet
+PRIMARY_API_KEY=dummy docker compose config --quiet   # Compose mewajibkan variable ini terisi
 ```
+
+Test yang memakai database (`#[sqlx::test]`) membuat database sementara lewat `DATABASE_URL`, jadi rolenya harus superuser.
+Drill backup/restore (`tests/backup`) mencari container yang menerbitkan port **55432** dan memakai superuser **`postgres`**;
+tanpa container itu test-nya dilewati (bukan gagal). Penyiapan lengkap untuk gate rilis:
+
+```sh
+docker run -d --name noctis-gate-postgres -p 127.0.0.1:55432:5432 \
+  -e POSTGRES_DB=ai_team -e POSTGRES_USER=ai_team -e POSTGRES_PASSWORD=ai_team_dev postgres:16-alpine
+docker exec noctis-gate-postgres psql -U ai_team -d ai_team -c 'CREATE ROLE postgres SUPERUSER LOGIN'
+DATABASE_URL=postgres://ai_team:ai_team_dev@127.0.0.1:55432/ai_team cargo test --no-fail-fast -- --test-threads=1
+```
+`--no-fail-fast` penting: tanpa itu `cargo test` berhenti di binary pertama yang gagal dan binary sesudahnya tidak berjalan.
+Hapus container itu sebelum menjalankan E2E (port 55432 dipakai juga oleh E2E).
 
 Test integrasi PostgreSQL, bila diminta task:
 

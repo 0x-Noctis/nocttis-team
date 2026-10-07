@@ -57,7 +57,7 @@ aplikasi ke sana setelah `health/ready` hijau.
 `cargo test --test backup -- --test-threads=1` menjalankan seluruh siklus pada fixture run dengan skema dari migration asli:
 backup → restore ke database baru → jumlah baris sama → aplikasi menilai migration valid → artifact terbaca lewat
 `ArtifactStore`; ditambah skenario secret, artifact korup, arsip diubah, symlink/path traversal, dan tujuan tidak kosong.
-Test membutuhkan container Postgres yang menerbitkan port 55432 (dilewati bila tidak ada). Lakukan drill nyata terhadap salinan
+Test membutuhkan container Postgres yang menerbitkan port 55432 **dengan superuser bernama `postgres`** (dilewati bila container tidak ada; penyiapannya di `docs/development.md`). Lakukan drill nyata terhadap salinan
 data Anda secara berkala; backup yang tidak pernah di-restore belum terbukti.
 
 ## Batas yang diketahui (jujur)

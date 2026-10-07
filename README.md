@@ -63,8 +63,12 @@ cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test -- --test-threads=1   # test integrasi memakai PostgreSQL pada port 55432 bila tersedia
 (cd web && npm ci && npm run check && npm run build)
-docker compose config --quiet
+PRIMARY_API_KEY=dummy docker compose config --quiet   # Compose mewajibkan variable ini terisi; nilai dummy cukup untuk validasi
 ```
+
+Test yang memakai database (`#[sqlx::test]`) membaca `DATABASE_URL` dan butuh role superuser. Drill backup/restore juga
+membutuhkan container PostgreSQL yang menerbitkan port 55432 **dengan superuser bernama `postgres`**; langkah lengkapnya di
+[docs/development.md](docs/development.md). Tanpa container itu test backup dilewati.
 
 E2E browser (`cd web && npm run e2e`) dan benchmark dijelaskan di [docs/test-matrix.md](docs/test-matrix.md) dan
 [docs/benchmark.md](docs/benchmark.md).

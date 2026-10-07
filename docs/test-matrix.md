@@ -13,6 +13,13 @@ Prasyarat: Docker, port 7410/7411/7412/4173/4174/55432 bebas (hapus container va
 (verifikasi task), dan `node:22-bookworm-slim` (hanya skenario Lead→eksekusi; dilewati bila tidak ada lokal — test tidak
 menarik image lewat jaringan).
 
+## Audit bukti task DONE (M5-012)
+
+`tests/e2e/zz-release-audit.spec.cjs` berjalan terakhir pada database yang sudah diisi seluruh spec dan memastikan setiap task `DONE` yang diproses sistem
+(punya event) memiliki: artifact `diff` (patch), event `status_transition` dan `verification`, usage `worker`, dan usage `reviewer` (review).
+Task `DONE` tanpa event adalah seeding fixture UI dan hanya dilaporkan jumlahnya. Logika evaluasi diuji dengan baris sintetis
+(satu test per jenis bukti yang hilang).
+
 ## Determinisme
 - Provider palsu (`tests/e2e/fake-provider.cjs`) menjawab per task berdasarkan penanda `[ptask:<id>;kunci=nilai]` di
   objective, bukan urutan request, sehingga beberapa worker bersamaan tidak saling mengganggu. Perilaku: patch, review
