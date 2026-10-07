@@ -21,6 +21,8 @@ pub struct Config {
 pub struct Server {
     pub bind: SocketAddr,
     pub data_dir: PathBuf,
+    /// Origin web yang boleh memanggil API dari browser; eksplisit, tanpa wildcard.
+    pub cors_allowed_origins: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -108,6 +110,9 @@ impl Config {
     }
 
     fn validate(&self) -> anyhow::Result<()> {
+        ai_team::security::cors::parse_origins(&self.server.cors_allowed_origins).map_err(
+            |reason| anyhow::anyhow!("server.cors_allowed_origins tidak valid: {reason}"),
+        )?;
         if self.database.max_connections == 0 {
             bail!("database.max_connections must be greater than zero");
         }
@@ -182,6 +187,7 @@ impl Default for Server {
         Self {
             bind: "127.0.0.1:7410".parse().unwrap(),
             data_dir: "./data".into(),
+            cors_allowed_origins: vec!["http://127.0.0.1:5173".to_owned()],
         }
     }
 }

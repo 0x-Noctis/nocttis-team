@@ -3,7 +3,7 @@ mod config;
 use std::{sync::Arc, time::Duration};
 
 use anyhow::Context;
-use axum::{Router, http::HeaderValue, middleware};
+use axum::{Router, middleware};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::sync::{mpsc, watch};
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
@@ -102,6 +102,8 @@ async fn main() -> anyhow::Result<()> {
         stopped,
     ));
 
+    let cors_origins = ai_team::security::cors::parse_origins(&config.server.cors_allowed_origins)
+        .map_err(|reason| anyhow::anyhow!("server.cors_allowed_origins tidak valid: {reason}"))?;
     let app = Router::new()
         .merge(api::health::router(
             database.clone(),
@@ -130,9 +132,8 @@ async fn main() -> anyhow::Result<()> {
                 .make_span_with(ai_team::observability::request_span)
                 .on_response(DefaultOnResponse::new().level(tracing::Level::INFO)),
         )
-        .layer(api::cors_layer(
-            "http://127.0.0.1:5173".parse::<HeaderValue>()?,
-        ))
+        .layer(api::cors_layer_for(cors_origins))
+        .layer(ai_team::security::limits::body_limit())
         .layer(middleware::from_fn(request_id));
 
     let address = config.server.bind;

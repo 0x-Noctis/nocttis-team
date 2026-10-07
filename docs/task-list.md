@@ -676,7 +676,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
 
 ## Gelombang M5-A — Security, Retention, dan Observability
 
-- [ ] **M5-001 — Security hardening** · Lane B/D
+- [x] **M5-001 — Security hardening** · Lane B/D
   - Depends On: M4 exit gate
   - Parallel With: M5-002, M5-003, M5-004
   - Allowed Paths: `src/security/**`, `src/runner/**`, `tests/security.rs`, `docs/security.md`
@@ -863,6 +863,7 @@ Catat keputusan yang memengaruhi lebih dari satu task. Jangan menyimpan diskusi 
 | 2026-10-07 | M5-003 | Penyimpangan dari Allowed Paths yang dibenarkan: `src/api/mod.rs` dan `src/lib.rs` (daftar modul). Handler `/api/v1/health` dipindah dari `main.rs` ke `src/api/health.rs` dan tetap kompatibel. Metrik ditulis sebagai teks Prometheus tanpa dependensi baru; log belum JSON (butuh fitur `json` di Cargo.toml) | Human | Log JSON stdout (aturan umum #2) perlu task/izin mengubah Cargo.toml
 | 2026-10-07 | M5-002 | Penyimpangan dari Allowed Paths yang dibenarkan: migration `0015_retention_actions.sql` (jejak audit; tabel `events` mewajibkan `project_run_id` sedangkan artifact yatim tidak punya run), `src/lib.rs`, `src/main.rs` (loop retensi tiap jam), dan test `tests/artifact_store.rs`. Artifact yang direferensikan (tabel, tool reservation, payload event) tidak pernah dihapus; branch integrasi run dipertahankan, hanya worktree-nya yang dibersihkan. "Context debug" tidak ada di kode sehingga N/A | Human | Kebijakan kedaluwarsa untuk artifact yang direferensikan butuh keputusan terpisah (gerbang M5-012 mewajibkan bukti task DONE)
 | 2026-10-07 | LOG | Log aplikasi kini JSON ke stdout dengan `request_id` di setiap log request (span `http`); fitur `json` ditambahkan ke `tracing-subscriber` (+`tracing-serde`, izin eksplisit pemilik). `X-Request-Id` klien diterima bila UUID kanonis, selain itu diganti. Query/header/body tidak pernah dicatat | Human | `trace_id` tidak ada (monolith tanpa OpenTelemetry)
+| 2026-10-07 | M5-001 | Penyimpangan dari Allowed Paths yang dibenarkan: redaksi dipasang di `src/model/openai/{chat,stream,tools}.rs` (satu choke point prompt ke provider), `src/api/mod.rs`, `src/config.rs`, `src/main.rs`, `src/lib.rs` (`extern crate self as ai_team` karena test meng-include sumber klien), `config/example.toml`, dan `tests/process_runner.rs`. Kunci baru `server.cors_allowed_origins` (default `http://127.0.0.1:5173`; wildcard ditolak). Redaksi mengurangi, bukan menjamin; tidak ada autentikasi API (dinyatakan di `docs/security.md`) | Human | Autentikasi/otorisasi API, rate limiting per pengguna, `cargo audit`/`npm audit` otomatis
 
 # 10. Progress Log
 
@@ -912,3 +913,4 @@ Tambahkan satu baris saat task selesai atau diblokir.
 | 2026-10-07 | M5-003 | Health, readiness, dan metrik operasional terintegrasi | `cargo test --test health -- --test-threads=1` (5 passed); `cargo fmt --check`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo test -- --test-threads=1`; `npm run e2e` (13 passed); mutation check readiness dan liveness | Readiness hanya bergantung pada DB + migration; worker/provider `degraded`; label metrik dari himpunan tetap |
 | 2026-10-07 | M5-002 | Retensi artifact yatim dan worktree cabang integrasi terintegrasi | `cargo test --test retention -- --test-threads=1` (5 passed); `cargo test --test artifact_store`; `cargo fmt --check`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo test -- --test-threads=1`; `npm run e2e` (13 passed); mutation check referensi/umur/branch | Dry-run dan audit `retention_actions`; kegagalan hapus aman diulang |
 | 2026-10-07 | LOG | Log JSON terstruktur dan korelasi `request_id` terintegrasi | `cargo test --test logging` (2 passed); `cargo fmt --check`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo test -- --test-threads=1`; `npm run e2e` (13 passed); mutation check span/header | Aturan umum #2 terpenuhi untuk log aplikasi |
+| 2026-10-07 | M5-001 | Security hardening terintegrasi | `cargo test --test security` (8 passed); `cargo test --test process_runner command_output_is_redacted`; `cargo fmt --check`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo test -- --test-threads=1`; `npm run e2e` (13 passed); mutation check klien/PEM/batas body/CORS/output proses | Threat checklist manual ada di `docs/security.md` |

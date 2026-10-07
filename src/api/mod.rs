@@ -15,8 +15,13 @@ use tower_http::cors::CorsLayer;
 pub use error::{AppError, RequestId, request_id};
 
 pub fn cors_layer(origin: HeaderValue) -> CorsLayer {
+    cors_layer_for([origin])
+}
+
+/// CORS untuk daftar origin eksplisit (lihat `security::cors::parse_origins`); tidak pernah wildcard.
+pub fn cors_layer_for(origins: impl IntoIterator<Item = HeaderValue>) -> CorsLayer {
     CorsLayer::new()
-        .allow_origin(origin)
+        .allow_origin(origins.into_iter().collect::<Vec<_>>())
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
         .allow_headers([
             CONTENT_TYPE,

@@ -45,7 +45,12 @@ impl OpenAiToolsClient {
         Ok(Self {
             http,
             endpoint,
-            api_key: api_key.into(),
+            api_key: {
+                let api_key = api_key.into();
+                // Kunci provider selalu diredaksi bila muncul di teks apa pun (prompt, keluaran, log).
+                ai_team::security::redact::register_secret(&api_key);
+                api_key
+            },
             model: model.into(),
         })
     }
@@ -53,13 +58,22 @@ impl OpenAiToolsClient {
     pub async fn complete(&self, request: &ModelRequest) -> Result<ModelResponse, ModelError> {
         let started = Instant::now();
         let tools: Vec<_> = request.tools.iter().map(ProviderTool::from).collect();
+        // Redaksi rahasia tepat sebelum keluar ke provider (satu choke point untuk Lead, worker, dan reviewer).
+        let messages: Vec<Message> = request
+            .messages
+            .iter()
+            .map(|message| Message {
+                content: ai_team::security::redact::redact(&message.content).into_owned(),
+                ..message.clone()
+            })
+            .collect();
         let response = self
             .http
             .post(self.endpoint.clone())
             .bearer_auth(&self.api_key)
             .json(&ProviderRequest {
                 model: &self.model,
-                messages: &request.messages,
+                messages: &messages,
                 tools: &tools,
                 max_tokens: request.limits.max_output_tokens,
             })

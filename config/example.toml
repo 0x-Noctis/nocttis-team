@@ -1,6 +1,8 @@
 [server]
 bind = "127.0.0.1:7410"
 data_dir = "./data"
+# Origin web yang boleh memanggil API dari browser (eksplisit, tanpa wildcard, maksimal 8).
+cors_allowed_origins = ["http://127.0.0.1:5173"]
 
 [database]
 max_connections = 10

@@ -423,3 +423,31 @@ fn remove_runner_containers() {
             .status();
     }
 }
+
+#[test]
+fn command_output_is_redacted_before_it_leaves_the_runner() {
+    let Some(_docker) = docker_test() else {
+        return;
+    };
+    let worktree = TestDirectory::new("redaction");
+    let secret = command(
+        "secret",
+        "printf",
+        &["API_KEY=sk-abcdefghijklmnopqrstuvwxyz012345 visible"],
+    );
+    let runner = runner(
+        &worktree,
+        vec![secret.clone()],
+        Vec::new(),
+        Duration::from_secs(5),
+        4_000,
+    );
+    let result = runner.run(&request(secret)).unwrap();
+    let stdout = String::from_utf8(result.stdout).unwrap();
+    assert_eq!(result.audit.exit_code, Some(0));
+    assert!(!stdout.contains("sk-abcdefghijkl"), "{stdout}");
+    assert!(
+        stdout.contains("visible") && stdout.contains("[REDACTED]"),
+        "{stdout}"
+    );
+}

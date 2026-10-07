@@ -209,6 +209,9 @@ impl ProcessRunner {
         let (stderr, stderr_truncated) = stderr_reader
             .join()
             .map_err(|_| ProcessError::OutputCaptureFailed)??;
+        // Keluaran perintah disimpan sebagai artifact dan dikutip reviewer; redaksi sebelum keluar dari runner.
+        let stdout = crate::security::redact::redact_bytes(&stdout).into_owned();
+        let stderr = crate::security::redact::redact_bytes(&stderr).into_owned();
         let exit_code = if timed_out {
             None
         } else {
