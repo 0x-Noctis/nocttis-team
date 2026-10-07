@@ -692,7 +692,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: active/referenced artifact tidak terhapus; failure aman untuk retry; DB/file consistency dipertahankan.
   - Verify: time-controlled cleanup tests.
 
-- [ ] **M5-003 — Metrics dan operational health** · Lane A
+- [x] **M5-003 — Metrics dan operational health** · Lane A
   - Depends On: M4 exit gate
   - Parallel With: M5-001, M5-002, M5-004
   - Allowed Paths: `src/observability.rs`, `src/api/health.rs`, `src/main.rs`, `tests/health.rs`
@@ -860,6 +860,7 @@ Catat keputusan yang memengaruhi lebih dari satu task. Jangan menyimpan diskusi 
 | 2026-10-06 | M4-006B | Integrator dipakai pipeline: patch task ditumpuk di cabang integrasi per run (`noctis-integration-<run>`), pemeriksaan integrasi = verifikasi task diulang di cabang itu, konflik berakhir CONFLICT lalu NEEDS_HUMAN dengan artifact `conflict_report`, task dimulai dari head cabang integrasi, recovery operasi cabang run (commit `integrate <task>` ada = DONE, selain itu NEEDS_HUMAN). `Verifier::with_artifact_scope` membedakan artifact pemeriksaan integrasi | Human | Laporan konflik belum tampil di UI |
 | 2026-10-06 | M4-010 | E2E paralel menemukan bug: retry setelah `changes_requested` selalu gagal `orchestrator.git` karena worktree attempt lama menempati path task. Diperbaiki di `src/orchestrator.rs` (`release_previous_worktree`, di luar Allowed Paths task) | Human | Skenario retry E2E menjadi regression test |
 | 2026-10-06 | M4 | Exit Gate M4 terpenuhi: scheduler paralel dan Integrator terhubung ke jalur produksi (M4-005B, M4-006B) dan diuji E2E 2–4 worker (M4-010) | Human | Lanjut M5 |
+| 2026-10-07 | M5-003 | Penyimpangan dari Allowed Paths yang dibenarkan: `src/api/mod.rs` dan `src/lib.rs` (daftar modul). Handler `/api/v1/health` dipindah dari `main.rs` ke `src/api/health.rs` dan tetap kompatibel. Metrik ditulis sebagai teks Prometheus tanpa dependensi baru; log belum JSON (butuh fitur `json` di Cargo.toml) | Human | Log JSON stdout (aturan umum #2) perlu task/izin mengubah Cargo.toml
 
 # 10. Progress Log
 
@@ -906,3 +907,4 @@ Tambahkan satu baris saat task selesai atau diblokir.
 | 2026-10-06 | M4-005B | Adaptor `SlotRunner` produksi terintegrasi (`f443e4b`) | `cargo test --test single_worker_flow -- --test-threads=1` (8 passed); suite penuh; clippy; `npm run e2e` (7 passed) | `ParallelScheduler` kini menjalankan pipeline asli di `main.rs`; berhenti kooperatif via `SlotControl` |
 | 2026-10-06 | M4-006B | Integrator tersambung ke pipeline produksi (`89865ee`) | `cargo test --test single_worker_flow --test scheduler_sequential -- --test-threads=1`; suite penuh; clippy; `npm run e2e` (7 passed); mutation check recovery/discard/rebase | Cabang integrasi per run, konflik → NEEDS_HUMAN + `conflict_report`; task mulai dari head cabang integrasi |
 | 2026-10-07 | M4-010, Exit Gate M4 | E2E paralel 2–4 worker lulus; Exit Gate M4 terpenuhi | `npm run e2e` (13 passed, 3× berturut-turut tanpa flaky); `cargo fmt --check`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo test -- --test-threads=1` (43 binary lulus); mutation check budget stop | Menemukan dan memperbaiki bug retry (worktree attempt lama); skenario: independen 2 dan 4 worker, overlap ditahan, retry, regresi integrasi, budget stop |
+| 2026-10-07 | M5-003 | Health, readiness, dan metrik operasional terintegrasi | `cargo test --test health -- --test-threads=1` (5 passed); `cargo fmt --check`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo test -- --test-threads=1`; `npm run e2e` (13 passed); mutation check readiness dan liveness | Readiness hanya bergantung pada DB + migration; worker/provider `degraded`; label metrik dari himpunan tetap |

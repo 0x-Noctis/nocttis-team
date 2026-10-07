@@ -3,6 +3,7 @@ pub mod api;
 pub mod context;
 pub mod domain;
 pub mod model;
+pub mod observability;
 #[path = "model/openai/mod.rs"]
 pub mod openai;
 pub mod orchestrator;

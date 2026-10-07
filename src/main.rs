@@ -3,8 +3,7 @@ mod config;
 use std::{sync::Arc, time::Duration};
 
 use anyhow::Context;
-use axum::{Json, Router, extract::Extension, http::HeaderValue, middleware, routing::get};
-use serde::Serialize;
+use axum::{Router, extract::Extension, http::HeaderValue, middleware};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::sync::{mpsc, watch};
 use tower_http::trace::TraceLayer;
@@ -12,19 +11,13 @@ use tracing::info;
 
 use crate::config::Config;
 use ai_team::api::tasks::StartState;
-use ai_team::api::{self, AppError, RequestId, request_id};
+use ai_team::api::{self, request_id};
 use ai_team::orchestrator::scheduler::parallel::{ParallelConfig, ParallelScheduler};
 use ai_team::orchestrator::{
     Orchestrator, OrchestratorConfig, OrchestratorRunner, repository_head,
 };
 use ai_team::store::artifact::ArtifactStore;
 use ai_team::store::{provider::ProviderRepository, task::TaskRepository};
-
-#[derive(Serialize)]
-struct Health {
-    status: &'static str,
-    database: &'static str,
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -107,7 +100,10 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     let app = Router::new()
-        .route("/api/v1/health", get(health))
+        .merge(api::health::router(
+            database.clone(),
+            i64::try_from(config.scheduler.stale_after_seconds).unwrap_or(i64::MAX),
+        ))
         .merge(api::providers::router(database.clone()))
         .merge(api::projects::router_with_scheduler(
             database.clone(),
@@ -186,20 +182,6 @@ async fn run_parallel(
     let _ = stopped.wait_for(|stop| *stop).await;
     scheduler.shutdown();
     let _ = run.await;
-}
-
-async fn health(
-    Extension(database): Extension<PgPool>,
-    Extension(request_id): Extension<RequestId>,
-) -> Result<Json<Health>, AppError> {
-    sqlx::query("SELECT 1")
-        .execute(&database)
-        .await
-        .map_err(|error| AppError::internal(request_id, error))?;
-    Ok(Json(Health {
-        status: "ok",
-        database: "ok",
-    }))
 }
 
 async fn shutdown_signal() {

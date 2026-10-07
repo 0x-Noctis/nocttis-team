@@ -2,6 +2,7 @@ pub mod artifacts;
 pub mod contracts;
 pub mod error;
 pub mod events;
+pub mod health;
 pub mod lead;
 pub mod projects;
 pub mod providers;
