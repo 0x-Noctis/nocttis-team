@@ -8,5 +8,6 @@ pub mod observability;
 pub mod openai;
 pub mod orchestrator;
 pub mod recovery;
+pub mod retention;
 pub mod runner;
 pub mod store;

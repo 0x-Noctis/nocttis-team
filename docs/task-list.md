@@ -684,7 +684,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: test traversal, symlink, prompt/tool secret leakage, command injection, oversized payload, network denial.
   - Verify: security test suite dan manual threat checklist.
 
-- [ ] **M5-002 — Retention dan cleanup** · Lane A
+- [x] **M5-002 — Retention dan cleanup** · Lane A
   - Depends On: M4 exit gate
   - Parallel With: M5-001, M5-003, M5-004
   - Allowed Paths: `src/retention.rs`, `src/store/artifact.rs`, `src/runner/git.rs`, `tests/retention.rs`
@@ -861,6 +861,7 @@ Catat keputusan yang memengaruhi lebih dari satu task. Jangan menyimpan diskusi 
 | 2026-10-06 | M4-010 | E2E paralel menemukan bug: retry setelah `changes_requested` selalu gagal `orchestrator.git` karena worktree attempt lama menempati path task. Diperbaiki di `src/orchestrator.rs` (`release_previous_worktree`, di luar Allowed Paths task) | Human | Skenario retry E2E menjadi regression test |
 | 2026-10-06 | M4 | Exit Gate M4 terpenuhi: scheduler paralel dan Integrator terhubung ke jalur produksi (M4-005B, M4-006B) dan diuji E2E 2–4 worker (M4-010) | Human | Lanjut M5 |
 | 2026-10-07 | M5-003 | Penyimpangan dari Allowed Paths yang dibenarkan: `src/api/mod.rs` dan `src/lib.rs` (daftar modul). Handler `/api/v1/health` dipindah dari `main.rs` ke `src/api/health.rs` dan tetap kompatibel. Metrik ditulis sebagai teks Prometheus tanpa dependensi baru; log belum JSON (butuh fitur `json` di Cargo.toml) | Human | Log JSON stdout (aturan umum #2) perlu task/izin mengubah Cargo.toml
+| 2026-10-07 | M5-002 | Penyimpangan dari Allowed Paths yang dibenarkan: migration `0015_retention_actions.sql` (jejak audit; tabel `events` mewajibkan `project_run_id` sedangkan artifact yatim tidak punya run), `src/lib.rs`, `src/main.rs` (loop retensi tiap jam), dan test `tests/artifact_store.rs`. Artifact yang direferensikan (tabel, tool reservation, payload event) tidak pernah dihapus; branch integrasi run dipertahankan, hanya worktree-nya yang dibersihkan. "Context debug" tidak ada di kode sehingga N/A | Human | Kebijakan kedaluwarsa untuk artifact yang direferensikan butuh keputusan terpisah (gerbang M5-012 mewajibkan bukti task DONE)
 
 # 10. Progress Log
 
@@ -908,3 +909,4 @@ Tambahkan satu baris saat task selesai atau diblokir.
 | 2026-10-06 | M4-006B | Integrator tersambung ke pipeline produksi (`89865ee`) | `cargo test --test single_worker_flow --test scheduler_sequential -- --test-threads=1`; suite penuh; clippy; `npm run e2e` (7 passed); mutation check recovery/discard/rebase | Cabang integrasi per run, konflik → NEEDS_HUMAN + `conflict_report`; task mulai dari head cabang integrasi |
 | 2026-10-07 | M4-010, Exit Gate M4 | E2E paralel 2–4 worker lulus; Exit Gate M4 terpenuhi | `npm run e2e` (13 passed, 3× berturut-turut tanpa flaky); `cargo fmt --check`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo test -- --test-threads=1` (43 binary lulus); mutation check budget stop | Menemukan dan memperbaiki bug retry (worktree attempt lama); skenario: independen 2 dan 4 worker, overlap ditahan, retry, regresi integrasi, budget stop |
 | 2026-10-07 | M5-003 | Health, readiness, dan metrik operasional terintegrasi | `cargo test --test health -- --test-threads=1` (5 passed); `cargo fmt --check`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo test -- --test-threads=1`; `npm run e2e` (13 passed); mutation check readiness dan liveness | Readiness hanya bergantung pada DB + migration; worker/provider `degraded`; label metrik dari himpunan tetap |
+| 2026-10-07 | M5-002 | Retensi artifact yatim dan worktree cabang integrasi terintegrasi | `cargo test --test retention -- --test-threads=1` (5 passed); `cargo test --test artifact_store`; `cargo fmt --check`; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo test -- --test-threads=1`; `npm run e2e` (13 passed); mutation check referensi/umur/branch | Dry-run dan audit `retention_actions`; kegagalan hapus aman diulang |

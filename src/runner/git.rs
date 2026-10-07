@@ -399,6 +399,36 @@ impl GitWorktreeManager {
         Ok(IntegrationResult::Integrated)
     }
 
+    /// Hapus direktori worktree saja; branch dipertahankan. Dipakai untuk cabang integrasi run yang hasilnya
+    /// masih berguna sebagai bahan merge manual setelah worktree-nya tidak lagi dibutuhkan.
+    pub fn remove_worktree_keep_branch(&self, worktree: &Worktree) -> Result<(), GitError> {
+        validate_component(&worktree.branch, "branch")?;
+        if worktree.path.parent() != Some(self.worktree_root.as_path()) {
+            return Err(GitError::InvalidInput("worktree escaped configured root"));
+        }
+        if worktree.path.exists() {
+            run(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(&self.repository_root)
+                    .args(["worktree", "remove", "--force"])
+                    .arg(&worktree.path),
+                None,
+                GitOperation::CleanupWorktree,
+            )?;
+        } else {
+            run(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(&self.repository_root)
+                    .args(["worktree", "prune"]),
+                None,
+                GitOperation::PruneWorktrees,
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn cleanup(&self, worktree: &Worktree) -> Result<(), GitError> {
         validate_component(&worktree.branch, "branch")?;
         if worktree.path.parent() != Some(self.worktree_root.as_path()) {

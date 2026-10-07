@@ -3,7 +3,7 @@ mod config;
 use std::{sync::Arc, time::Duration};
 
 use anyhow::Context;
-use axum::{Router, extract::Extension, http::HeaderValue, middleware};
+use axum::{Router, http::HeaderValue, middleware};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::sync::{mpsc, watch};
 use tower_http::trace::TraceLayer;
@@ -16,6 +16,7 @@ use ai_team::orchestrator::scheduler::parallel::{ParallelConfig, ParallelSchedul
 use ai_team::orchestrator::{
     Orchestrator, OrchestratorConfig, OrchestratorRunner, repository_head,
 };
+use ai_team::retention::{self, RetentionConfig};
 use ai_team::store::artifact::ArtifactStore;
 use ai_team::store::{provider::ProviderRepository, task::TaskRepository};
 
@@ -38,6 +39,10 @@ async fn main() -> anyhow::Result<()> {
         config.artifacts.max_tool_output_bytes as u64,
     )?;
     let orchestrator_artifacts = ArtifactStore::new(
+        &config.artifacts.root,
+        config.artifacts.max_tool_output_bytes as u64,
+    )?;
+    let retention_artifacts = ArtifactStore::new(
         &config.artifacts.root,
         config.artifacts.max_tool_output_bytes as u64,
     )?;
@@ -122,7 +127,6 @@ async fn main() -> anyhow::Result<()> {
             }),
         ))
         .fallback(api::error::not_found)
-        .layer(Extension(database))
         .layer(TraceLayer::new_for_http())
         .layer(api::cors_layer(
             "http://127.0.0.1:5173".parse::<HeaderValue>()?,
@@ -132,6 +136,14 @@ async fn main() -> anyhow::Result<()> {
     let address = config.server.bind;
     let listener = tokio::net::TcpListener::bind(address).await?;
     info!(%address, "server listening");
+    tokio::spawn(retention_loop(
+        database.clone(),
+        retention_artifacts,
+        RetentionConfig {
+            worktree_root: config.git.worktree_root.clone(),
+            retention: Duration::from_secs(config.git.retention_hours.saturating_mul(3_600)),
+        },
+    ));
     // `run` melayani attempt yang dimulai manual lewat API dan menyapu retensi worktree.
     tokio::spawn(orchestrator.run(wake_receiver));
     let served = axum::serve(listener, app)
@@ -182,6 +194,31 @@ async fn run_parallel(
     let _ = stopped.wait_for(|stop| *stop).await;
     scheduler.shutdown();
     let _ = run.await;
+}
+
+/// Pembersihan retensi berkala. Putaran pertama ditunda supaya tidak bersaing dengan recovery startup;
+/// kegagalan hanya dicatat dan dicoba lagi pada putaran berikutnya.
+async fn retention_loop(database: PgPool, artifacts: ArtifactStore, config: RetentionConfig) {
+    tokio::time::sleep(Duration::from_secs(300)).await;
+    loop {
+        match retention::run(
+            &database,
+            &artifacts,
+            &config,
+            false,
+            std::time::SystemTime::now(),
+        )
+        .await
+        {
+            Ok(report) => info!(
+                actions = report.actions.len(),
+                missing_files = report.missing_files.len(),
+                "retensi selesai"
+            ),
+            Err(error) => tracing::error!(%error, "retensi gagal"),
+        }
+        tokio::time::sleep(Duration::from_secs(3_600)).await;
+    }
 }
 
 async fn shutdown_signal() {

@@ -153,6 +153,42 @@ impl ArtifactStore {
         Ok(metadata)
     }
 
+    /// True bila salah satu file artifact (isi atau metadata) masih ada di disk.
+    pub fn contains(&self, artifact_id: &str) -> bool {
+        validate_component(artifact_id).is_ok()
+            && (fs::symlink_metadata(self.artifact_path(artifact_id)).is_ok()
+                || fs::symlink_metadata(self.metadata_path(artifact_id)).is_ok())
+    }
+
+    /// Daftar artifact yang ada di disk beserta waktu ubah paling awal dari file-nya, termasuk yang hanya punya
+    /// salah satu file (artifact atau metadata). File sementara/lock (berawalan titik) dan nama tak valid dilewati.
+    pub fn list(&self) -> Result<Vec<(String, std::time::SystemTime)>, ArtifactError> {
+        self.ensure_root()?;
+        let mut found: std::collections::BTreeMap<String, std::time::SystemTime> =
+            std::collections::BTreeMap::new();
+        for entry in fs::read_dir(&self.root).map_err(|_| ArtifactError::Io("list artifacts"))? {
+            let entry = entry.map_err(|_| ArtifactError::Io("list artifacts"))?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(id) = name
+                .strip_suffix(".metadata.json")
+                .or_else(|| name.strip_suffix(".artifact"))
+            else {
+                continue;
+            };
+            if name.starts_with('.') || validate_component(id).is_err() {
+                continue;
+            }
+            let Ok(modified) = entry.metadata().and_then(|metadata| metadata.modified()) else {
+                continue;
+            };
+            found
+                .entry(id.to_owned())
+                .and_modify(|current| *current = (*current).min(modified))
+                .or_insert(modified);
+        }
+        Ok(found.into_iter().collect())
+    }
+
     pub fn read(&self, artifact_id: &str) -> Result<Vec<u8>, ArtifactError> {
         self.read_bounded(artifact_id, self.maximum_size)
     }

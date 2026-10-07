@@ -211,3 +211,31 @@ fn errors_do_not_expose_host_paths() {
 
     assert!(!error.contains(directory.0.to_string_lossy().as_ref()));
 }
+
+#[test]
+fn list_and_contains_see_partial_artifacts_and_skip_temporary_files() {
+    let directory = TestDirectory::new();
+    let store = ArtifactStore::new(&directory.0, 1024).unwrap();
+    store
+        .write("full-1", "a.txt", "text/plain", b"x", |_| Ok::<_, ()>(()))
+        .unwrap();
+    // Sisa tulis yang terputus: hanya salah satu file, plus file sementara/lock yang harus diabaikan.
+    fs::write(directory.0.join("half-1.artifact"), b"y").unwrap();
+    fs::write(directory.0.join(".full-1.lock"), b"").unwrap();
+    fs::write(directory.0.join(".tmp.artifact.1.tmp"), b"").unwrap();
+    fs::write(directory.0.join("bad name.artifact"), b"").unwrap();
+
+    let ids: Vec<String> = store
+        .list()
+        .unwrap()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(ids, ["full-1", "half-1"]);
+    assert!(store.contains("full-1"));
+    assert!(store.contains("half-1"));
+    assert!(!store.contains("absent"));
+    assert!(!store.contains("../escape"));
+    store.remove("half-1").unwrap();
+    assert!(!store.contains("half-1"));
+}
