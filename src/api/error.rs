@@ -23,6 +23,15 @@ impl RequestId {
     }
 }
 
+impl RequestId {
+    /// Menerima ID dari klien hanya bila berupa UUID kanonis; selain itu dianggap tidak ada. Nilai bebas tidak
+    /// dipakai karena ID ini ditulis ke log dan header respons (mencegah injeksi baris log).
+    pub fn parse(value: &str) -> Option<Self> {
+        let id = Uuid::parse_str(value).ok()?;
+        (id.hyphenated().to_string() == value.to_ascii_lowercase()).then_some(Self(id))
+    }
+}
+
 impl Default for RequestId {
     fn default() -> Self {
         Self::new()
@@ -36,7 +45,13 @@ impl fmt::Display for RequestId {
 }
 
 pub async fn request_id(mut request: Request, next: Next) -> Response {
-    let request_id = RequestId::new();
+    // Korelasi dari sisi klien: pakai X-Request-Id yang valid, kalau tidak buat sendiri.
+    let request_id = request
+        .headers()
+        .get(REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(RequestId::parse)
+        .unwrap_or_default();
     request.extensions_mut().insert(request_id);
     let mut response = next.run(request).await;
     response.headers_mut().insert(

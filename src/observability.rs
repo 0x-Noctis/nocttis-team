@@ -6,6 +6,9 @@
 
 use std::{collections::HashMap, fmt::Write as _, sync::LazyLock, time::Instant};
 
+use axum::{body::Body, http::Request};
+use tracing_subscriber::{EnvFilter, fmt::MakeWriter};
+
 use serde::Serialize;
 use sqlx::{PgPool, Row, migrate::Migrator};
 
@@ -36,6 +39,49 @@ pub const ATTEMPT_STATUSES: [&str; 5] = [
     "completed",
     "failed",
 ];
+
+/// Filter log dari `RUST_LOG`; tanpa itu level `info` (bawaan `EnvFilter` tanpa direktif hanya `error`, sehingga
+/// log operasional seperti "server listening" tidak pernah tampil).
+fn env_filter() -> EnvFilter {
+    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
+}
+
+/// Subscriber log terstruktur: satu objek JSON per baris dengan `timestamp`, `level`, `fields.message`, `target`,
+/// dan span aktif (berisi `request_id` untuk log yang terjadi selama request).
+pub fn json_subscriber<W>(writer: W) -> impl tracing::Subscriber + Send + Sync
+where
+    W: for<'a> MakeWriter<'a> + Send + Sync + 'static,
+{
+    tracing_subscriber::fmt()
+        .json()
+        .with_current_span(true)
+        .with_span_list(false)
+        .with_env_filter(env_filter())
+        .with_writer(writer)
+        .finish()
+}
+
+/// Pasang log JSON ke stdout (aturan 12-factor: pengumpulan log adalah tugas infrastruktur, bukan aplikasi).
+pub fn init_logging() {
+    tracing::subscriber::set_global_default(json_subscriber(std::io::stdout))
+        .expect("logging dipasang lebih dari sekali");
+}
+
+/// Span per request untuk `TraceLayer`. Hanya method dan path yang dicatat: query string, header, dan body tidak,
+/// karena dapat memuat token atau data pribadi. `request_id` berasal dari middleware `api::request_id`.
+pub fn request_span(request: &Request<Body>) -> tracing::Span {
+    let request_id = request
+        .extensions()
+        .get::<crate::api::RequestId>()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    tracing::info_span!(
+        "http",
+        request_id = %request_id,
+        method = %request.method(),
+        path = %request.uri().path()
+    )
+}
 
 static STARTED: LazyLock<Instant> = LazyLock::new(Instant::now);
 

@@ -6,7 +6,7 @@ use anyhow::Context;
 use axum::{Router, http::HeaderValue, middleware};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::sync::{mpsc, watch};
-use tower_http::trace::TraceLayer;
+use tower_http::trace::{DefaultOnResponse, TraceLayer};
 use tracing::info;
 
 use crate::config::Config;
@@ -22,9 +22,7 @@ use ai_team::store::{provider::ProviderRepository, task::TaskRepository};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+    ai_team::observability::init_logging();
 
     let (config, secrets) = Config::load()?;
     let database = PgPoolOptions::new()
@@ -127,7 +125,11 @@ async fn main() -> anyhow::Result<()> {
             }),
         ))
         .fallback(api::error::not_found)
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(ai_team::observability::request_span)
+                .on_response(DefaultOnResponse::new().level(tracing::Level::INFO)),
+        )
         .layer(api::cors_layer(
             "http://127.0.0.1:5173".parse::<HeaderValue>()?,
         ))
