@@ -1,0 +1,18 @@
+# Konteks build tidak boleh membawa secret, hasil build lokal, atau data runtime.
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+target
+data
+backups
+web/node_modules
+web/.svelte-kit
+web/build
+web/test-results
+docs
+tests
+scripts
+*.log
+**/.DS_Store

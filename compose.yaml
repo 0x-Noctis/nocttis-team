@@ -15,6 +15,33 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
+  noctis:
+    build: .
+    image: noctis-team:local
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://ai_team:ai_team_dev@postgres:5432/ai_team
+      # Wajib: nilai kunci provider diambil dari environment host/.env, tidak pernah ditulis di berkas ini.
+      PRIMARY_API_KEY: ${PRIMARY_API_KEY:?set PRIMARY_API_KEY (lihat .env.example)}
+      NOCTIS__PROVIDER__BASE_URL: ${PRIMARY_BASE_URL:-https://api.openai.com/v1}
+      NOCTIS__PROVIDER__MODEL: ${PRIMARY_MODEL:-gpt-5-mini}
+      NOCTIS_PROVIDER_HOST_ALLOWLIST: ${NOCTIS_PROVIDER_HOST_ALLOWLIST:-}
+    # Hanya localhost di host. Jangan ubah ke 0.0.0.0 tanpa proxy berautentikasi (API belum punya autentikasi).
+    ports:
+      - "127.0.0.1:7410:7410"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - noctis-data:/data
+
 volumes:
   postgres-data:
+  noctis-data:
 

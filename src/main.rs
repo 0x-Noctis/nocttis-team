@@ -22,6 +22,11 @@ use ai_team::store::{provider::ProviderRepository, task::TaskRepository};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // `ai-team healthcheck`: dipakai HEALTHCHECK container (image tidak membawa curl). Tanpa log dan tanpa DB:
+    // hanya bertanya ke liveness proses yang sudah berjalan, sehingga DB/provider yang lambat tidak membuat container "unhealthy".
+    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
+        return healthcheck().await;
+    }
     ai_team::observability::init_logging();
 
     let (config, secrets) = Config::load()?;
@@ -104,7 +109,7 @@ async fn main() -> anyhow::Result<()> {
 
     let cors_origins = ai_team::security::cors::parse_origins(&config.server.cors_allowed_origins)
         .map_err(|reason| anyhow::anyhow!("server.cors_allowed_origins tidak valid: {reason}"))?;
-    let app = Router::new()
+    let mut app = Router::new()
         .merge(api::health::router(
             database.clone(),
             i64::try_from(config.scheduler.stale_after_seconds).unwrap_or(i64::MAX),
@@ -131,7 +136,12 @@ async fn main() -> anyhow::Result<()> {
                 wake,
             }),
         ))
-        .fallback(api::error::not_found)
+        .fallback(api::error::not_found);
+    // WebApp statis disajikan dari proses yang sama bila `server.web_root` diatur (image produksi).
+    if let Some(root) = &config.server.web_root {
+        app = api::web::attach(app, root);
+    }
+    let app = app
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(ai_team::observability::request_span)
@@ -202,6 +212,25 @@ async fn run_parallel(
     let _ = stopped.wait_for(|stop| *stop).await;
     scheduler.shutdown();
     let _ = run.await;
+}
+
+async fn healthcheck() -> anyhow::Result<()> {
+    let (config, _) = Config::load()?;
+    // Alamat 0.0.0.0 (di dalam container) dicapai lewat loopback.
+    let port = config.server.bind.port();
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()?
+        .get(format!("http://127.0.0.1:{port}/api/v1/health/live"))
+        .send()
+        .await
+        .context("liveness tidak terjangkau")?;
+    anyhow::ensure!(
+        response.status().is_success(),
+        "liveness mengembalikan {}",
+        response.status()
+    );
+    Ok(())
 }
 
 /// Konfigurasi NON-secret untuk halaman Settings. Sengaja tanpa path absolut server dan tanpa nilai environment;

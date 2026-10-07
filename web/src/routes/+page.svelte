@@ -20,7 +20,7 @@
     result = null;
     error = '';
     try {
-      const response = await fetch('http://127.0.0.1:7410/api/v1/providers/primary/probe', {
+      const response = await fetch('/api/v1/providers/primary/probe', {
         method: 'POST'
       });
       const body = await response.json();

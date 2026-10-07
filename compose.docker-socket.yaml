@@ -1,0 +1,25 @@
+# OPT-IN: mengizinkan runner verifikasi menjalankan container lewat daemon Docker host.
+#
+# PERINGATAN KEAMANAN: akses ke /var/run/docker.sock setara dengan root di host. Hanya aktifkan di mesin yang Anda
+# percayai sepenuhnya. Tanpa berkas ini aplikasi tetap berjalan, tetapi task tidak bisa diverifikasi.
+#
+# Runner meneruskan path worktree ke daemon HOST, jadi direktori data dan repository harus ada di host dengan path
+# yang SAMA dengan di dalam container (itu sebabnya dipasang ke path identik di bawah).
+#
+# Pemakaian:
+#   export DOCKER_GID="$(stat -c %g /var/run/docker.sock)"
+#   export NOCTIS_DATA_DIR=/srv/noctis/data   NOCTIS_REPOS_DIR=/srv/noctis/repos
+#   sudo install -d -o 10001 -g 10001 "$NOCTIS_DATA_DIR" "$NOCTIS_REPOS_DIR"
+#   docker compose -f compose.yaml -f compose.docker-socket.yaml up -d --build
+services:
+  noctis:
+    group_add:
+      - "${DOCKER_GID:?set DOCKER_GID dengan: stat -c %g /var/run/docker.sock}"
+    environment:
+      NOCTIS__GIT__WORKTREE_ROOT: ${NOCTIS_DATA_DIR:?set NOCTIS_DATA_DIR}/worktrees
+      NOCTIS__ARTIFACTS__ROOT: ${NOCTIS_DATA_DIR}/artifacts
+      NOCTIS_RUNNER_IMAGE: ${NOCTIS_RUNNER_IMAGE:-rust:1}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${NOCTIS_DATA_DIR}:${NOCTIS_DATA_DIR}
+      - ${NOCTIS_REPOS_DIR:?set NOCTIS_REPOS_DIR}:${NOCTIS_REPOS_DIR}

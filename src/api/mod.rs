@@ -9,6 +9,7 @@ pub mod projects;
 pub mod providers;
 pub mod runs;
 pub mod tasks;
+pub mod web;
 
 use axum::http::{HeaderName, HeaderValue, Method, header::CONTENT_TYPE};
 use tower_http::cors::CorsLayer;
