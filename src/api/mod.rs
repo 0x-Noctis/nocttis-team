@@ -4,6 +4,7 @@ pub mod error;
 pub mod events;
 pub mod health;
 pub mod lead;
+pub mod operations;
 pub mod projects;
 pub mod providers;
 pub mod runs;

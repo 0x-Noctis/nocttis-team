@@ -109,6 +109,11 @@ async fn main() -> anyhow::Result<()> {
             database.clone(),
             i64::try_from(config.scheduler.stale_after_seconds).unwrap_or(i64::MAX),
         ))
+        .merge(api::operations::router(
+            database.clone(),
+            i64::try_from(config.scheduler.stale_after_seconds).unwrap_or(i64::MAX),
+            operations_config(&config),
+        ))
         .merge(api::providers::router(database.clone()))
         .merge(api::projects::router_with_scheduler(
             database.clone(),
@@ -197,6 +202,32 @@ async fn run_parallel(
     let _ = stopped.wait_for(|stop| *stop).await;
     scheduler.shutdown();
     let _ = run.await;
+}
+
+/// Konfigurasi NON-secret untuk halaman Settings. Sengaja tanpa path absolut server dan tanpa nilai environment;
+/// untuk provider hanya nama model dan host (bukan URL penuh).
+fn operations_config(config: &Config) -> serde_json::Value {
+    let host = reqwest::Url::parse(&config.provider.base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned));
+    serde_json::json!({
+        "server": {"bind": config.server.bind.to_string(), "cors_allowed_origins": config.server.cors_allowed_origins},
+        "scheduler": {
+            "max_parallel_agents": config.scheduler.max_parallel_agents,
+            "heartbeat_seconds": config.scheduler.heartbeat_seconds,
+            "stale_after_seconds": config.scheduler.stale_after_seconds,
+        },
+        "budgets": {
+            "default_project_tokens": config.budgets.default_project_tokens,
+            "default_task_input_tokens": config.budgets.default_task_input_tokens,
+            "default_task_output_tokens": config.budgets.default_task_output_tokens,
+            "reserve_percent": config.budgets.reserve_percent,
+        },
+        "retention": {"git_retention_hours": config.git.retention_hours},
+        "artifacts": {"max_tool_output_bytes": config.artifacts.max_tool_output_bytes},
+        "runner": {"network_enabled": config.runner.network_enabled},
+        "provider": {"model": config.provider.model, "host": host},
+    })
 }
 
 /// Pembersihan retensi berkala. Putaran pertama ditunda supaya tidak bersaing dengan recovery startup;

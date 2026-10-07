@@ -47,7 +47,9 @@ const routes = () => [
   ['run detail', `/runs/${run}`],
   ['tasks', '/tasks'],
   ['task detail', `/tasks/${taskId}`],
-  ['approvals', '/approvals']
+  ['approvals', '/approvals'],
+  ['operations', '/operations'],
+  ['settings', '/settings']
 ];
 
 /** Dijalankan di dalam halaman; mengembalikan daftar pelanggaran sebagai string. */

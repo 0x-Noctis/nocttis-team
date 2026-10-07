@@ -10,6 +10,7 @@ import type {
   TaskStatus
 } from './types';
 import type { ApprovalsView } from '$lib/components/approval/types';
+import type { ConfigView, OperationsView } from '$lib/components/metrics/types';
 import type {
   AttemptRecord,
   GaugeValue,
@@ -243,6 +244,11 @@ export interface SchedulerView {
 
 export const schedulerApi = {
   view: (runId: string) => request<SchedulerView>(`/api/v1/runs/${enc(runId)}/scheduler`)
+};
+
+export const operationsApi = {
+  summary: () => request<OperationsView>('/api/v1/operations'),
+  config: () => request<ConfigView>('/api/v1/operations/config')
 };
 
 export const approvalsApi = {

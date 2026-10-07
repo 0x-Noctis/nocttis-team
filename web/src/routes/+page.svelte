@@ -44,6 +44,8 @@
   <a class="providers-link" href="/projects">Projects &amp; runs</a>
   <a class="providers-link" href="/tasks">Tasks</a>
   <a class="providers-link" href="/approvals">Approvals</a>
+  <a class="providers-link" href="/operations">Operations</a>
+  <a class="providers-link" href="/settings">Settings</a>
 
   <section aria-labelledby="provider-title">
     <div>
