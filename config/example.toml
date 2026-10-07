@@ -1,19 +1,35 @@
+# Konfigurasi NON-secret Noctis. Dimuat dari path di NOCTIS_CONFIG; tanpa berkas ini semua nilai memakai bawaan
+# yang sama dengan berkas ini. Setiap nilai bisa ditimpa lewat environment: NOCTIS__<SECTION>__<FIELD>, mis.
+#   NOCTIS__SCHEDULER__MAX_PARALLEL_AGENTS=4     NOCTIS__SERVER__WEB_ROOT=web/build
+# Key yang tidak dikenal membuat server menolak start (typo tidak diabaikan diam-diam).
+# Secret (DATABASE_URL, API key) TIDAK boleh ditulis di sini; lihat .env.example dan docs/operations.md.
+
 [server]
+# Alamat dengar. API belum punya autentikasi: tetap di localhost, atau taruh proxy berautentikasi + TLS di depannya.
 bind = "127.0.0.1:7410"
+# CATATAN JUJUR: belum dibaca oleh kode mana pun. Lokasi data diatur oleh git.worktree_root dan artifacts.root.
 data_dir = "./data"
 # Origin web yang boleh memanggil API dari browser (eksplisit, tanpa wildcard, maksimal 8).
+# Hanya perlu untuk mode dev (Vite di :5173). Pada image produksi UI dan API satu origin, jadi tidak dipakai.
 cors_allowed_origins = ["http://127.0.0.1:5173"]
+# Direktori hasil `npm run build` (berisi index.html) agar server juga melayani WebApp. Kosong/tidak diset = hanya API.
+# web_root = "web/build"
 
 [database]
 max_connections = 10
 acquire_timeout_seconds = 5
 
 [scheduler]
+# Jumlah worker yang boleh berjalan bersamaan (1-4 diuji; nilai lebih besar belum diverifikasi).
 max_parallel_agents = 2
+# Detak jantung worker. Attempt tanpa detak lebih lama dari stale_after_seconds dianggap mati dan dipulihkan
+# (lease file + reservasi budget dilepas). stale_after_seconds harus lebih besar dari heartbeat_seconds.
 heartbeat_seconds = 10
 stale_after_seconds = 60
 
 [budgets]
+# CATATAN JUJUR: keempat nilai ini divalidasi dan ditampilkan di halaman Settings, tetapi BELUM dipakai sebagai batas
+# saat run/task dibuat. Batas yang berlaku adalah token_budget yang Anda isi per run dan limit per task dari plan Lead.
 default_project_tokens = 300000
 default_task_input_tokens = 30000
 default_task_output_tokens = 8000
@@ -21,15 +37,25 @@ reserve_percent = 15
 
 [git]
 worktree_root = "./data/worktrees"
+# Masa simpan sebelum worktree cabang integrasi run yang sudah tuntas dibersihkan. Cabang
+# `noctis-integration-<run>` di repository proyek TIDAK pernah dihapus; hanya direktori worktree-nya.
 retention_hours = 24
 
 [artifacts]
 root = "./data/artifacts"
+# Batas ukuran maksimum satu artifact (diff, keluaran tool) yang boleh ditulis ke disk.
 max_tool_output_bytes = 1048576
 
 [runner]
+# CATATAN JUJUR: hanya ditampilkan di Settings. Perintah verifikasi SELALU berjalan di container tanpa jaringan
+# (`--network none`) apa pun nilai ini; lihat docs/security.md.
 network_enabled = false
 
 [provider]
+# Bukan pendaftaran provider. Provider dan model didaftarkan lewat halaman Providers (atau API) dan API key-nya dibaca
+# dari environment variable yang NAMA-nya Anda isi di sana.
+# - `model` = ID model terdaftar yang dipakai scheduler dan Lead sebagai default. WAJIB sama persis dengan "Model ID"
+#   di halaman Providers; bila beda, task tetap READY dan tidak pernah dijalankan.
+# - `base_url` hanya divalidasi tidak kosong dan hostnya ditampilkan di Settings.
 base_url = "https://api.openai.com/v1"
 model = "gpt-5-mini"
