@@ -43,6 +43,7 @@
   <a class="providers-link" href="/providers">Kelola providers</a>
   <a class="providers-link" href="/projects">Projects &amp; runs</a>
   <a class="providers-link" href="/tasks">Tasks</a>
+  <a class="providers-link" href="/approvals">Approvals</a>
 
   <section aria-labelledby="provider-title">
     <div>
@@ -92,6 +93,6 @@
   .providers-link + .providers-link { margin-left: 24px; }
   .providers-link:focus-visible { outline: 3px solid #fff; outline-offset: 3px; }
   .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; margin-top: 72px; background: #303630; border: 1px solid #303630; }
-  article { min-height: 190px; padding: 26px; background: #0b0d0c; } article span { color: #687068; font-family: ui-monospace, monospace; } h3 { margin: 36px 0 8px; }
+  article { min-height: 190px; padding: 26px; background: #0b0d0c; } article span { color: #929b92; font-family: ui-monospace, monospace; } h3 { margin: 36px 0 8px; }
   @media (max-width: 700px) { main { padding-top: 40px; } section { align-items: stretch; flex-direction: column; } .grid { grid-template-columns: 1fr; } }
 </style>

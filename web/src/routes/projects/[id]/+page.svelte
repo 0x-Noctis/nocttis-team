@@ -59,10 +59,11 @@
 <svelte:head><title>{project ? `${project.name} · Projects` : 'Project · Noctis'}</title></svelte:head>
 <main>
   <nav aria-label="Breadcrumb"><a href="/projects">Projects</a><span aria-hidden="true">/</span><span>{project?.name ?? projectId}</span></nav>
+  <h1>{project?.name ?? 'Project'}</h1>
   {#if error}<section class="error" role="alert"><strong>{error.error.message}</strong><span>Request ID: <code>{error.error.request_id}</code></span><button type="button" onclick={load}>Retry</button></section>{/if}
   {#if loading}<p class="state" aria-live="polite" aria-busy="true">Loading project…</p>
   {:else if project}
-    <header><p class="eyebrow">Project</p><h1>{project.name}</h1><p><code>{project.repository_path}</code></p></header>
+    <header><p class="eyebrow">Project</p><p><code>{project.repository_path}</code></p></header>
 
     <section aria-labelledby="discovery-title"><h2 id="discovery-title">Repository discovery</h2>
       <p>Maps files, languages, test commands, and instruction files without calling a model.</p>

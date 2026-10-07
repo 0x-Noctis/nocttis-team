@@ -1,0 +1,27 @@
+/* Baseline aksesibilitas dan responsif (M5-004). Semua selektor memakai :where() sehingga spesifisitasnya nol:
+   gaya khusus tiap halaman/komponen selalu menang, baseline ini hanya mengisi yang belum ditentukan. */
+
+/* Indikator fokus keyboard untuk semua kontrol. */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: 3px;
+}
+
+/* Target sentuh minimal 24px (WCAG 2.2 AA 2.5.8). Tautan inline di dalam paragraf tidak terpengaruh. */
+:where(a, button, summary, [role='button']) {
+  min-block-size: 24px;
+}
+:where(nav a) {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* Hormati preferensi pengguna untuk mengurangi gerakan. */
+@media (prefers-reduced-motion: reduce) {
+  :where(*, *::before, *::after) {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

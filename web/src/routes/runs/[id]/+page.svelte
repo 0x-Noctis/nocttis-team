@@ -154,6 +154,7 @@
 <svelte:head><title>{run ? `${run.objective} · Runs` : 'Run · Noctis'}</title></svelte:head>
 <main>
   <nav aria-label="Breadcrumb"><a href="/projects">Projects</a><span aria-hidden="true">/</span>{#if run}<a href={`/projects/${encodeURIComponent(run.project_id)}`}>Project</a><span aria-hidden="true">/</span>{/if}<span>Run {runId}</span></nav>
+  <h1>Run details</h1>
   {#if error}<section class="error" role="alert"><strong>{error.error.message}</strong>{#each errorLines as line}<span>{line}</span>{/each}<span>Request ID: <code>{error.error.request_id}</code></span></section>{/if}
   {#if notice}<p class="notice" role="status">{notice}</p>{/if}
   {#if liveError}<p class="warning" role="status">{liveError}</p>{/if}
@@ -210,6 +211,7 @@
 </main>
 
 <style>
+  h1 { margin: 0; font-size: clamp(1.8rem, 5vw, 2.6rem); }
   :global(*) { box-sizing: border-box; } :global(body) { margin: 0; background: #090b09; color: #eef2ec; font-family: system-ui, sans-serif; } main { display: grid; gap: 1.25rem; max-width: 76rem; margin: auto; padding: 2rem; }
   nav { display: flex; flex-wrap: wrap; gap: .6rem; color: #aeb5ad; } a { color: #90e0a8; } h2 { margin-top: 0; }
   .controls { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; padding: 1rem; border: 1px solid #394139; background: #121512; } .live { margin-left: auto; color: #aeb5ad; font-size: .85rem; }
