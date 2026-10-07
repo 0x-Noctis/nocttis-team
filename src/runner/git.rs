@@ -334,6 +334,19 @@ impl GitWorktreeManager {
             Some(patch),
             GitOperation::ApplyPatch,
         )?;
+        // `git apply` hanya menyentuh working tree: file BARU tetap tak terlacak, sehingga `git diff <base>` (dasar patch
+        // integrasi) tidak memuatnya dan task "selesai" tanpa membawa file itu. Daftarkan semua file baru (yang tidak
+        // di-ignore) sebagai intent-to-add; pendekatan ini tidak bergantung pada pengutipan nama file di header patch.
+        run(
+            Command::new("git").arg("-C").arg(&worktree.path).args([
+                "add",
+                "--intent-to-add",
+                "--",
+                ".",
+            ]),
+            None,
+            GitOperation::ApplyPatch,
+        )?;
         Ok(())
     }
 

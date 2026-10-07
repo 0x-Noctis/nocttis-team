@@ -339,6 +339,44 @@ fn rename_copy_malformed_and_symlink_parent_patches_are_denied() {
     }
 }
 
+/// Regresi (M5-009): patch yang membuat file di direktori yang belum ada harus berhasil, tanpa melemahkan penolakan
+/// symlink di jalur yang sudah ada maupun jalur yang keluar root.
+#[test]
+fn patch_may_create_files_in_new_directories_but_never_through_symlinks() {
+    let fixture = Fixture::new(16 * 1024, 16 * 1024, Duration::from_secs(1));
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(
+        &fixture.repository,
+        fixture.worktree.path().join("src/link-parent"),
+    )
+    .unwrap();
+    let tools = fixture.tools(
+        ToolRole::Worker,
+        16 * 1024,
+        16 * 1024,
+        Duration::from_secs(1),
+    );
+    let create = |path: &str| {
+        ToolRequest::ApplyPatch {
+        patch: format!("diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+created\n").into_bytes(),
+    }
+    };
+    // Beberapa tingkat direktori baru di bawah path yang diizinkan.
+    let execution = tools.execute(create("src/new/deeper/created.txt"));
+    assert!(execution.result.is_ok(), "{:?}", execution.result.err());
+    assert_eq!(
+        fs::read_to_string(fixture.worktree.path().join("src/new/deeper/created.txt")).unwrap(),
+        "created\n"
+    );
+    // Melalui symlink yang ada, walau sisa jalur belum ada: tetap ditolak dan tidak menulis apa pun.
+    let denied = tools.execute(create("src/link-parent/fresh/created.txt"));
+    assert_eq!(denied.result.unwrap_err().code, ToolErrorCode::UnsafePath);
+    assert!(!fixture.repository.join("fresh").exists());
+    // Di luar path yang diizinkan: ditolak oleh kebijakan, bukan oleh pemeriksaan induk.
+    let outside = tools.execute(create("docs/new/created.txt"));
+    assert_eq!(outside.result.unwrap_err().code, ToolErrorCode::PatchDenied);
+}
+
 #[test]
 fn timeout_contract_is_explicitly_cooperative() {
     let policy = ToolPolicy::new(

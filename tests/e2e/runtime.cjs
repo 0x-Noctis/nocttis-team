@@ -66,6 +66,77 @@ function cleanup(code) {
   process.exit(code);
 }
 
+const BACKEND_ENV = {
+      ...process.env,
+      DATABASE_URL: 'postgres://ai_team:ai_team_dev@127.0.0.1:55432/ai_team',
+      PRIMARY_API_KEY: process.env.NOCTIS_E2E_API_KEY,
+      NOCTIS_PROVIDER_HOST_ALLOWLIST: '127.0.0.1',
+      NOCTIS__SERVER__BIND: '127.0.0.1:7410',
+      NOCTIS__GIT__WORKTREE_ROOT: worktrees,
+      NOCTIS__ARTIFACTS__ROOT: artifacts,
+      NOCTIS__PROVIDER__BASE_URL: 'http://127.0.0.1:7411/v1',
+      NOCTIS__PROVIDER__MODEL: 'e2e-model',
+      // M4-010: suite paralel butuh 4 slot (skenario 2 dan 4 worker).
+      NOCTIS__SCHEDULER__MAX_PARALLEL_AGENTS: '4',
+      NOCTIS_PROVIDER_HOST_ALLOWLIST: '127.0.0.1',
+      NOCTIS_RUNNER_IMAGE: 'rust:1'
+};
+
+// ---- Backend yang bisa di-restart (skenario "server mati dan run pulih") ----
+let backend = null;
+let restarting = false;
+
+function backendEnv(overrides) {
+  return Object.assign({}, BACKEND_ENV, overrides);
+}
+
+function startBackend(overrides) {
+  backend = spawn(path.join(root, 'target', 'debug', 'ai-team'), [], { cwd: root, stdio: 'inherit', env: backendEnv(overrides) });
+  children.push(backend);
+  backend.on('exit', (code, signal) => {
+    if (!stopping && !restarting && code !== 0) {
+      console.error(`backend exited: ${code ?? signal}`);
+      cleanup(1);
+    }
+  });
+}
+
+/** Matikan backend dengan SIGKILL (tanpa shutdown bersih), lalu nyalakan lagi dengan env tambahan. */
+async function restartBackend(overrides) {
+  restarting = true;
+  const old = backend;
+  const exited = new Promise((resolve) => old.once('exit', resolve));
+  old.kill('SIGKILL');
+  await exited;
+  children.splice(children.indexOf(old), 1);
+  startBackend(overrides);
+  restarting = false;
+  await wait('http://127.0.0.1:7410/api/v1/health');
+}
+
+/** Server kontrol untuk spec: POST /restart-backend dengan body JSON {env: {...}} (opsional). */
+function startControlServer() {
+  const server = http.createServer((request, response) => {
+    if (request.method !== 'POST' || request.url !== '/restart-backend') {
+      response.writeHead(404).end();
+      return;
+    }
+    let raw = '';
+    request.on('data', (chunk) => (raw += chunk));
+    request.on('end', async () => {
+      try {
+        const { env = {} } = raw ? JSON.parse(raw) : {};
+        await restartBackend(env);
+        response.writeHead(200).end('ok');
+      } catch (error) {
+        response.writeHead(500).end(String(error.message));
+      }
+    });
+  });
+  server.listen(7412, '127.0.0.1');
+  children.push({ kill: () => server.close() });
+}
+
 async function main() {
   spawnSync('docker', ['rm', '--force', '--volumes', postgres], { stdio: 'ignore' });
   run('docker', [
@@ -84,24 +155,12 @@ async function main() {
 
   start('node', ['tests/e2e/fake-provider.cjs']);
   await wait('http://127.0.0.1:7411/health', 30_000);
-  start('cargo', ['run', '--bin', 'ai-team'], {
-    env: {
-      ...process.env,
-      DATABASE_URL: 'postgres://ai_team:ai_team_dev@127.0.0.1:55432/ai_team',
-      PRIMARY_API_KEY: process.env.NOCTIS_E2E_API_KEY,
-      NOCTIS_PROVIDER_HOST_ALLOWLIST: '127.0.0.1',
-      NOCTIS__SERVER__BIND: '127.0.0.1:7410',
-      NOCTIS__GIT__WORKTREE_ROOT: worktrees,
-      NOCTIS__ARTIFACTS__ROOT: artifacts,
-      NOCTIS__PROVIDER__BASE_URL: 'http://127.0.0.1:7411/v1',
-      NOCTIS__PROVIDER__MODEL: 'e2e-model',
-      // M4-010: suite paralel butuh 4 slot (skenario 2 dan 4 worker).
-      NOCTIS__SCHEDULER__MAX_PARALLEL_AGENTS: '4',
-      NOCTIS_PROVIDER_HOST_ALLOWLIST: '127.0.0.1',
-      NOCTIS_RUNNER_IMAGE: 'rust:1'
-    }
-  });
+  // Biner dibangun sekali lalu dijalankan langsung (bukan `cargo run`) supaya satu PID = satu server dan bisa dimatikan
+  // seperti crash sungguhan oleh server kontrol di bawah.
+  run('cargo', ['build', '--bin', 'ai-team']);
+  startBackend({});
   await wait('http://127.0.0.1:7410/api/v1/health');
+  startControlServer();
 
   const sql = `
     INSERT INTO projects (id,name,repository_path)

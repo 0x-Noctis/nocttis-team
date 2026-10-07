@@ -1,6 +1,7 @@
 const { expect, test } = require('../../web/node_modules/@playwright/test');
 const { randomUUID } = require('node:crypto');
 const { spawnSync } = require('node:child_process');
+const { clearLeftoverModel } = require('./support.cjs');
 
 const projectId = '00000000-0000-4000-8000-000000000015';
 const projectRunId = '00000000-0000-4000-8000-000000000016';
@@ -15,12 +16,13 @@ function makeReady(taskId) {
 }
 
 test.describe('production vertical slice', () => {
-  test('provider to terminal task result survives SSE reconnect', async ({ page, request }) => {
+  test('[matrix:vertical-slice] provider to terminal task result survives SSE reconnect', async ({ page, request }) => {
     const suffix = Date.now().toString(36);
     const providerId = `e2e-provider-${suffix}`;
     const modelId = 'e2e-model';
     const taskId = `e2e-task-${suffix}`;
     const headers = () => ({ 'Idempotency-Key': randomUUID() });
+    await clearLeftoverModel(request, headers);
 
     const provider = await request.post('/api/v1/providers', {
       headers: headers(),

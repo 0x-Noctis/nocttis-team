@@ -24,6 +24,13 @@ function task(brief, id, title, path, dependsOn, limits = LIMITS_SMALL) {
   };
 }
 
+// Task yang benar-benar bisa dijalankan fake provider (M5-009): penanda [ptask:...] di objective memberi tahu provider
+// file apa yang dibuat (create=1) dan seberapa lama menahan balasan supaya task backend/frontend tumpang tindih.
+function runnable(brief, id, title, file, dependsOn, delay = 0) {
+  const marker = `[ptask:${brief.run_id}-${id};file=${file};create=1;to=${id}-done${delay ? `;delay=${delay}` : ''}]`;
+  return { ...task(brief, id, title, file, dependsOn), objective: `${title} within its allowed path only. ${marker}` };
+}
+
 const plan = (brief, tasks, riskFlags = []) => ({
   id: 'plan-1',
   project_run_id: brief.run_id,
@@ -40,6 +47,14 @@ const builders = {
     task(brief, 'frontend', 'Add search box', 'src/frontend.js', ['contract']),
     task(brief, 'search-test', 'Cover search with a test', 'test/search.test.js', ['backend', 'frontend'])
   ], ['backend and frontend share the products response shape']),
+
+  // Diamond yang dieksekusi sungguhan: contract -> (backend || frontend) -> search-test.
+  execute: (brief) => plan(brief, [
+    runnable(brief, 'contract', 'Define search contract', 'docs/contract.md', []),
+    runnable(brief, 'backend', 'Implement search endpoint', 'src/backend.js', ['contract'], 4000),
+    runnable(brief, 'frontend', 'Add search box', 'src/frontend.js', ['contract'], 4000),
+    runnable(brief, 'search-test', 'Cover search with a test', 'test/search.test.js', ['backend', 'frontend'])
+  ]),
 
   // Siklus a <-> b: ProposedPlan::validate menolak graf dependency tidak valid.
   cycle: (brief) => plan(brief, [

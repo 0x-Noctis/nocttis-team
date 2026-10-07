@@ -4,11 +4,16 @@
 //
 // Kunci perilaku: file/from/to (patch satu baris), delay (ms, menahan balasan worker pertama supaya task
 // benar-benar tumpang tindih), rdelay (ms, menahan balasan reviewer), reject=1 (review pertama meminta
-// perubahan), tokens (total token per balasan, untuk menguji budget).
+// perubahan), tokens (total token per balasan, untuk menguji budget), fail=<status> + failn=<n> (n request pertama dibalas
+// status HTTP itu, mis. 503/401), slowfirst=<ms> (hanya request pertama ditunda; untuk timeout provider), create=1 (patch
+// membuat file baru alih-alih mengubah baris).
 
 const MARKER = /\[ptask:([^\]]+)\]/;
 
-const seen = new Map(); // task id -> { reviews }
+const seen = new Map(); // task id -> { reviews, requests }
+
+// Jumlah request per task (untuk asersi "tidak diulang" / "diulang n kali"); dibaca lewat GET /stats.
+const stats = () => Object.fromEntries([...seen].map(([id, state]) => [id, state.requests]));
 
 function parseMarker(request) {
   const found = MARKER.exec(JSON.stringify(request));
@@ -20,14 +25,19 @@ function parseMarker(request) {
 
 const isParallelRequest = (request) => parseMarker(request) !== null;
 
-const patchFor = ({ file, from = 'base', to }) =>
-  `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -1 +1 @@\n-${from}\n+${to}\n`;
+const patchFor = ({ file, from = 'base', to, create }) =>
+  create === '1'
+    ? `diff --git a/${file} b/${file}\nnew file mode 100644\n--- /dev/null\n+++ b/${file}\n@@ -0,0 +1 @@\n+${to}\n`
+    : `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -1 +1 @@\n-${from}\n+${to}\n`;
 
 // Mengembalikan { message, delayMs, tokens } untuk request worker/reviewer task paralel.
 function reply(request) {
   const { id, options } = parseMarker(request);
-  const state = seen.get(id) ?? { reviews: 0 };
+  const state = seen.get(id) ?? { reviews: 0, requests: 0 };
   seen.set(id, state);
+  state.requests += 1;
+  // Gangguan provider yang disuntikkan: n request pertama dibalas status HTTP tertentu.
+  if (options.fail && state.requests <= Number(options.failn ?? 1)) return { status: Number(options.fail) };
   const tokens = Number(options.tokens ?? 20);
   const isReview = !request.tools?.length;
 
@@ -43,14 +53,15 @@ function reply(request) {
 
   const toolResults = (request.messages ?? []).filter(({ role }) => role === 'tool').length;
   if (toolResults === 0) {
-    const patch = patchFor({ file: options.file, from: options.from, to: options.to ?? `${id}-done` });
+    const patch = patchFor({ file: options.file, from: options.from, to: options.to ?? `${id}-done`, create: options.create });
     return {
       message: {
         role: 'assistant',
         content: null,
         tool_calls: [{ id: `patch-${id}`, type: 'function', function: { name: 'apply_patch', arguments: JSON.stringify({ patch }) } }]
       },
-      delayMs: Number(options.delay ?? 0),
+      // `slowfirst` menunda HANYA request pertama (mis. melewati timeout provider, lalu retry berjalan normal).
+      delayMs: state.requests === 1 && options.slowfirst ? Number(options.slowfirst) : Number(options.delay ?? 0),
       tokens
     };
   }
@@ -73,4 +84,4 @@ const FIXTURE_FILES = {
 const objective = (id, options) =>
   `Change ${options.file} only. [ptask:${[id, ...Object.entries(options).map(([key, value]) => `${key}=${value}`)].join(';')}]`;
 
-module.exports = { FIXTURE_FILES, isParallelRequest, objective, reply };
+module.exports = { FIXTURE_FILES, isParallelRequest, objective, reply, stats };

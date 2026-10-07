@@ -73,6 +73,11 @@ const server = http.createServer((request, result) => {
     result.end('{"status":"ok"}');
     return;
   }
+  if (request.method === 'GET' && request.url === '/stats') {
+    result.writeHead(200, { 'content-type': 'application/json' });
+    result.end(JSON.stringify(parallel.stats()));
+    return;
+  }
   if (request.method !== 'POST' || request.url !== '/v1/chat/completions') {
     result.writeHead(404).end();
     return;
@@ -94,7 +99,12 @@ const server = http.createServer((request, result) => {
     }
     // Task paralel (M4-010) dijawab per task, tanpa penghitung global, dan boleh ditunda (delay) agar tumpang tindih.
     if (!isProbe(body) && !lead.isLeadRequest(body) && parallel.isParallelRequest(body)) {
-      const { message, delayMs, tokens } = parallel.reply(body);
+      const { message, delayMs, tokens, status } = parallel.reply(body);
+      if (status) {
+        result.writeHead(status, { 'content-type': 'application/json' });
+        result.end(JSON.stringify({ error: { message: 'injected failure' } }));
+        return;
+      }
       setTimeout(() => {
         result.writeHead(200, { 'content-type': 'application/json' });
         result.end(JSON.stringify(response(message, tokens)));

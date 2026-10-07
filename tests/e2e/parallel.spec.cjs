@@ -11,6 +11,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { FIXTURE_FILES, objective } = require('../scenarios/parallel/scenarios.cjs');
+const { clearLeftoverModel, retrying } = require('./support.cjs');
 
 const POSTGRES = 'noctis-agent-3-e2e-postgres';
 const key = () => ({ 'Idempotency-Key': randomUUID() });
@@ -128,6 +129,7 @@ test.beforeAll(async ({ request }) => {
   expect(created.status()).toBe(201);
   sql(`UPDATE project_runs SET status='PAUSED' WHERE status='RUNNING' AND project_id<>'${projectId}'`);
 
+  await clearLeftoverModel(request, key);
   providerId = `parallel-${suffix}`;
   const provider = await request.post('/api/v1/providers', {
     headers: key(),
@@ -148,12 +150,12 @@ test.beforeAll(async ({ request }) => {
 });
 
 test.afterAll(async ({ request }) => {
-  await request.delete(`/api/v1/providers/${providerId}`, { headers: key() });
+  await retrying(() => request.delete(`/api/v1/providers/${providerId}`, { headers: key() }));
   fs.rmSync(repository, { recursive: true, force: true });
 });
 
 test.describe('parallel scheduler', () => {
-  test('two independent tasks run together and both integrate', async ({ request }) => {
+  test('[matrix:parallel-independent] two independent tasks run together and both integrate', async ({ request }) => {
     const { run, id, statements } = createRun('indep2', 100000, [
       { id: 'a', file: 'a.txt', to: 'a-done', delay: 3000 },
       { id: 'b', file: 'b.txt', to: 'b-done', delay: 3000 }
@@ -175,7 +177,7 @@ test.describe('parallel scheduler', () => {
     expect(view.max_slots).toBe(4);
   });
 
-  test('four independent tasks fill four slots (visible in the dashboard)', async ({ page }) => {
+  test('[matrix:parallel-four-workers] four independent tasks fill four slots (visible in the dashboard)', async ({ page }) => {
     const names = ['a', 'b', 'c', 'd'];
     const { run, id, runStatement, taskStatements } = createRun(
       'indep4',
@@ -200,7 +202,7 @@ test.describe('parallel scheduler', () => {
     expectBaseIntact();
   });
 
-  test('overlapping scopes are held back until the first task finishes', async () => {
+  test('[matrix:overlap-held] overlapping scopes are held back until the first task finishes', async () => {
     const { run, id, statements } = createRun('overlap', 100000, [
       { id: 'wide', file: 'src/a.txt', paths: ['src/**'], to: 'wide-done', delay: 3000, priority: 10 },
       { id: 'narrow', file: 'src/b.txt', to: 'narrow-done' }
@@ -227,7 +229,7 @@ test.describe('parallel scheduler', () => {
     expectBaseIntact();
   });
 
-  test('a rejected review retries once and integrates exactly once', async () => {
+  test('[matrix:review-retry] a rejected review retries once and integrates exactly once', async () => {
     const { run, id, statements } = createRun('retry', 100000, [
       { id: 'r', file: 'c.txt', to: 'c-done', reject: 1, maxAttempts: 2 }
     ]);
@@ -245,7 +247,7 @@ test.describe('parallel scheduler', () => {
     expectBaseIntact();
   });
 
-  test('a semantic regression on the integration branch needs a human and spares the base', async () => {
+  test('[matrix:semantic-conflict] a semantic regression on the integration branch needs a human and spares the base', async () => {
     // `winner` mengubah core.txt dan lolos lebih dulu; `loser` bersih di worktree-nya sendiri (core.txt masih v1)
     // tetapi pemeriksaan di cabang integrasi (core.txt sudah v2) gagal.
     const { run, id, statements } = createRun('regress', 100000, [
@@ -266,7 +268,7 @@ test.describe('parallel scheduler', () => {
     expectBaseIntact();
   });
 
-  test('budget stop keeps dependent tasks from starting', async ({ request }) => {
+  test('[matrix:budget-stop] budget stop keeps dependent tasks from starting', async ({ request }) => {
     // Budget 10.000 (cadangan 15% => Stop pada 8.500). Task lama yang sudah selesai menghabiskan 5.600 token;
     // `first` memakai ~3.000 lagi (3 balasan x 1.000) sehingga run masuk level Stop. Reservasi masih cukup untuk
     // `second` dan `third`, jadi hanya level Stop yang menahan mereka.

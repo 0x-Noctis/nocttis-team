@@ -202,6 +202,39 @@ fn rejects_dirty_target_and_repository_or_base_mismatch() {
 }
 
 #[cfg(unix)]
+/// Regresi (M5-009): file baru dari patch harus ikut `diff_binary`; sebelumnya diff kosong sehingga task "selesai"
+/// tanpa membawa file itu ke integrasi.
+#[test]
+fn files_created_by_a_patch_are_part_of_the_integration_diff() {
+    let fixture = Fixture::new();
+    let manager = fixture.manager();
+    let worktree = manager
+        .create("new-file", "new-file-branch", &fixture.base)
+        .unwrap();
+    let patch = b"diff --git a/docs/new.md b/docs/new.md\nnew file mode 100644\n--- /dev/null\n+++ b/docs/new.md\n@@ -0,0 +1 @@\n+hello\n\
+diff --git a/tracked.txt b/tracked.txt\n--- a/tracked.txt\n+++ b/tracked.txt\n@@ -1 +1 @@\n-base\n+changed\n";
+    manager.apply_patch(&worktree, patch).unwrap();
+    let diff = String::from_utf8(manager.diff_binary(&worktree).unwrap()).unwrap();
+    assert!(
+        diff.contains("docs/new.md") && diff.contains("+hello"),
+        "{diff}"
+    );
+    assert!(diff.contains("tracked.txt"), "{diff}");
+    // Diff itu dapat diterapkan ke worktree lain dan menghasilkan isi yang sama.
+    let target = manager
+        .create("new-file-target", "new-file-target-branch", &fixture.base)
+        .unwrap();
+    manager.apply_patch(&target, diff.as_bytes()).unwrap();
+    assert_eq!(
+        fs::read_to_string(target.path().join("docs/new.md")).unwrap(),
+        "hello\n"
+    );
+    assert_eq!(
+        fs::read_to_string(target.path().join("tracked.txt")).unwrap(),
+        "changed\n"
+    );
+}
+
 #[test]
 fn rejects_symlink_patch_escape_without_mutating_target() {
     let fixture = Fixture::new();

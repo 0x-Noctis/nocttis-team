@@ -88,7 +88,7 @@ async function approve(page) {
 }
 
 test.describe('Lead and task DAG', () => {
-  test('valid plan: DAG order, risk flag, human approval, blocked tasks', async ({ page, request }) => {
+  test('[matrix:plan-approval] valid plan: DAG order, risk flag, human approval, blocked tasks', async ({ page, request }) => {
     const run = await startRun(page, '[scenario:valid] Add product search');
     await expect(page.getByText('No plan yet')).toBeVisible();
     await expect(page.getByLabel('Run status: Planning')).toBeVisible();

@@ -359,10 +359,19 @@ fn safe_parent(root: &Path, relative: &str) -> Result<(), ToolError> {
         .map_err(|_| error(ToolErrorCode::OperationFailed, "worktree is unavailable"))?;
     let relative = Path::new(&relative);
     reject_symlink_components(&root, relative, true)?;
-    let parent = root
+    let mut ancestor = root
         .join(relative)
         .parent()
         .ok_or_else(|| error(ToolErrorCode::UnsafePath, "tool path is unsafe"))?
+        .to_path_buf();
+    // Patch boleh membuat file di direktori yang belum ada (git apply membuatnya). Yang diperiksa adalah leluhur
+    // terdekat yang ADA: tidak ada komponen symlink (sudah dipastikan di atas) dan hasil kanonisnya tetap di dalam root.
+    while fs::symlink_metadata(&ancestor).is_err() {
+        if !ancestor.pop() {
+            return Err(error(ToolErrorCode::UnsafePath, "tool path is unsafe"));
+        }
+    }
+    let parent = ancestor
         .canonicalize()
         .map_err(|_| error(ToolErrorCode::UnsafePath, "tool path is unsafe"))?;
     if !parent.starts_with(root) {
