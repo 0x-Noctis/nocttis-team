@@ -6,6 +6,7 @@ pub mod api;
 pub mod context;
 pub mod domain;
 pub mod model;
+pub mod model_guard;
 pub mod observability;
 #[path = "model/openai/mod.rs"]
 pub mod openai;

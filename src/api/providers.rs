@@ -560,6 +560,8 @@ fn failed_probe(
             ModelErrorKind::InvalidResponse => ProbeErrorCode::InvalidResponse,
             ModelErrorKind::ProviderUnavailable => ProbeErrorCode::ProviderUnavailable,
             ModelErrorKind::ContextTooLarge => ProbeErrorCode::ContextTooLarge,
+            // Probe memanggil provider langsung, tanpa gerbang budget, sehingga kode ini tidak pernah muncul di sini.
+            ModelErrorKind::BudgetExceeded => ProbeErrorCode::InvalidResponse,
         }),
     }
 }

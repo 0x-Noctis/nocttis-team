@@ -15,6 +15,8 @@ pub enum ModelErrorKind {
     InvalidResponse,
     ProviderUnavailable,
     ContextTooLarge,
+    /// Budget token run/task/attempt habis; tidak pernah diulang.
+    BudgetExceeded,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -83,6 +85,7 @@ impl fmt::Display for ModelErrorKind {
             Self::InvalidResponse => "invalid_response",
             Self::ProviderUnavailable => "provider_unavailable",
             Self::ContextTooLarge => "context_too_large",
+            Self::BudgetExceeded => "budget_exceeded",
         })
     }
 }

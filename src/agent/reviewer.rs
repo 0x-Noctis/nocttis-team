@@ -126,6 +126,17 @@ impl ReviewerModel for crate::openai::OpenAiToolsClient {
     }
 }
 
+impl<M, S, G> ReviewerModel for crate::model::router::ModelRouter<M, S, G>
+where
+    M: crate::model::router::CompletionModel,
+    S: crate::model::retry::Sleeper,
+    G: crate::model::router::CallGuard,
+{
+    async fn complete(&mut self, request: &ModelRequest) -> Result<ModelResponse, ModelError> {
+        crate::model::router::ModelRouter::complete(self, request).await
+    }
+}
+
 #[allow(async_fn_in_trait)]
 pub trait ReviewerModel {
     async fn complete(&mut self, request: &ModelRequest) -> Result<ModelResponse, ModelError>;

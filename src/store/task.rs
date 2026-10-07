@@ -222,6 +222,10 @@ impl TaskRepository {
         Self { pool }
     }
 
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
     pub async fn create(&self, contract: &TaskContract) -> Result<StoredTask, StoreError> {
         contract.validate_for_status(TaskStatus::Draft)?;
         let project_id = uuid("project_id", contract.project_id.as_str())?;

@@ -117,6 +117,33 @@ impl WorkerModel for crate::openai::OpenAiToolsClient {
 #[allow(async_fn_in_trait)]
 pub trait WorkerModel {
     async fn complete(&mut self, request: &ModelRequest) -> Result<ModelResponse, ModelError>;
+
+    /// True bila model sudah mengulang/berpindah sendiri (mis. `ModelRouter`); worker lalu tidak mengulang lagi supaya
+    /// jumlah percobaan tidak berlipat.
+    fn handles_retries(&self) -> bool {
+        false
+    }
+}
+
+impl crate::model::router::CompletionModel for crate::openai::OpenAiToolsClient {
+    async fn complete(&mut self, request: &ModelRequest) -> Result<ModelResponse, ModelError> {
+        crate::openai::OpenAiToolsClient::complete(self, request).await
+    }
+}
+
+impl<M, S, G> WorkerModel for crate::model::router::ModelRouter<M, S, G>
+where
+    M: crate::model::router::CompletionModel,
+    S: crate::model::retry::Sleeper,
+    G: crate::model::router::CallGuard,
+{
+    async fn complete(&mut self, request: &ModelRequest) -> Result<ModelResponse, ModelError> {
+        crate::model::router::ModelRouter::complete(self, request).await
+    }
+
+    fn handles_retries(&self) -> bool {
+        true
+    }
 }
 
 #[allow(async_fn_in_trait)]
@@ -276,10 +303,15 @@ impl<'a, M: WorkerModel, C: CheckpointStore> Worker<'a, M, C> {
                 remaining_input,
                 remaining_output,
             );
+            let model_attempts = if self.model.handles_retries() {
+                1
+            } else {
+                self.contract.limits.max_attempts.get() as usize
+            };
             let response = match call_model(
                 &mut self.model,
                 &request,
-                self.contract.limits.max_attempts.get() as usize,
+                model_attempts,
                 self.clock.as_ref(),
                 deadline,
             )
@@ -715,7 +747,13 @@ async fn call_model<M: WorkerModel>(
         }
         match response {
             Ok(response) => return Ok(response),
-            Err(error) => last_error = error.kind(),
+            Err(error) => {
+                last_error = error.kind();
+                // Auth/konteks/respons tak valid/budget tidak berubah dengan diulang; hentikan seketika.
+                if !error.retryable() {
+                    break;
+                }
+            }
         }
     }
     Err(CallModelError::Model(last_error))

@@ -31,14 +31,22 @@ const FLOW_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[sqlx::test(migrations = "./migrations")]
 async fn production_orchestrator_conflict_preserves_target(pool: PgPool) {
-    tokio::time::timeout(FLOW_TIMEOUT, production_flow(pool, true, false))
+    tokio::time::timeout(FLOW_TIMEOUT, production_flow(pool, true, false, false))
         .await
         .expect("production flow timed out");
 }
 
 #[sqlx::test(migrations = "./migrations")]
 async fn production_orchestrator_completes_full_flow(pool: PgPool) {
-    tokio::time::timeout(FLOW_TIMEOUT, production_flow(pool, false, false))
+    tokio::time::timeout(FLOW_TIMEOUT, production_flow(pool, false, false, false))
+        .await
+        .expect("production flow timed out");
+}
+
+/// M5-005: provider membalas 503 dua kali; retry bounded di jalur produksi membuat task tetap selesai.
+#[sqlx::test(migrations = "./migrations")]
+async fn transient_provider_failure_is_retried_and_the_task_still_completes(pool: PgPool) {
+    tokio::time::timeout(FLOW_TIMEOUT, production_flow(pool, false, false, true))
         .await
         .expect("production flow timed out");
 }
@@ -46,14 +54,17 @@ async fn production_orchestrator_completes_full_flow(pool: PgPool) {
 /// Pipeline yang sama, tetapi dijalankan lewat `ParallelScheduler` + `OrchestratorRunner` (M4-005B).
 #[sqlx::test(migrations = "./migrations")]
 async fn parallel_scheduler_runs_full_flow_through_production_runner(pool: PgPool) {
-    tokio::time::timeout(FLOW_TIMEOUT, production_flow(pool.clone(), false, true))
-        .await
-        .expect("production flow timed out");
+    tokio::time::timeout(
+        FLOW_TIMEOUT,
+        production_flow(pool.clone(), false, true, false),
+    )
+    .await
+    .expect("production flow timed out");
 }
 
 #[sqlx::test(migrations = "./migrations")]
 async fn parallel_scheduler_reports_conflict_through_production_runner(pool: PgPool) {
-    tokio::time::timeout(FLOW_TIMEOUT, production_flow(pool, true, true))
+    tokio::time::timeout(FLOW_TIMEOUT, production_flow(pool, true, true, false))
         .await
         .expect("production flow timed out");
 }
@@ -377,7 +388,7 @@ async fn parallel_shutdown_stops_stalled_pipeline_without_finalizing(pool: PgPoo
     );
 }
 
-async fn production_flow(pool: PgPool, conflict: bool, parallel: bool) {
+async fn production_flow(pool: PgPool, conflict: bool, parallel: bool, flaky: bool) {
     let fixture = FlowFixture::new();
     let patch = "diff --git a/tracked.txt b/tracked.txt\n--- a/tracked.txt\n+++ b/tracked.txt\n@@ -1 +1 @@\n-base\n+changed\n";
     let responses = vec![
@@ -407,6 +418,12 @@ async fn production_flow(pool: PgPool, conflict: bool, parallel: bool) {
             "usage": {"prompt_tokens": 4, "completion_tokens": 1, "total_tokens": 5}
         }),
     ];
+    let mut responses = responses;
+    if flaky {
+        // Dua gangguan sementara di awal: melebihi `max_attempts` task (2) sehingga hanya router (3 percobaan,
+        // backoff) yang bisa melewatinya; tanpa router attempt gagal.
+        responses.splice(0..0, [json!({"__status": 503}), json!({"__status": 503})]);
+    }
     let mut server = FakeProvider::start(responses).await;
     unsafe {
         std::env::set_var("FLOW_API_KEY", "test-only");
@@ -502,7 +519,7 @@ async fn production_flow(pool: PgPool, conflict: bool, parallel: bool) {
         );
         attempt_id
     };
-    server.finish(3).await;
+    server.finish(if flaky { 5 } else { 3 }).await;
 
     let stored = tasks.get(&task_id).await.unwrap();
     assert_eq!(
@@ -789,8 +806,13 @@ impl FakeProvider {
                 let mut request = vec![0; 65536];
                 let _ = stream.read(&mut request).await.unwrap();
                 request_count.fetch_add(1, Ordering::SeqCst);
-                let body = response.to_string();
-                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).as_bytes()).await.unwrap();
+                // `{"__status": 503}` membalas dengan status HTTP itu (gangguan sementara) alih-alih respons normal.
+                let (status, body) = match response.get("__status").and_then(|value| value.as_u64())
+                {
+                    Some(code) => (format!("{code} Injected"), "{}".to_owned()),
+                    None => ("200 OK".to_owned(), response.to_string()),
+                };
+                stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).as_bytes()).await.unwrap();
             }
         });
         Self {

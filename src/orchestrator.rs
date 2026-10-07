@@ -28,6 +28,11 @@ use crate::{
         state_machine::Actor,
         task::{NonEmptyString, TaskStatus},
     },
+    model::{
+        retry::{RetryPolicy, TokioSleeper},
+        router::{Candidate, ModelProfile, ModelRouter},
+    },
+    model_guard::PgCallGuard,
     openai::OpenAiToolsClient,
     runner::{
         container::ContainerLimits,
@@ -539,6 +544,23 @@ impl Orchestrator {
             Duration::from_secs(provider.request_timeout_seconds.get() as u64),
         )
         .map_err(|_| OrchestratorError::Model)?;
+        // Retry terbatas + gerbang budget/efek samping untuk model yang dipilih task. Fallback ke model/provider lain
+        // sengaja tidak diaktifkan: itu mengirim kode repository ke pihak lain yang tidak dipilih operator, jadi
+        // butuh konfigurasi eksplisit (daftar kandidat tetap kosong sampai ada).
+        let client = ModelRouter::new(
+            vec![Candidate {
+                profile: ModelProfile {
+                    id: model.id.as_str().to_owned(),
+                    class: model.class.as_str().to_owned(),
+                    tools_verified: true,
+                    context_window: u64::try_from(model.context_window.get()).unwrap_or(0),
+                },
+                model: client,
+            }],
+            RetryPolicy::default(),
+            TokioSleeper,
+            PgCallGuard::new(self.tasks.pool().clone()),
+        );
         let repository = self
             .tasks
             .project_repository(attempt.task_id.as_str())

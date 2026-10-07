@@ -490,6 +490,33 @@ async fn timeout_model_tool_and_human_stops_are_typed() {
         Some(WorkerError::Model(ModelErrorKind::RateLimited))
     );
 
+    // Regresi M5-005: error yang tidak bisa pulih (auth, konteks terlalu besar) tidak boleh diulang walau
+    // `max_attempts` task mengizinkan; sebelumnya setiap error diulang tanpa pandang jenis.
+    for kind in [
+        ModelErrorKind::AuthenticationFailed,
+        ModelErrorKind::ContextTooLarge,
+        ModelErrorKind::InvalidResponse,
+    ] {
+        let unrecoverable = run(
+            &fixture,
+            &task,
+            model(vec![
+                Err(ModelError::new(kind)),
+                Ok(response(Some("{}"), Vec::new(), 1, 1)),
+            ]),
+            MemoryCheckpoints::default(),
+            2,
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            unrecoverable.error,
+            Some(WorkerError::Model(kind)),
+            "{kind:?}"
+        );
+        assert_eq!(unrecoverable.model.calls, 1, "{kind:?} tidak boleh diulang");
+    }
+
     let tool_error = run(
         &fixture,
         &task,
