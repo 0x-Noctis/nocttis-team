@@ -752,7 +752,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: backend/frontend parallel, conflict, retry, timeout, budget, approval, restart, provider fallback, test failure semuanya tercakup.
   - Verify: suite clean environment lulus tiga kali.
 
-- [ ] **M5-010 — Benchmark terhadap baseline** · Lane D _(harness selesai; run nyata 2026-10-08 menemukan worker belum berfungsi dengan model nyata — lihat docs/benchmark.md)_
+- [x] **M5-010 — Benchmark terhadap baseline** · Lane D
   - Depends On: M0-004, M5-009
   - Parallel With: M5-011
   - Allowed Paths: `docs/benchmark.md`, `tests/baseline/**`
@@ -768,7 +768,21 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: fresh install dapat dilakukan hanya dari docs; semua env/config terdokumentasi; batas keamanan dinyatakan jujur.
   - Verify: fresh-install walkthrough.
 
-- [ ] **M5-012 — MVP release gate** · Integrator _(gate otomatis lulus; rilis DITAHAN: worker belum berfungsi dengan model nyata dan benchmark M5-010 belum bisa dijalankan — lihat docs/release-notes.md)_
+- [x] **M5-013 — Protokol worker/reviewer untuk model nyata** · Lane B
+  - Depends On: M5-010
+  - Parallel With: —
+  - Allowed Paths: `src/agent/**`, `src/model/**`, `src/orchestrator.rs`, `src/scheduler/parallel.rs`, `tests/**`, `docs/**` (task perbaikan blocker yang ditemukan benchmark M5-010; disetujui pemilik)
+  - Output: worker dan reviewer dapat menyelesaikan task dengan model nyata, bukan hanya fake provider.
+  - Acceptance:
+    - skema argumen lengkap untuk setiap tool worker; prompt sistem worker dan reviewer;
+    - percakapan tool sesuai kontrak OpenAI (giliran assistant dengan `tool_calls` + pesan `tool` berisi hasil);
+    - error tool yang bisa diperbaiki dikembalikan ke model, hanya timeout yang fatal;
+    - reviewer menerima isi diff; JSON berpagar Markdown diterima; sebab `worker.failed` tercatat;
+    - run ditutup `DONE` bila semua task `DONE`;
+    - terbukti dengan run nyata (4 dari 5 skenario fixture selesai `DONE` dengan test lulus).
+  - Verify: test regresi per temuan (mutation check untuk giliran tool dan serialisasi), `cargo test --no-fail-fast` 448 lulus, E2E 60 lulus, benchmark nyata `tests/baseline/mvp-results.json`.
+
+- [ ] **M5-012 — MVP release gate** · Integrator _(gate otomatis lulus dan worker kini berfungsi dengan model nyata; rilis DITAHAN karena median input token hanya turun 47,0% (< 50%) — lihat docs/release-notes.md)_
   - Depends On: M5-009, M5-010, M5-011
   - Parallel With: —
   - Allowed Paths: seluruh repository hanya untuk fix blocker terverifikasi dan release notes
@@ -934,3 +948,6 @@ Tambahkan satu baris saat task selesai atau diblokir.
 | 2026-10-07 | M5-012 | Penyimpangan dari Allowed Paths yang dibenarkan: dokumentasi gate diperbaiki (`docker compose config` butuh `PRIMARY_API_KEY`; `cargo test` butuh `--no-fail-fast` dan superuser `postgres` untuk drill backup, sebelumnya hanya binary pertama yang gagal terlihat dan drill dilewati/gagal tanpa petunjuk). Status M4 di tabel ringkas yang basi (`[ ]`) dikoreksi menjadi `[x]` sesuai Exit Gate M4 | Human | Jalankan benchmark nyata dengan provider/API key; putuskan blocker keamanan; setelah itu tandai M5-012 dan rilis |
 | 2026-10-08 | M5-010 | Run benchmark nyata dicoba (router lokal, model baseline); berhenti pada dispatch pertama | Probe lolos setelah normalisasi SSE di proxy harness; bug `context_refs` Lead diperbaiki dengan regresi (`tests/lead_planner.rs`, clippy, `lead_api`, `project_api` lulus); dump request membuktikan skema tool worker kosong, tanpa prompt sistem worker/reviewer, hasil tool tidak dikembalikan | Tidak ada angka MVP; MVP belum dapat bekerja dengan model nyata |
 | 2026-10-08 | M5-010 | Temuan blocker produk: protokol worker/reviewer belum ada untuk model nyata. Diusulkan task baru (belum dibuat, butuh persetujuan scope): skema tool lengkap, prompt sistem worker dan reviewer, hasil tool dikembalikan ke model, sebab `worker.failed` disimpan, diuji terhadap model nyata | Human | Setujui task baru dan urutannya sebelum M5-012 dapat dinilai |
+| 2026-10-08 | M5-013 | Protokol worker/reviewer untuk model nyata diselesaikan | fmt, clippy `-D warnings`; `cargo test --no-fail-fast -- --test-threads=1` = 448 lulus/0 gagal/51 binary; `npm run e2e` = 60 lulus; run nyata (router lokal, model baseline) menyelesaikan 4 dari 5 skenario sampai `DONE` dengan test lulus tanpa intervensi; mutation check: giliran assistant tanpa `tool_calls`, argumen kosong di serialisasi, dan syarat `NOT EXISTS` pada penutupan run masing-masing membuat test gagal | Satu run per skenario; `retries` dan `conflicts` 0 di semua run nyata |
+| 2026-10-08 | M5-010 | Benchmark nyata selesai | `node tests/baseline/mvp-run.cjs` lalu `compare.cjs`: median input token 61.118 → 32.402 (turun 47,0%, target 50% GAGAL); 4/5 selesai tanpa intervensi (80,0%, lulus tepat di ambang); `file-conflict` gagal karena Lead merencanakan scope tumpang tindih. Run pertama (38,9%) ditolak karena token probe ikut terhitung dan diulang | Overhead router ±4.939 token/panggilan menyumbang ≥ ±61% input MVP, jadi perbandingan peka jumlah panggilan; penjelasan lengkap di docs/benchmark.md |
+| 2026-10-08 | M5-012 | Rilis tetap DITAHAN: gate token 47,0% < 50% (aturan RANCANGAN §23) | lihat baris M5-010 dan docs/release-notes.md | Human | Putuskan: terima/rendahkan target, atau kerjakan optimasi token (konteks file di pesan pertama worker, ringkasan hasil tool, Lead untuk task tunggal) lalu ukur ulang; ukur juga di provider tanpa overhead; putuskan blocker keamanan |

@@ -11,6 +11,7 @@
 //   NOCTIS_BENCH_MODEL_ID        ID model internal; harus sama dengan NOCTIS__PROVIDER__MODEL backend (default bench-model)
 //   NOCTIS_BENCH_API             URL backend            (default http://127.0.0.1:7410)
 //   NOCTIS_BENCH_POSTGRES        nama container Postgres untuk psql (default noctis-agent-3-e2e-postgres)
+//   NOCTIS_BENCH_SCENARIOS       daftar id skenario dipisah koma (default semua); hasil parsial TIDAK boleh dilaporkan sebagai benchmark penuh
 //   NOCTIS_BENCH_TIMEOUT_SECONDS batas tunggu per skenario (default 900)
 //   NOCTIS_BENCH_OBJECTIVE_PREFIX awalan objective (hanya untuk validasi harness dengan fake provider)
 //
@@ -154,9 +155,11 @@ async function runScenario(scenario, proxy) {
   const providerId = `bench-${crypto.randomUUID().slice(0, 8)}`;
   const projectId = crypto.randomUUID();
   const runId = crypto.randomUUID();
-  const before = { ...proxy.totals };
+  let before = { ...proxy.totals };
   try {
     await registerModel(providerId, `http://127.0.0.1:${PROXY_PORT}/v1`);
+    // Probe kemampuan tool adalah penyiapan, bukan kerja task: token-nya tidak boleh dihitung sebagai biaya MVP.
+    before = { ...proxy.totals };
     await api('POST', '/api/v1/projects', { id: projectId, name: `bench ${scenario.id}`, repository_path: repository });
     const objective = `${env('NOCTIS_BENCH_OBJECTIVE_PREFIX', '')}${scenario.title}. Only these paths may change: ${scenario.allowed_paths.join(', ')}.`;
     await api('POST', `/api/v1/projects/${projectId}/runs`, { id: runId, project_id: projectId, objective, acceptance_criteria: scenario.acceptance, token_budget: 400000 });
@@ -199,6 +202,29 @@ async function runScenario(scenario, proxy) {
       changed_paths: spawnSync('git', ['-C', repository, 'diff', '--name-only', `main...noctis-integration-${runId}`], { encoding: 'utf8' }).stdout.split('\n').filter(Boolean),
       run_id: runId
     };
+  } catch (error) {
+    // Kegagalan satu skenario (mis. plan Lead ditolak validasi) adalah HASIL, bukan alasan membuang skenario lain.
+    // Tanpa intervensi: kolektor tidak mengulang permintaan Lead atau memperbaiki apa pun secara manual.
+    return {
+      scenario: scenario.id,
+      success: false,
+      run_status: 'ERROR',
+      error: String(error.message).slice(0, 400),
+      input_tokens: proxy.totals.input - before.input,
+      cached_input_tokens: proxy.totals.cached - before.cached,
+      output_tokens: proxy.totals.output - before.output,
+      db_input_tokens: 0,
+      lead_input_tokens: proxy.totals.input - before.input,
+      latency_seconds: 0,
+      retries: 0,
+      conflicts: 0,
+      tests_passed: 0,
+      tests_failed: 0,
+      plan_approvals: 0,
+      human_interventions: 0,
+      changed_paths: [],
+      run_id: runId
+    };
   } finally {
     await api('DELETE', `/api/v1/providers/${providerId}`).catch(() => {});
     fs.rmSync(repository, { recursive: true, force: true });
@@ -209,7 +235,9 @@ async function main() {
   for (const name of ['NOCTIS_BENCH_UPSTREAM', 'NOCTIS_BENCH_MODEL', 'NOCTIS_BENCH_API_KEY_ENV']) {
     if (!process.env[name]) throw new Error(`${name} wajib diisi (lihat docs/benchmark.md)`);
   }
-  const scenarios = JSON.parse(fs.readFileSync(path.join(fixtureDir, 'scenarios', 'tasks.json'), 'utf8'));
+  const only = process.env.NOCTIS_BENCH_SCENARIOS?.split(',').filter(Boolean);
+  const scenarios = JSON.parse(fs.readFileSync(path.join(fixtureDir, 'scenarios', 'tasks.json'), 'utf8')).filter((scenario) => !only || only.includes(scenario.id));
+  if (!scenarios.length) throw new Error('NOCTIS_BENCH_SCENARIOS tidak cocok dengan skenario mana pun');
   const proxy = await startProxy(process.env.NOCTIS_BENCH_UPSTREAM);
   const runs = [];
   try {

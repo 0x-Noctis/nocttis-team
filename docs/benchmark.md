@@ -7,14 +7,13 @@ pada **lima skenario fixture yang sama** (`tests/fixtures/sample-project/scenari
 
 | Bagian | Status |
 |---|---|
-| Harness yang bisa diulang (`mvp-run.cjs`, `compare.cjs`) | **Selesai dan teruji** |
-| Pipa data diuji end-to-end dengan fake provider | Selesai (hanya validasi alat, bukan pengukuran) |
-| Pengukuran MVP dengan model nyata (`mvp-results.json`) | **TIDAK DAPAT DIJALANKAN**: percobaan 2026-10-08 menemukan bahwa worker belum berfungsi dengan model nyata (lihat "Percobaan run nyata") |
-| Gate: median input token turun ≥ 50% | **Belum diketahui** |
-| Gate: ≥ 80% skenario selesai tanpa intervensi | **Belum diketahui** |
+| Harness yang bisa diulang (`mvp-run.cjs`, `compare.cjs`) | selesai dan teruji |
+| Pengukuran MVP dengan model nyata (`mvp-results.json`) | **selesai (2026-10-08)**: satu run per skenario, model sama dengan baseline |
+| Gate: median input token turun ≥ 50% | **TIDAK TERCAPAI**: turun 47,0% (61.118 → 32.402) |
+| Gate: ≥ 80% skenario selesai tanpa intervensi | **tercapai tepat di ambang**: 4 dari 5 (80,0%) |
 
-Tidak ada angka MVP di dokumen ini karena belum ada pengukuran dengan model nyata. Angka dari fake provider
-sengaja **tidak** dimasukkan: token-nya rekaan dan akan menyesatkan sebagai "hasil".
+Keputusan rilis: aturan "median input token turun minimal 50% atau release ditahan" belum terpenuhi, jadi rilis **ditahan**
+(lihat release-notes.md). Penjelasan kegagalan target ada di bagian "Hasil pengukuran nyata".
 
 ## Cara menjalankan
 
@@ -92,53 +91,91 @@ Keputusan yang perlu diketahui pembaca:
 
 ## Validasi harness (apa yang terbukti dan yang belum)
 
-Terbukti oleh test otomatis (`tests/baseline/*.test.cjs`, 8 test, termasuk mutation check pada ambang gate dan
-pada hitungan test gagal): perhitungan median/gate/biaya N/A, penjumlahan `usage` dari JSON dan SSE, serta
-verifikasi branch integrasi (hijau, merah, branch tidak ada).
+Terbukti oleh test otomatis (`tests/baseline/*.test.cjs`, 12 test, termasuk mutation check pada ambang gate dan hitungan test
+gagal): perhitungan median/gate/biaya N/A, penjumlahan `usage` dari JSON dan SSE, normalisasi respons router, serta verifikasi
+branch integrasi (hijau, merah, branch tidak ada).
 
-Terbukti oleh satu run kolektor lawan stack E2E dengan fake provider: pendaftaran provider+model, pembuatan
-project/run, Lead → approve, polling, proxy penghitung, query `model_usage`/`agent_runs`, dan penulisan JSON.
+Terbukti oleh run nyata: seluruh jalur kolektor sampai `DONE` dan verifikasi pada branch integrasi untuk 4 skenario, penulisan
+`mvp-results.json`, dan pencatatan kegagalan skenario (`file-conflict`) tanpa membuang skenario lain.
 
-**Belum terbukti:** run yang mencapai `DONE` lalu lolos verify di dalam kolektor (fake provider tidak punya skrip
-untuk fixture ini, jadi semua run berakhir timeout). Jalur itu hanya dicakup test unit `verifyIntegration`.
-Run model nyata pertama harus diamati untuk memastikan kolom `retries`/`conflicts` terisi masuk akal.
+**Belum terbukti:** kolom `retries` dan `conflicts` bernilai 0 di semua run nyata, jadi jalur hitungnya (attempt > 1, task
+`CONFLICT`) belum teramati terisi pada data nyata; ia hanya benar menurut query. Hasil adalah satu run per skenario.
 
-## Percobaan run nyata (2026-10-08)
+## Hasil pengukuran nyata (2026-10-08)
 
 Dijalankan dengan router lokal `http://localhost:20128/v1`, model `td/cx/gpt-5.6-sol-review` (sama dengan baseline), database
-kosong, `NOCTIS_RUNNER_IMAGE=node:22-bookworm-slim`. **Tidak ada angka MVP yang dihasilkan** karena run berhenti pada
-dispatch pertama. Ini bukan "target tidak tercapai", melainkan MVP belum dapat dijalankan dengan model nyata. Temuan, berurutan:
+kosong, `NOCTIS_RUNNER_IMAGE=node:22-bookworm-slim`, fixture commit `74aa0aba…`. Data mentah: `tests/baseline/mvp-results.json`
+(termasuk `run_id` tiap skenario). Satu run per skenario, seperti baseline; keluaran model tidak deterministik sehingga angka
+bisa bergeser antar run. Token probe kemampuan tool (penyiapan) **tidak** dihitung.
 
-1. **Router tidak mematuhi kontrak OpenAI.** Ia selalu membalas SSE walau `stream` tidak diminta dan tidak mengirim `data: [DONE]`,
-   sehingga probe chat gagal `invalid_response` dan probe streaming `provider_unavailable`. Ditangani di harness (bukan di klien
-   produksi): proxy penghitung menormalkan respons (`tests/baseline/sse-normalize.cjs`, diuji). Perilaku ini juga perlu diketahui
-   operator yang memakai router sejenis.
-2. **Router menyisipkan ±4,9 ribu token input pada setiap panggilan** (prompt 4 kata terhitung 4.939 token). Baseline Codex memakai
-   router yang sama sehingga ikut menanggung biaya ini, tetapi MVP melakukan banyak panggilan kecil per task, jadi overhead per
-   panggilan memengaruhi perbandingan secara tidak setara. Interpretasi hasil nanti harus memperhitungkannya.
-3. **Bug produk (diperbaiki): `context_refs` dari Lead.** Model nyata mengisinya dengan path file; `ContextBuilder` hanya menerima
-   `artifact://<id>`, sehingga dispatch gagal `orchestrator.context` setelah plan disetujui. Sekarang dibuang saat parse plan
-   (`src/agent/lead.rs`, regresi di `tests/lead_planner.rs`). Fake provider tidak pernah memicunya.
-4. **Blocker produk (BELUM diperbaiki): worker tidak dapat bekerja dengan model nyata.** Bukti dari request sebenarnya (dump proxy):
-   - Skema tool kosong: `"parameters": {"type": "object"}` dengan deskripsi "Structured read_file tool" (`src/agent/worker.rs`
-     `tool_definitions`). Model tidak tahu argumen apa pun dan memanggil `read_file` dengan `{}` (dua kali), lalu worker gagal
-     `worker.failed`.
-   - Tidak ada prompt sistem untuk worker maupun reviewer (hanya Lead yang punya, `src/agent/prompts/lead.md`); protokol penyelesaian
-     (JSON `summary`/`status`) tidak pernah dijelaskan ke model.
-   - Hasil tool tidak dikembalikan ke model: `tool_message` hanya berisi `{"succeeded":…}`, bukan isi file/diff/hasil pencarian.
-   - `worker.failed` tidak menyimpan sebab (tidak ada payload event/log), sehingga kegagalan seperti ini sulit didiagnosis.
-   Seluruh suite E2E lulus karena fake provider tidak memeriksa skema tool, tidak membutuhkan prompt, dan tidak memakai hasil tool.
-   Artinya E2E membuktikan orkestrasi, bukan kemampuan agent dengan model sungguhan.
+| Scenario | Success | Input tokens | Output tokens | Latency (s) | Retry | Conflict | Tests passed | Intervention |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| backend-only | yes → yes | 43.706 → 32.402 | 1.350 → 1.126 | 24 → 38 | 0 → 0 | 0 → 0 | 2 → 2 | 0 → 0 |
+| frontend-only | yes → yes | 62.833 → 32.489 | 1.417 → 840 | 29 → 23 | 0 → 0 | 0 → 0 | 1 → 1 | 0 → 0 |
+| cross-stack | yes → yes | 61.118 → 41.718 | 2.072 → 1.488 | 53 → 37 | 0 → 0 | 0 → 0 | 3 → 3 | 0 → 0 |
+| test-failure | yes → yes | 58.846 → 31.581 | 1.125 → 1.539 | 25 → 56 | 0 → 0 | 0 → 0 | 1 → 1 | 0 → 0 |
+| file-conflict | yes → **no** | 76.461 → 5.843 | 2.864 → 623 | 51 → 0 | 0 → 0 | 1 → 0 | 3 → 0 | 0 → 0 |
 
-Konsekuensi: kriteria rilis token ≥ 50% dan ≥ 80% tanpa intervensi tidak dapat dinilai sebelum protokol worker/reviewer untuk model
-nyata dibuat (skema tool lengkap, prompt sistem worker dan reviewer, pengembalian hasil tool, penyimpanan sebab kegagalan) dan
-diuji terhadap model nyata, bukan hanya fake provider.
+Biaya: N/A (router tidak melaporkan tarif; tidak diisi dengan asumsi). Ringkasan (`node tests/baseline/compare.cjs`):
+
+| Gate | Hasil | Syarat |
+|---|---:|---:|
+| Median input token (per skenario) | 61.118 → 32.402 = **turun 47,0%** | ≥ 50% — **GAGAL** |
+| Selesai tanpa intervensi | 4/5 = **80,0%** | ≥ 80% — lulus tepat di ambang |
+| Success rate | 100% → 80% | — |
+
+Rincian MVP (token input rata-rata skenario yang berhasil): Lead ±5,8 ribu, worker ±20–29 ribu, reviewer ±6,2 ribu (angka
+worker/reviewer dari `model_usage`; Lead = total proxy − `model_usage`, `lead_input_tokens`).
+
+### Kenapa target token tidak tercapai (dan apa yang bukan penjelasannya)
+
+1. **Overhead router.** Router menyisipkan ±4.939 token input pada SETIAP panggilan (prompt 4 kata terukur 4.939 token). MVP
+   melakukan minimal 4 panggilan per skenario (Lead, worker dengan satu giliran tool dan satu giliran akhir, reviewer), jadi
+   setidaknya ±19,8 ribu dari 32,4 ribu token median (±61%) adalah overhead router, bukan isi pekerjaan. Baseline Codex juga
+   membayar overhead per panggilan, tetapi dengan jumlah panggilan yang tidak kita ketahui. Akibatnya perbandingan sangat peka
+   terhadap **jumlah panggilan**, dan router ini tidak mewakili provider biasa. Tidak diuji: seberapa besar rasio berubah di
+   provider tanpa overhead; jangan mengklaim ia akan melewati 50%.
+2. **Biaya struktur MVP.** Setiap task memerlukan panggilan Lead dan reviewer di luar pekerjaan worker; pada task kecil ini
+   keduanya adalah biaya tetap. Penghematan di desain (konteks terbatas per task) baru tampak pada task besar/paralel, yang tidak
+   ada di lima skenario kecil ini.
+3. **Peluang penghematan yang belum dikerjakan** (usulan, bukan hasil): menyertakan isi file allowed_paths pada pesan pertama
+   worker menghemat satu giliran tool (±5 ribu token di router ini); ringkasan hasil tool lebih pendek; menggabungkan Lead untuk
+   task tunggal.
+4. **Bukan penjelasan:** perbedaan model (sama), token probe (sudah dikeluarkan), atau data tercemar (run pertama yang menyertakan
+   probe ditolak dan diulang; angkanya 38,9% hanya karena probe ikut terhitung).
+
+### Kegagalan `file-conflict`
+
+Pada skenario ini Lead membaca acceptance ("satu task mengubah harga 25, task lain 26") secara harfiah dan merencanakan **dua task
+pada file yang sama**; validasi plan menolaknya (`lead plan contains overlapping file scopes`) dan kolektor tidak mengulang
+permintaan (mengulang = intervensi). Di baseline skenario ini dicatat berhasil karena agent menyelesaikan kondisinya; di MVP perilaku
+"scope tumpang tindih tidak boleh dijalankan bersamaan" adalah keputusan desain, dan konflik Git sendiri dicakup E2E
+`[matrix:semantic-conflict]`. Bila manusia menekan "Ask Lead" sekali lagi, plan kemungkinan valid, tetapi itu satu intervensi.
+
+### Temuan yang diperbaiki sepanjang pengukuran (M5-013)
+
+Percobaan pertama dengan model nyata tidak dapat berjalan sama sekali. Penyebabnya dan perbaikannya (semua dengan test regresi):
+
+| Temuan | Perbaikan |
+|---|---|
+| Router selalu SSE dan tanpa `[DONE]` | normalisasi di proxy harness (`sse-normalize.cjs`); klien produksi tidak diubah |
+| Lead mengisi `context_refs` dengan path file → dispatch gagal setelah plan disetujui | referensi non-`artifact://` dibuang saat parse plan |
+| Skema tool worker kosong → model memanggil tool dengan `{}` | skema lengkap per tool |
+| Worker/reviewer tanpa prompt sistem; protokol penyelesaian JSON tidak dijelaskan | `prompts/worker.md`, `prompts/reviewer.md` |
+| Hasil tool tidak dikembalikan ke model (hanya flag sukses) | isi hasil dikirim (dipotong 16 KiB) |
+| Giliran assistant dengan `tool_calls` tidak dikirim → provider menolak pesan `tool` | `Message.tool_calls` dan serialisasi OpenAI |
+| Error tool yang bisa diperbaiki (path ditolak, patch gagal) mengakhiri worker | dikembalikan ke model; hanya timeout yang fatal |
+| JSON berpagar Markdown atau berkalimat pengantar ditolak | ekstraksi objek JSON (validasi tetap ketat) |
+| Reviewer hanya menerima metadata diff, tanpa isi | `diff_content` (dipotong 64 KiB) |
+| Reviewer menolak karena "hasil test tidak ada" padahal verifikasi berjalan sesudah review | dijelaskan di prompt reviewer |
+| Batas token Lead terlalu kecil (3.000) untuk percakapan multi-giliran | panduan batas realistis di prompt Lead |
+| Status run tidak pernah `DONE` | scheduler menutup run yang semua task-nya `DONE` |
+| `worker.failed` tanpa sebab | sebab (jenis, tanpa isi) dicatat di log terstruktur |
 
 ## Kegagalan target
 
-Belum berlaku: belum ada pengukuran. Bila gate gagal pada pengukuran nyata, bagian ini wajib diisi dengan
-penjelasan per skenario (token per peran: Lead/worker/reviewer dari `lead_input_tokens`, `db_input_tokens`,
-dan `cached_input_tokens`) sebelum release gate M5-012 dinilai.
+Satu gate gagal: median input token turun 47,0% (target 50%). Penjelasannya ada di "Kenapa target token tidak tercapai". Gate
+tanpa intervensi lulus tepat di ambang (80,0%), tanpa margin: satu skenario lagi yang gagal akan menjatuhkannya.
 
 ## Berkas
 
@@ -146,6 +183,6 @@ dan `cached_input_tokens`) sebelum release gate M5-012 dinilai.
 |---|---|
 | `tests/baseline/results.json`, `*.jsonl` | data mentah baseline M0-004 |
 | `tests/baseline/mvp-run.cjs` | kolektor MVP (proxy penghitung + run + query DB) |
-| `tests/baseline/mvp-results.json` | data mentah MVP — **belum ada** sampai pengukuran nyata dijalankan |
+| `tests/baseline/mvp-results.json` | data mentah MVP (run nyata 2026-10-08) |
 | `tests/baseline/compare.cjs` | tabel perbandingan dan gate |
 | `tests/baseline/compare.test.cjs`, `mvp-run.test.cjs` | test harness (data sintetis) |

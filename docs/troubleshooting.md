@@ -43,6 +43,8 @@ Setiap respons API membawa `X-Request-Id` dan field `request_id` pada body error
 | Gejala | Penyebab | Perbaikan |
 |---|---|---|
 | "Approval will be refused" / 409 saat approve | reservasi token plan melebihi sisa budget | naikkan token budget run baru, atau minta Lead plan yang lebih kecil |
+| "lead plan contains overlapping file scopes" | Lead merencanakan dua task pada file yang sama (mis. membaca acceptance secara harfiah) | **Ask Lead** lagi atau tulis objective sebagai satu perubahan pada file itu; scope tumpang tindih sengaja tidak dijalankan |
+| Task gagal dengan `worker.failed` | worker berhenti (error model, error tool fatal, batas token/panggilan/giliran tercapai) | cari log JSON `"message":"worker gagal"` berisi `stop_reason` dan jenis error (tanpa isi prompt); naikkan batas task lewat objective/budget bila `budget_exhausted` |
 | "lead plan is invalid" | Lead menghasilkan plan siklik/tidak valid | **Ask Lead** lagi atau perjelas objective |
 | "lead plan exceeds run token budget" | plan terlalu besar untuk budget | naikkan budget atau persempit objective |
 | Task gagal verifikasi dengan pesan Docker/container | Docker tidak tersedia untuk server (mis. Compose tanpa override socket) | aktifkan akses Docker ([deployment.md](deployment.md), `compose.docker-socket.yaml`) atau jalankan server langsung di host yang punya Docker |
