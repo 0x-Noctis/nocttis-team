@@ -4,3 +4,4 @@
 pub mod cors;
 pub mod limits;
 pub mod redact;
+pub mod ssrf;

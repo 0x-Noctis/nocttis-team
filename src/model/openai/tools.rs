@@ -17,6 +17,9 @@ pub struct OpenAiToolsClient {
     endpoint: Url,
     api_key: String,
     model: String,
+    /// Bila true, tujuan provider diperiksa (anti-SSRF) pada SETIAP panggilan `complete`. Dinyalakan di semua jalur
+    /// produksi (Lead, worker, reviewer, probe); test dengan server tiruan di loopback membiarkannya mati.
+    enforce_destination: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -52,10 +55,24 @@ impl OpenAiToolsClient {
                 api_key
             },
             model: model.into(),
+            enforce_destination: false,
         })
     }
 
+    /// Wajibkan pemeriksaan SSRF tujuan provider pada setiap panggilan (lihat `ai_team::security::ssrf`).
+    #[must_use]
+    pub fn enforce_destination_policy(mut self) -> Self {
+        self.enforce_destination = true;
+        self
+    }
+
     pub async fn complete(&self, request: &ModelRequest) -> Result<ModelResponse, ModelError> {
+        // Gagal tertutup: tujuan yang tidak lolos tidak pernah dihubungi dan tidak ada permintaan yang keluar.
+        if self.enforce_destination
+            && !ai_team::security::ssrf::destination_allowed(self.endpoint.as_str()).await
+        {
+            return Err(ModelError::new(ModelErrorKind::ProviderUnavailable));
+        }
         let started = Instant::now();
         let tools: Vec<_> = request.tools.iter().map(ProviderTool::from).collect();
         // Redaksi rahasia tepat sebelum keluar ke provider (satu choke point untuk Lead, worker, dan reviewer).

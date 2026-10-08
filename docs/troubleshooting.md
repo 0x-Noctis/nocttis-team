@@ -15,6 +15,7 @@ Setiap respons API membawa `X-Request-Id` dan field `request_id` pada body error
 | `scheduler.stale_after_seconds must exceed …` | nilai tidak konsisten | buat `stale_after_seconds` > `heartbeat_seconds` |
 | error migration (versi/checksum tidak cocok) | database dipakai versi aplikasi lain atau migration lama diedit | jalankan versi aplikasi yang sesuai, atau restore backup ke database baru ([backup.md](backup.md)) |
 | `Address already in use` | port 7410/5432 dipakai proses lain | hentikan prosesnya atau ubah `server.bind` / pemetaan port di Compose |
+| `server.bind … bukan alamat loopback` | `server.bind`/`NOCTIS__SERVER__BIND` bukan 127.0.0.1/::1 | pakai loopback; hanya bila akses dibatasi di luar aplikasi set `NOCTIS_ALLOW_NON_LOOPBACK=1` |
 | Compose: `set PRIMARY_API_KEY` | `.env` belum ada | `cp .env.example .env` lalu isi |
 
 ## Halaman tidak muncul / API tidak terjangkau
@@ -30,7 +31,7 @@ Setiap respons API membawa `X-Request-Id` dan field `request_id` pada body error
 
 | Gejala | Penyebab | Perbaikan |
 |---|---|---|
-| Probe langsung `provider_unavailable` dengan latensi 0 | host provider loopback/privat dan belum diizinkan | set `NOCTIS_PROVIDER_HOST_ALLOWLIST=<host>` (host persis, tanpa port) lalu restart |
+| Probe, Ask Lead, atau task langsung `provider_unavailable` (latensi 0) | host provider loopback/privat dan belum diizinkan (berlaku di SETIAP panggilan) | set `NOCTIS_PROVIDER_HOST_ALLOWLIST=<host>` (host persis, tanpa port) lalu restart |
 | Probe `authentication_failed` | variable yang dinamai di "API key env" kosong/salah di environment **backend** | pastikan variable itu ada di proses backend (pada Compose: tambahkan ke `environment:` service `noctis`) dan nilainya benar |
 | Probe `rate_limited` / `timeout` | kuota atau jaringan provider | tunggu/naikkan batas waktu request provider; retry otomatis hanya untuk panggilan run |
 | Probe tools bukan `supported` | model tidak mendukung tool calling | pakai model lain; worker tidak bisa memakai model tanpa tool calling |
@@ -50,7 +51,7 @@ Setiap respons API membawa `X-Request-Id` dan field `request_id` pada body error
 | Task gagal verifikasi dengan pesan Docker/container | Docker tidak tersedia untuk server (mis. Compose tanpa override socket) | aktifkan akses Docker ([deployment.md](deployment.md), `compose.docker-socket.yaml`) atau jalankan server langsung di host yang punya Docker |
 | Verifikasi gagal `command not found` (mis. `npm`) | `NOCTIS_RUNNER_IMAGE` bawaan `rust:1` tidak berisi toolchain proyek | set `NOCTIS_RUNNER_IMAGE` ke image yang sesuai (mis. `node:22-bookworm-slim`) |
 | Task menunggu "Waiting for …" lama | menunggu dependency, atau path-nya dipegang task lain | normal; lihat panel antrean. Tanpa kemajuan: periksa task yang ditunggu |
-| Task `CONFLICT` / `NEEDS_HUMAN` | patch bertabrakan saat integrasi / gagal berulang | buka **Approvals**, tinjau diff, lalu Retry atau Cancel |
+| Task `CONFLICT` / `NEEDS_HUMAN` | patch bertabrakan saat integrasi, percobaan habis, atau worker meminta keputusan manusia (`request_human`) | buka **Approvals**, baca pesan/riwayat, tinjau diff, lalu Retry atau Cancel |
 | Run tidak bergerak setelah restart server | recovery berjalan saat start; attempt basi dipulihkan setelah `stale_after_seconds` | tunggu ± `stale_after_seconds`; cek log `startup recovery` dan halaman Operations |
 | Terlalu banyak token terpakai | percobaan ulang, plan besar | kecilkan objective/budget; tinjau pemakaian di Operations |
 

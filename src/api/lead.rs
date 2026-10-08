@@ -135,7 +135,9 @@ pub(crate) async fn lead_plan(
                 model.remote_name.as_str(),
                 Duration::from_secs(provider.request_timeout_seconds.get() as u64),
             )
-            .map_err(|_| AppError::bad_gateway(request_id, json!({"lead":"model client unavailable"})))?;
+            .map_err(|_| AppError::bad_gateway(request_id, json!({"lead":"model client unavailable"})))?
+            // Anti-SSRF pada setiap panggilan, bukan hanya saat probe.
+            .enforce_destination_policy();
 
             let max_output = (model.max_output_tokens.get() as u64).min(MAX_LEAD_OUTPUT_TOKENS);
             let context = model.context_window.get() as u64;

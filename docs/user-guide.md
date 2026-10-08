@@ -80,7 +80,8 @@ Buka **Approvals**, isi *Your name or ID*. Ada dua antrean:
 
 - **Plans waiting for approval**: plan dari semua run.
 - **Tasks that need a person**: task berstatus **Conflict** (patch bertabrakan saat integrasi) atau **Needs a human**
-  (task tidak bisa dilanjutkan otomatis; baca penjelasan di kartunya). Setiap kartu menampilkan aktivitas terakhir dan
+  (percobaan habis, atau worker sengaja meminta keputusan Anda karena acceptance tidak dapat dipenuhi/bertentangan; baca
+  penjelasan di kartunya). Setiap kartu menampilkan aktivitas terakhir dan
   diff (**Show diff**). Pilihan Anda:
   - **Retry task**: percobaan baru dari salinan bersih. Isi alasan "kenapa aman mengulang"; efek samping percobaan
     sebelumnya tidak diketahui, jadi ulangi hanya setelah memeriksanya. Tombol ini nonaktif sampai integrator menyerahkan

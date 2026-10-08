@@ -30,6 +30,10 @@ async fn main() -> anyhow::Result<()> {
     ai_team::observability::init_logging();
 
     let (config, secrets) = Config::load()?;
+    tracing::warn!(
+        bind = %config.server.bind,
+        "API dan UI TIDAK memiliki autentikasi atau TLS: jalankan hanya di localhost atau di belakang proxy berautentikasi"
+    );
     let database = PgPoolOptions::new()
         .max_connections(config.database.max_connections)
         .acquire_timeout(Duration::from_secs(config.database.acquire_timeout_seconds))

@@ -17,7 +17,8 @@ Model ancaman MVP: satu operator tepercaya di mesin sendiri; model/provider LLM 
 | File rahasia dibaca ke konteks | `.env*`, `*.pem`, `*.key`, `id_rsa`, `.netrc`, dll. ditolak oleh context builder | `src/context/mod.rs` | `tests/context_builder.rs` |
 | Payload besar | batas body global 256 KiB (task/project 64 KiB) | `src/security/limits.rs`, `src/api/*` | `tests/security.rs` (batas global; batas 64 KiB khusus task/project belum diuji tersendiri) |
 | CORS terlalu longgar | origin eksplisit dari `server.cors_allowed_origins`, tanpa wildcard/path, maksimal 8; invalid = server tidak start | `src/security/cors.rs`, `src/config.rs` | `tests/security.rs` |
-| SSRF lewat base URL provider | host provider divalidasi (allowlist untuk host privat) | `src/api/providers.rs` | `tests/provider_api.rs` |
+| SSRF lewat base URL provider | tujuan diperiksa pada SETIAP panggilan (probe, Lead, worker, reviewer): host publik, atau host persis di `NOCTIS_PROVIDER_HOST_ALLOWLIST`; DNS di-resolve ulang tiap panggilan; gagal tertutup | `src/security/ssrf.rs`, `src/model/openai/tools.rs` | `tests/model_tools.rs`, `tests/provider_api.rs`, unit test `ssrf` |
+| API terekspos ke jaringan | server menolak start bila `server.bind` bukan loopback kecuali `NOCTIS_ALLOW_NON_LOOPBACK=1`; peringatan "tanpa autentikasi" dicatat di log setiap start | `src/config.rs`, `src/main.rs` | unit test `config` |
 | Log membocorkan data | log JSON hanya memuat method + path + request_id; query/header/body tidak dicatat | `src/observability.rs` | `tests/logging.rs` |
 | Agent mengubah branch utama / push | tidak ada kode push; integrasi hanya ke branch `noctis-integration-<run>` | `src/runner/integration_git.rs` | `tests/integrator.rs` |
 
@@ -31,8 +32,10 @@ Akibatnya redaksi ini **mengurangi** kebocoran, bukan menjaminnya: rahasia denga
 repository tetap bisa sampai ke provider. Jangan menaruh rahasia di repository yang dikerjakan agent.
 
 ## Batas yang diketahui (jujur)
-- **Tidak ada autentikasi/otorisasi pengguna di API.** Server mendengarkan `127.0.0.1` secara default; jangan
-  diekspos ke jaringan tanpa reverse proxy yang menambah autentikasi. `/api/v1/metrics` dan `/health/*` juga terbuka.
+- **Tidak ada autentikasi/otorisasi pengguna di API** (ditunda untuk MVP lokal atas keputusan pemilik). Syaratnya: server
+  wajib tetap di loopback (ditegakkan: start ditolak bila `server.bind` bukan loopback kecuali `NOCTIS_ALLOW_NON_LOOPBACK=1`
+  yang hanya boleh dipakai di balik pembatas lain, mis. port Docker ke 127.0.0.1) dan setiap start mencatat peringatan jelas.
+  Jangan diekspos ke jaringan tanpa reverse proxy yang menambah autentikasi dan TLS. `/api/v1/metrics` dan `/health/*` juga terbuka.
 - Identitas aksi manusia (`actor_id`) dicatat tetapi tidak diverifikasi.
 - Isolasi perintah bergantung pada Docker daemon lokal; akses ke socket Docker setara akses root.
 - Model dapat menulis kode berbahaya yang lolos review; verifikasi berjalan di container tanpa jaringan, tetapi

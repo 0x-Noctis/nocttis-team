@@ -104,6 +104,11 @@ impl Config {
 
         let config: Self = value.try_into().context("invalid runtime config")?;
         config.validate()?;
+        check_bind(
+            config.server.bind,
+            env.get("NOCTIS_ALLOW_NON_LOOPBACK")
+                .is_some_and(|value| value == "1"),
+        )?;
         let secrets = Secrets {
             database_url: required_secret(&env, "DATABASE_URL")?,
         };
@@ -156,6 +161,18 @@ impl Config {
         }
         Ok(())
     }
+}
+
+/// API dan UI belum punya autentikasi atau TLS, jadi server hanya boleh mendengarkan alamat loopback. Alamat lain
+/// (mis. `0.0.0.0` di dalam container yang port-nya dipublikasikan hanya ke 127.0.0.1) wajib disetujui eksplisit lewat
+/// `NOCTIS_ALLOW_NON_LOOPBACK=1`, sehingga tidak ada yang terekspos ke jaringan karena salah konfigurasi.
+fn check_bind(bind: SocketAddr, allow_non_loopback: bool) -> anyhow::Result<()> {
+    if bind.ip().is_loopback() || allow_non_loopback {
+        return Ok(());
+    }
+    bail!(
+        "server.bind {bind} bukan alamat loopback sedangkan API tidak punya autentikasi; gunakan 127.0.0.1, atau set NOCTIS_ALLOW_NON_LOOPBACK=1 hanya bila akses dibatasi di luar aplikasi (mis. port Docker dipublikasikan ke 127.0.0.1 atau ada proxy berautentikasi)"
+    )
 }
 
 fn apply_override(root: &mut toml::Value, name: &str, raw: &str) -> anyhow::Result<()> {
@@ -264,6 +281,24 @@ mod tests {
             ("DATABASE_URL".into(), "postgres://localhost/noctis".into()),
             ("PRIMARY_API_KEY".into(), "test-secret".into()),
         ])
+    }
+
+    #[test]
+    fn non_loopback_bind_requires_explicit_consent() {
+        let mut vars = env();
+        vars.insert("NOCTIS__SERVER__BIND".into(), "\"0.0.0.0:7410\"".into());
+        let error = Config::load_from(vars.clone()).unwrap_err().to_string();
+        assert!(error.contains("NOCTIS_ALLOW_NON_LOOPBACK"), "{error}");
+        vars.insert("NOCTIS_ALLOW_NON_LOOPBACK".into(), "1".into());
+        assert!(Config::load_from(vars.clone()).is_ok());
+        // Nilai selain "1" bukan persetujuan.
+        vars.insert("NOCTIS_ALLOW_NON_LOOPBACK".into(), "true".into());
+        assert!(Config::load_from(vars).is_err());
+        for loopback in ["127.0.0.1:7410", "[::1]:7410"] {
+            let mut vars = env();
+            vars.insert("NOCTIS__SERVER__BIND".into(), format!("\"{loopback}\""));
+            assert!(Config::load_from(vars).is_ok(), "{loopback}");
+        }
     }
 
     #[test]

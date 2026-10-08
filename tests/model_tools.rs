@@ -282,3 +282,26 @@ async fn tool_turns_are_sent_in_openai_shape() {
     assert_eq!(messages[3]["tool_call_id"], "call-1");
     assert_eq!(messages[3]["content"], "isi file");
 }
+
+/// Anti-SSRF (M5-016): dengan kebijakan tujuan dinyalakan, host loopback ditolak SEBELUM ada permintaan keluar, di setiap panggilan.
+#[tokio::test]
+async fn destination_policy_blocks_loopback_before_any_request_leaves() {
+    if std::env::var("NOCTIS_PROVIDER_HOST_ALLOWLIST").is_ok() {
+        return; // operator sengaja mengizinkan host tertentu di lingkungan ini
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+
+    let guarded = client(&base_url).enforce_destination_policy();
+    for _ in 0..2 {
+        let error = guarded.complete(&request()).await.unwrap_err();
+        assert_eq!(error.kind(), ModelErrorKind::ProviderUnavailable);
+    }
+    assert!(guarded.probe().await.is_err());
+    // Tidak ada koneksi masuk sama sekali: permintaan tidak pernah dikirim.
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}

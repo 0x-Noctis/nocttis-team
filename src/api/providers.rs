@@ -1,4 +1,4 @@
-use std::{env, future::Future, net::IpAddr, time::Duration};
+use std::{env, future::Future, time::Duration};
 
 use crate::{
     model::{Message, MessageRole, ModelErrorKind, ModelLimits, ModelRequest},
@@ -405,7 +405,7 @@ async fn probe_model(
 }
 
 async fn run_probe(provider: &Provider, model: &Model, kind: ProbeKind) -> ProbeResult {
-    if !provider_destination_allowed(provider.base_url.as_str()).await {
+    if !crate::security::ssrf::destination_allowed(provider.base_url.as_str()).await {
         return failed_probe(
             provider,
             model,
@@ -458,7 +458,9 @@ async fn run_probe(provider: &Provider, model: &Model, kind: ProbeKind) -> Probe
             &api_key,
             model.remote_name.as_str(),
             timeout,
-        ) {
+        )
+        .map(OpenAiToolsClient::enforce_destination_policy)
+        {
             Ok(client) => client.probe().await.map(|result| {
                 (
                     match result {
@@ -486,51 +488,6 @@ async fn run_probe(provider: &Provider, model: &Model, kind: ProbeKind) -> Probe
             error_code: None,
         },
         Err(error) => failed_probe(provider, model, kind, error.kind(), 0),
-    }
-}
-
-async fn provider_destination_allowed(base_url: &str) -> bool {
-    let Ok(url) = reqwest::Url::parse(base_url) else {
-        return false;
-    };
-    let Some(host) = url.host_str() else {
-        return false;
-    };
-    if env::var("NOCTIS_PROVIDER_HOST_ALLOWLIST")
-        .ok()
-        .is_some_and(|value| {
-            value
-                .split(',')
-                .map(str::trim)
-                .any(|allowed| allowed == host)
-        })
-    {
-        return true;
-    }
-    let port = url.port_or_known_default().unwrap_or(443);
-    tokio::net::lookup_host((host, port))
-        .await
-        .is_ok_and(|addresses| addresses.map(|address| address.ip()).all(public_ip))
-}
-
-fn public_ip(address: IpAddr) -> bool {
-    match address {
-        IpAddr::V4(address) => {
-            !address.is_private()
-                && !address.is_loopback()
-                && !address.is_link_local()
-                && !address.is_broadcast()
-                && !address.is_documentation()
-                && !address.is_multicast()
-                && !address.is_unspecified()
-        }
-        IpAddr::V6(address) => {
-            !address.is_loopback()
-                && !address.is_unique_local()
-                && !address.is_unicast_link_local()
-                && !address.is_multicast()
-                && !address.is_unspecified()
-        }
     }
 }
 
@@ -728,28 +685,5 @@ fn kind_name(kind: ProbeKind) -> &'static str {
         ProbeKind::Chat => "chat",
         ProbeKind::Streaming => "streaming",
         ProbeKind::Tools => "tools",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::public_ip;
-
-    #[test]
-    fn blocks_non_public_provider_addresses() {
-        for address in [
-            "127.0.0.1",
-            "10.0.0.1",
-            "172.16.0.1",
-            "192.168.0.1",
-            "169.254.169.254",
-            "::1",
-            "fc00::1",
-            "fe80::1",
-        ] {
-            assert!(!public_ip(address.parse().unwrap()), "accepted {address}");
-        }
-        assert!(public_ip("1.1.1.1".parse().unwrap()));
-        assert!(public_ip("2606:4700:4700::1111".parse().unwrap()));
     }
 }

@@ -183,6 +183,8 @@ async fn project_with_run(
 
 #[sqlx::test(migrations = "./migrations")]
 async fn lead_plan_is_namespaced_proposed_and_approvable_across_runs(pool: PgPool) {
+    // Server tiruan di loopback: izinkan hostnya secara eksplisit (kebijakan anti-SSRF berlaku di setiap panggilan).
+    unsafe { std::env::set_var("NOCTIS_PROVIDER_HOST_ALLOWLIST", "127.0.0.1,localhost") };
     unsafe { std::env::set_var(KEY_ENV, "test-only") };
     let (repo, command) = temp_repo();
     let (base, client) = server(pool.clone(), Some("lead-model")).await;
@@ -277,6 +279,8 @@ async fn lead_plan_is_namespaced_proposed_and_approvable_across_runs(pool: PgPoo
 
 #[sqlx::test(migrations = "./migrations")]
 async fn rejected_plan_can_be_replanned_as_next_version(pool: PgPool) {
+    // Server tiruan di loopback: izinkan hostnya secara eksplisit (kebijakan anti-SSRF berlaku di setiap panggilan).
+    unsafe { std::env::set_var("NOCTIS_PROVIDER_HOST_ALLOWLIST", "127.0.0.1,localhost") };
     unsafe { std::env::set_var(KEY_ENV, "test-only") };
     let (repo, command) = temp_repo();
     let (base, client) = server(pool.clone(), Some("lead-model")).await;
@@ -305,6 +309,8 @@ async fn rejected_plan_can_be_replanned_as_next_version(pool: PgPool) {
 
 #[sqlx::test(migrations = "./migrations")]
 async fn lead_plan_failures_map_to_safe_errors(pool: PgPool) {
+    // Server tiruan di loopback: izinkan hostnya secara eksplisit (kebijakan anti-SSRF berlaku di setiap panggilan).
+    unsafe { std::env::set_var("NOCTIS_PROVIDER_HOST_ALLOWLIST", "127.0.0.1,localhost") };
     unsafe { std::env::set_var(KEY_ENV, "test-only") };
     let (repo, _) = temp_repo();
     let (base, client) = server(pool.clone(), Some("lead-model")).await;

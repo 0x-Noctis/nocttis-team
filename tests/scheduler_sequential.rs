@@ -388,6 +388,8 @@ async fn multi_task_pipeline_follows_dependencies(pool: PgPool) {
         }
     });
     unsafe {
+        // Server tiruan di loopback: izinkan hostnya secara eksplisit (anti-SSRF berlaku di setiap panggilan).
+        std::env::set_var("NOCTIS_PROVIDER_HOST_ALLOWLIST", "127.0.0.1,localhost");
         std::env::set_var("SCHEDULER_TEST_KEY", "test-only");
         std::env::set_var("NOCTIS_RUNNER_IMAGE", "dbisynergy-frontend:dev");
     }

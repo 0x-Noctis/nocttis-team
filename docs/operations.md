@@ -71,7 +71,8 @@ Nilai secret hanya lewat environment; tidak pernah di berkas konfigurasi, image,
 | `PRIMARY_BASE_URL`, `PRIMARY_MODEL` | tidak | hanya dibaca `compose.yaml` dan diteruskan ke `NOCTIS__PROVIDER__BASE_URL/MODEL`. **Bukan** pendaftaran provider |
 | `NOCTIS_CONFIG` | tidak | path berkas TOML ([config/example.toml](../config/example.toml)); tanpa itu dipakai nilai bawaan |
 | `NOCTIS__<SECTION>__<FIELD>` | tidak | menimpa satu nilai config (tepat dua segmen, mis. `NOCTIS__SCHEDULER__MAX_PARALLEL_AGENTS=4`); nilai angka/boolean/array ditulis sebagai TOML |
-| `NOCTIS_PROVIDER_HOST_ALLOWLIST` | tidak | daftar host persis (koma) yang boleh dipakai provider internal. Tanpa ini **probe** ke alamat loopback/privat/link-local ditolak (`provider_unavailable`, latensi 0). Pemeriksaan ini hanya ada di probe; panggilan Lead/worker saat run tidak memeriksanya lagi |
+| `NOCTIS_PROVIDER_HOST_ALLOWLIST` | tidak | daftar host persis (koma) yang boleh dipakai provider internal. Tanpa ini SETIAP panggilan ke provider (probe, Lead, worker, reviewer) ke alamat loopback/privat/link-local ditolak (`provider_unavailable`); DNS di-resolve ulang tiap panggilan. Provider di localhost/LAN wajib didaftarkan di sini |
+| `NOCTIS_ALLOW_NON_LOOPBACK` | tidak | `1` mengizinkan `server.bind` non-loopback. Tanpa ini server menolak start bila bind bukan loopback (API belum punya autentikasi). Sudah diset di image; jangan diset di luar container kecuali ada pembatas akses lain |
 | `NOCTIS_RUNNER_IMAGE` | tidak | image container untuk perintah verifikasi; bawaan `rust:1`. **Satu image untuk seluruh server**, jadi proyek Node butuh image berisi Node. Pakai tag yang di-pin dari sumber tepercaya |
 | `RUST_LOG` | tidak | filter log; bawaan `info` |
 | `NOCTIS_PG_CONTAINER`, `NOCTIS_PG_USER`, `NOCTIS_PG_DATABASE`, `NOCTIS_BACKUP_DIR`, `NOCTIS_ARTIFACT_ROOT`, `NOCTIS_DATA_DIR`, `NOCTIS_REPOS_DIR`, `DOCKER_GID` | tidak | skrip backup/restore dan Compose opsional ([backup.md](backup.md), [deployment.md](deployment.md)) |
@@ -116,6 +117,9 @@ Key yang tidak dikenal atau nilai tidak valid membuat server **menolak start** d
 
 ## Perilaku yang perlu diketahui
 
+- **Percobaan ulang task (`max_attempts`, bawaan Lead 2)**: percobaan kedua hanya dipakai bila reviewer menolak perubahan (temuan
+  reviewer dikirim ke worker sebagai umpan balik) atau worker gagal karena sebab yang bisa diulang. Bila percobaan habis, atau worker
+  memanggil `request_human`, task masuk `NEEDS_HUMAN` dan muncul di halaman Approvals; tidak ada loop tak terbatas.
 - **Retry dan fallback provider**: error sementara (rate limit, timeout, provider tidak tersedia) diulang dengan backoff
   eksponensial (bawaan 3 percobaan, total tidur ≤ 8 detik). Error tetap (autentikasi salah, konteks terlalu besar, budget
   habis) tidak pernah diulang. Retry ditutup bila ada efek samping tool yang hasilnya belum pasti. **Fallback ke model
@@ -151,12 +155,14 @@ Latih restore pada salinan data secara berkala.
 
 Ringkas; rincian dan pengujian di [security.md](security.md).
 
-- **Tidak ada autentikasi API/UI.** Siapa pun yang bisa menjangkau port bisa membuat run, menyetujui plan, dan membaca
+- **Tidak ada autentikasi API/UI** (ditunda untuk MVP lokal). Server menolak start bila bind bukan loopback dan mencatat peringatan
+  di setiap start. Siapa pun yang bisa menjangkau port bisa membuat run, menyetujui plan, dan membaca
   data. Karena itu port hanya dipublikasikan ke `127.0.0.1`. Jangan ubah ke `0.0.0.0` tanpa reverse proxy yang menambah
   autentikasi dan TLS. `actor_id` pada approval dicatat tetapi tidak diverifikasi. `/metrics` dan `/health/*` juga terbuka.
 - **Tidak ada TLS dan rate limiting** di aplikasi.
-- **Perlindungan SSRF provider hanya pada probe.** Siapa pun yang bisa memakai API dapat mendaftarkan provider dengan
-  `base_url` apa saja; panggilan model saat run tidak memeriksa tujuan lagi. Satu alasan lagi API tidak boleh diekspos.
+- **Perlindungan SSRF provider berlaku pada setiap panggilan** (probe, Lead, worker, reviewer), tetapi selama API terbuka siapa
+  pun yang menjangkaunya tetap dapat mendaftarkan provider publik pilihannya dan mengirim kode repository ke sana. Alasan lain API
+  tidak boleh diekspos.
 - **Akses Docker** untuk verifikasi (`compose.docker-socket.yaml`) setara akses root ke host; sengaja tidak aktif secara bawaan.
 - **Isi repository dan model dianggap tidak tepercaya**, tetapi redaksi secret hanya mengurangi kebocoran. Jangan menaruh
   secret di repository yang dikerjakan agent. Kode hasil agent harus ditinjau manusia sebelum di-merge.

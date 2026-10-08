@@ -117,6 +117,8 @@ async fn setup_failures_requeue_without_running_event(pool: PgPool) {
                 .await
                 .unwrap();
         } else if matches!(failure, "git" | "context") {
+            // Server tiruan di loopback: izinkan hostnya secara eksplisit (kebijakan anti-SSRF berlaku di setiap panggilan).
+            unsafe { std::env::set_var("NOCTIS_PROVIDER_HOST_ALLOWLIST", "127.0.0.1,localhost") };
             unsafe { std::env::set_var(&secret_name, "test-only") };
             if failure == "git" {
                 sqlx::query("UPDATE projects SET repository_path=$2 WHERE id=$1")
@@ -313,6 +315,8 @@ async fn parallel_shutdown_stops_stalled_pipeline_without_finalizing(pool: PgPoo
             held.push(stream);
         }
     });
+    // Server tiruan di loopback: izinkan hostnya secara eksplisit (kebijakan anti-SSRF berlaku di setiap panggilan).
+    unsafe { std::env::set_var("NOCTIS_PROVIDER_HOST_ALLOWLIST", "127.0.0.1,localhost") };
     unsafe { std::env::set_var("STALL_API_KEY", "test-only") };
     let (project_id, run_id, task_id) =
         (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4().to_string());
@@ -426,6 +430,7 @@ async fn production_flow(pool: PgPool, conflict: bool, parallel: bool, flaky: bo
     }
     let mut server = FakeProvider::start(responses).await;
     unsafe {
+        std::env::set_var("NOCTIS_PROVIDER_HOST_ALLOWLIST", "127.0.0.1,localhost");
         std::env::set_var("FLOW_API_KEY", "test-only");
         std::env::set_var("NOCTIS_RUNNER_IMAGE", "dbisynergy-frontend:dev");
     }

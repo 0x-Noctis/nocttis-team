@@ -37,6 +37,7 @@ COPY --from=web /web/build /app/web
 # Di dalam container server mendengarkan semua antarmuka; pembatasan ke localhost dilakukan saat port DIPUBLIKASIKAN
 # (compose.yaml: 127.0.0.1:7410:7410). Jangan publikasikan ke 0.0.0.0 tanpa proxy yang menambah autentikasi.
 ENV NOCTIS__SERVER__BIND=0.0.0.0:7410 \
+    NOCTIS_ALLOW_NON_LOOPBACK=1 \
     NOCTIS__SERVER__WEB_ROOT=/app/web \
     NOCTIS__GIT__WORKTREE_ROOT=/data/worktrees \
     NOCTIS__ARTIFACTS__ROOT=/data/artifacts \
