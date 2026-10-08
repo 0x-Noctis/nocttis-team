@@ -1171,3 +1171,34 @@ async fn invalid_tool_arguments_are_returned_to_the_model_and_still_count() {
         reply.content
     );
 }
+
+/// Optimasi token (M5-014): isi file literal di allowed_paths ikut pesan pertama dengan judul path, sehingga model tidak
+/// perlu satu giliran `read_file` hanya untuk melihatnya.
+#[tokio::test]
+async fn allowed_file_contents_are_preloaded_into_the_first_message() {
+    let fixture = Fixture::new();
+    let mut task = contract(100, 100, 10);
+    task.allowed_paths = vec![AllowedPath::parse("src/file.txt").unwrap()];
+    let result = run(
+        &fixture,
+        &task,
+        model(vec![Ok(response(
+            Some(r#"{"summary":"done","status":"self_check"}"#),
+            Vec::new(),
+            1,
+            1,
+        ))]),
+        MemoryCheckpoints::default(),
+        2,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(result.handoff.stop_reason, StopReason::Completed);
+    let first = &result.model.requests[0].messages[1];
+    assert_eq!(first.role, MessageRole::User);
+    assert!(
+        first.content.contains("### Isi file `src/file.txt`\nold\n"),
+        "{}",
+        first.content
+    );
+}

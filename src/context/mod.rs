@@ -247,6 +247,44 @@ impl<'a> ContextBuilder<'a> {
         })
     }
 
+    /// Path literal di `allowed_paths` (tanpa karakter glob) yang berupa file teks biasa, dapat dibaca, dan tidak melanggar
+    /// kebijakan konteks, diurutkan dan dibatasi total `max_total_bytes`. Worker menyertakan isinya di pesan pertama supaya
+    /// tidak perlu satu giliran model hanya untuk membaca file; file yang tidak muat tetap bisa dibaca lewat tool.
+    /// File yang belum ada, biner, terlalu besar, symlink, atau path rahasia dilewati tanpa error.
+    pub fn readable_allowed_files(
+        &self,
+        contract: &TaskContract,
+        max_total_bytes: usize,
+    ) -> Vec<String> {
+        let mut candidates: Vec<String> = contract
+            .allowed_paths
+            .iter()
+            .map(|allowed| normalized(allowed.as_str()))
+            .filter(|path| !path.contains(['*', '?', '[', ']', '{', '}']) && !path.ends_with('/'))
+            .collect();
+        candidates.sort();
+        candidates.dedup();
+        let mut total = 0_usize;
+        let mut selected = Vec::new();
+        for relative in candidates {
+            let Ok(path) = self.resolve_source(contract, &relative) else {
+                continue;
+            };
+            let Ok(bytes) = read_bounded(&path, self.limits.max_file_bytes) else {
+                continue;
+            };
+            if text(bytes.clone(), self.limits.max_file_bytes).is_err() {
+                continue;
+            }
+            if total.saturating_add(bytes.len()) > max_total_bytes {
+                continue;
+            }
+            total += bytes.len();
+            selected.push(relative);
+        }
+        selected
+    }
+
     fn search(
         &self,
         contract: &TaskContract,

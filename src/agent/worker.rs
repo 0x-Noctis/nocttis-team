@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
-    context::{BuiltContext, ContextBuilder, ContextError, ContextRequest},
+    context::{BuiltContext, ContextBuilder, ContextError, ContextRequest, ContextSourceKind},
     domain::{
         state_machine::{Actor, transition},
         task::{TaskContract, TaskStatus},
@@ -24,6 +24,8 @@ use crate::{
 const INSTRUCTIONS: &str = include_str!("prompts/worker.md");
 /// Batas isi satu hasil tool yang dikembalikan ke model; selebihnya dipotong supaya konteks tidak meledak.
 const MAX_TOOL_OUTPUT_BYTES: usize = 16 * 1024;
+/// Total isi file allowed_paths yang disertakan di pesan pertama (selebihnya dibaca model lewat `read_file`).
+const MAX_PRELOADED_BYTES: usize = 24 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -271,10 +273,15 @@ impl<'a, M: WorkerModel, C: CheckpointStore> Worker<'a, M, C> {
                 );
             }
             if context_dirty {
-                match self
-                    .context
-                    .build(self.contract, &ContextRequest::default())
-                {
+                // Isi file literal di allowed_paths ikut dikirim di pesan pertama: satu giliran model (dan overhead
+                // per-panggilan) lebih hemat daripada membiarkan model membacanya lewat tool.
+                let request = ContextRequest {
+                    excerpts: self
+                        .context
+                        .readable_allowed_files(self.contract, MAX_PRELOADED_BYTES),
+                    search_terms: Vec::new(),
+                };
+                match self.context.build(self.contract, &request) {
                     Ok(context) => messages.push(context_message(&context)),
                     Err(_) => {
                         return self.finish(
@@ -696,7 +703,25 @@ fn context_message(context: &BuiltContext) -> Message {
         content: context
             .entries
             .iter()
-            .map(|entry| entry.content.as_str())
+            .map(|entry| match entry.source.kind {
+                ContextSourceKind::TaskContract => entry.content.clone(),
+                ContextSourceKind::SourceFile => format!(
+                    "### Isi file `{}`{}\n{}",
+                    entry.source.reference,
+                    if entry.source.truncation_reason.is_some() {
+                        " (TERPOTONG; baca sisanya dengan read_file)"
+                    } else {
+                        ""
+                    },
+                    entry.content
+                ),
+                ContextSourceKind::Artifact => {
+                    format!(
+                        "### Artifact `{}`\n{}",
+                        entry.source.reference, entry.content
+                    )
+                }
+            })
             .collect::<Vec<_>>()
             .join("\n\n"),
         tool_call_id: None,

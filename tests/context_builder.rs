@@ -704,3 +704,41 @@ fn errors_do_not_expose_repository_path() {
 
     assert!(!error.contains(repository.0.to_string_lossy().as_ref()));
 }
+
+/// Optimasi token (M5-014): file literal di allowed_paths yang aman dibaca disertakan di pesan pertama worker.
+#[test]
+fn readable_allowed_files_are_literal_existing_text_within_the_total_cap() {
+    let repository = TestDirectory::new("preload-repo");
+    let artifacts = TestDirectory::new("preload-artifacts");
+    repository.write("src/a.js", b"aaaa");
+    repository.write("src/b.js", b"bbbbbbbb");
+    repository.write("src/big.js", &[b'x'; 40]);
+    repository.write("src/blob.bin", &[0, 1, 2, 3]);
+    repository.write("src/.env", b"SECRET=1");
+    repository.write("src/glob/inner.js", b"inner");
+    let artifact_store = stores(&repository, &artifacts);
+    let builder = ContextBuilder::new(&repository.0, &artifact_store, limits()).unwrap();
+    let allowed = [
+        "src/a.js",
+        "src/b.js",
+        "src/big.js",
+        "src/blob.bin",
+        "src/.env",
+        "src/missing.js",
+        "src/glob/**",
+        "src/glob/",
+    ];
+    let task = contract(&allowed, &[]);
+
+    // Batas total 16 byte: a (4) + b (8) muat, big (40) tidak; biner, rahasia, hilang, glob, dan direktori dilewati.
+    assert_eq!(
+        builder.readable_allowed_files(&task, 16),
+        ["src/a.js", "src/b.js"]
+    );
+    // Batas longgar: big ikut, tetap tanpa biner/rahasia/hilang/glob.
+    assert_eq!(
+        builder.readable_allowed_files(&task, 1_000),
+        ["src/a.js", "src/b.js", "src/big.js"]
+    );
+    assert!(builder.readable_allowed_files(&task, 0).is_empty());
+}
