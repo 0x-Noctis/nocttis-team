@@ -1,6 +1,6 @@
 # Catatan Rilis MVP — Release Candidate
 
-**Status: DITAHAN.** Seluruh gate otomatis lulus, tetapi dua kriteria angka dari RANCANGAN §23 (penurunan median input token
+**Status: DITAHAN — ada blocker kritis (2026-10-08): worker belum dapat bekerja dengan model nyata** (skema tool kosong, tanpa prompt sistem worker/reviewer, hasil tool tidak dikembalikan; bukti dan rinciannya di [benchmark.md](benchmark.md)). Seluruh gate otomatis lulus karena memakai provider palsu. Selain itu dua kriteria angka dari RANCANGAN §23 (penurunan median input token
 ≥ 50% dan ≥ 80% task fixture selesai tanpa intervensi) **belum diukur dengan model nyata**, sehingga aturan rilis
 ("median input token turun minimal 50% dari baseline atau release ditahan") belum dapat dinyatakan terpenuhi. Rilis dapat
 dilepas setelah pengukuran dijalankan dan lulus; lihat "Yang menahan rilis".
@@ -36,6 +36,7 @@ Basis: commit `740d2df` pada `main` lokal (belum di-push), dijalankan 2026-10-07
 
 ## Yang menahan rilis
 
+0. **Buat protokol worker/reviewer yang berfungsi dengan model nyata** (skema tool lengkap, prompt sistem, pengembalian hasil tool, sebab kegagalan tersimpan) dan buktikan dengan satu run nyata. Tanpa ini benchmark tidak dapat berjalan.
 1. **Jalankan benchmark dengan model nyata** (dua kriteria angka di atas). Butuh provider dan API key yang disediakan pemilik;
    perintah ada di docs/benchmark.md. Jika median token turun < 50%, rilis tetap ditahan dan sebab per skenario wajib
    dijelaskan (`lead_input_tokens`, `db_input_tokens`).

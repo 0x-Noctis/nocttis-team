@@ -752,7 +752,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: backend/frontend parallel, conflict, retry, timeout, budget, approval, restart, provider fallback, test failure semuanya tercakup.
   - Verify: suite clean environment lulus tiga kali.
 
-- [ ] **M5-010 — Benchmark terhadap baseline** · Lane D _(harness selesai; pengukuran model nyata menunggu izin pemilik — lihat docs/benchmark.md)_
+- [ ] **M5-010 — Benchmark terhadap baseline** · Lane D _(harness selesai; run nyata 2026-10-08 menemukan worker belum berfungsi dengan model nyata — lihat docs/benchmark.md)_
   - Depends On: M0-004, M5-009
   - Parallel With: M5-011
   - Allowed Paths: `docs/benchmark.md`, `tests/baseline/**`
@@ -768,7 +768,7 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: fresh install dapat dilakukan hanya dari docs; semua env/config terdokumentasi; batas keamanan dinyatakan jujur.
   - Verify: fresh-install walkthrough.
 
-- [ ] **M5-012 — MVP release gate** · Integrator _(gate otomatis lulus; rilis DITAHAN sampai benchmark nyata M5-010 lulus — lihat docs/release-notes.md)_
+- [ ] **M5-012 — MVP release gate** · Integrator _(gate otomatis lulus; rilis DITAHAN: worker belum berfungsi dengan model nyata dan benchmark M5-010 belum bisa dijalankan — lihat docs/release-notes.md)_
   - Depends On: M5-009, M5-010, M5-011
   - Parallel With: —
   - Allowed Paths: seluruh repository hanya untuk fix blocker terverifikasi dan release notes
@@ -932,3 +932,5 @@ Tambahkan satu baris saat task selesai atau diblokir.
 | 2026-10-07 | M5-011 | Dokumentasi operator dan pengguna selesai | fresh-install walkthrough di clone bersih hanya dari dokumen: `cp .env.example .env` + `docker compose up -d --build` → `health/ready` 200, UI `/` dan `/providers` 200, `operations/config` sesuai tabel, container non-root uid 10001 read-only, port hanya 127.0.0.1, header CSP/X-Frame-Options ada; klaim yang salah ditemukan dan dikoreksi (X-Request-Id, cakupan SSRF); stack dimatikan | Alur provider→run→approval dengan model nyata tidak diulang di walkthrough (dicakup E2E M5-009 dan benchmark M5-010); `extra_hosts` ke host belum diuji |
 | 2026-10-07 | M5-012 | Gate rilis dijalankan; rilis DITAHAN | `cargo fmt --check`; `cargo clippy -D warnings`; `cargo test --no-fail-fast -- --test-threads=1` = 440 lulus/0 gagal/51 binary (termasuk drill backup 4 test); `npm run check` + `build`; `PRIMARY_API_KEY=dummy docker compose config --quiet`; `npm run e2e` = 60 lulus (audit `zz-release-audit`: 21 task DONE hasil orkestrasi berbukti lengkap, 4 seeding fixture; mutation check `diffx` membuat audit gagal) | Median token ≥ 50% dan ≥ 80% tanpa intervensi BELUM TERUKUR (benchmark butuh API key provider); blocker keamanan belum disepakati |
 | 2026-10-07 | M5-012 | Penyimpangan dari Allowed Paths yang dibenarkan: dokumentasi gate diperbaiki (`docker compose config` butuh `PRIMARY_API_KEY`; `cargo test` butuh `--no-fail-fast` dan superuser `postgres` untuk drill backup, sebelumnya hanya binary pertama yang gagal terlihat dan drill dilewati/gagal tanpa petunjuk). Status M4 di tabel ringkas yang basi (`[ ]`) dikoreksi menjadi `[x]` sesuai Exit Gate M4 | Human | Jalankan benchmark nyata dengan provider/API key; putuskan blocker keamanan; setelah itu tandai M5-012 dan rilis |
+| 2026-10-08 | M5-010 | Run benchmark nyata dicoba (router lokal, model baseline); berhenti pada dispatch pertama | Probe lolos setelah normalisasi SSE di proxy harness; bug `context_refs` Lead diperbaiki dengan regresi (`tests/lead_planner.rs`, clippy, `lead_api`, `project_api` lulus); dump request membuktikan skema tool worker kosong, tanpa prompt sistem worker/reviewer, hasil tool tidak dikembalikan | Tidak ada angka MVP; MVP belum dapat bekerja dengan model nyata |
+| 2026-10-08 | M5-010 | Temuan blocker produk: protokol worker/reviewer belum ada untuk model nyata. Diusulkan task baru (belum dibuat, butuh persetujuan scope): skema tool lengkap, prompt sistem worker dan reviewer, hasil tool dikembalikan ke model, sebab `worker.failed` disimpan, diuji terhadap model nyata | Human | Setujui task baru dan urutannya sebelum M5-012 dapat dinilai |

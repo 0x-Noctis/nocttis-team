@@ -9,7 +9,7 @@ pada **lima skenario fixture yang sama** (`tests/fixtures/sample-project/scenari
 |---|---|
 | Harness yang bisa diulang (`mvp-run.cjs`, `compare.cjs`) | **Selesai dan teruji** |
 | Pipa data diuji end-to-end dengan fake provider | Selesai (hanya validasi alat, bukan pengukuran) |
-| Pengukuran MVP dengan model nyata (`mvp-results.json`) | **BELUM DIJALANKAN** — butuh izin pemilik untuk memakai provider/model |
+| Pengukuran MVP dengan model nyata (`mvp-results.json`) | **TIDAK DAPAT DIJALANKAN**: percobaan 2026-10-08 menemukan bahwa worker belum berfungsi dengan model nyata (lihat "Percobaan run nyata") |
 | Gate: median input token turun ≥ 50% | **Belum diketahui** |
 | Gate: ≥ 80% skenario selesai tanpa intervensi | **Belum diketahui** |
 
@@ -42,7 +42,7 @@ node --test tests/baseline/*.test.cjs    # test harness (sintetis, tanpa model)
 node tests/baseline/verify.mjs           # skema + total token baseline vs event mentah
 ```
 
-Daftar lengkap variabel ada di komentar kepala `tests/baseline/mvp-run.cjs`. Skrip tidak pernah membaca nilai
+Daftar lengkap variabel ada di komentar kepala `tests/baseline/mvp-run.cjs` (termasuk `NOCTIS_BENCH_DUMP=<berkas>` untuk mencatat request/respons ke provider saat diagnosis; header Authorization tidak pernah dicatat, tetapi isi prompt dicatat, jadi jangan dipakai pada repository sensitif). Skrip tidak pernah membaca nilai
 API key; ia hanya mendaftarkan **nama** env var ke backend.
 
 Untuk pembanding yang adil, pakai **model yang sama** dengan baseline (`td/cx/gpt-5.6-sol-review`, provider
@@ -102,6 +102,37 @@ project/run, Lead → approve, polling, proxy penghitung, query `model_usage`/`a
 **Belum terbukti:** run yang mencapai `DONE` lalu lolos verify di dalam kolektor (fake provider tidak punya skrip
 untuk fixture ini, jadi semua run berakhir timeout). Jalur itu hanya dicakup test unit `verifyIntegration`.
 Run model nyata pertama harus diamati untuk memastikan kolom `retries`/`conflicts` terisi masuk akal.
+
+## Percobaan run nyata (2026-10-08)
+
+Dijalankan dengan router lokal `http://localhost:20128/v1`, model `td/cx/gpt-5.6-sol-review` (sama dengan baseline), database
+kosong, `NOCTIS_RUNNER_IMAGE=node:22-bookworm-slim`. **Tidak ada angka MVP yang dihasilkan** karena run berhenti pada
+dispatch pertama. Ini bukan "target tidak tercapai", melainkan MVP belum dapat dijalankan dengan model nyata. Temuan, berurutan:
+
+1. **Router tidak mematuhi kontrak OpenAI.** Ia selalu membalas SSE walau `stream` tidak diminta dan tidak mengirim `data: [DONE]`,
+   sehingga probe chat gagal `invalid_response` dan probe streaming `provider_unavailable`. Ditangani di harness (bukan di klien
+   produksi): proxy penghitung menormalkan respons (`tests/baseline/sse-normalize.cjs`, diuji). Perilaku ini juga perlu diketahui
+   operator yang memakai router sejenis.
+2. **Router menyisipkan ±4,9 ribu token input pada setiap panggilan** (prompt 4 kata terhitung 4.939 token). Baseline Codex memakai
+   router yang sama sehingga ikut menanggung biaya ini, tetapi MVP melakukan banyak panggilan kecil per task, jadi overhead per
+   panggilan memengaruhi perbandingan secara tidak setara. Interpretasi hasil nanti harus memperhitungkannya.
+3. **Bug produk (diperbaiki): `context_refs` dari Lead.** Model nyata mengisinya dengan path file; `ContextBuilder` hanya menerima
+   `artifact://<id>`, sehingga dispatch gagal `orchestrator.context` setelah plan disetujui. Sekarang dibuang saat parse plan
+   (`src/agent/lead.rs`, regresi di `tests/lead_planner.rs`). Fake provider tidak pernah memicunya.
+4. **Blocker produk (BELUM diperbaiki): worker tidak dapat bekerja dengan model nyata.** Bukti dari request sebenarnya (dump proxy):
+   - Skema tool kosong: `"parameters": {"type": "object"}` dengan deskripsi "Structured read_file tool" (`src/agent/worker.rs`
+     `tool_definitions`). Model tidak tahu argumen apa pun dan memanggil `read_file` dengan `{}` (dua kali), lalu worker gagal
+     `worker.failed`.
+   - Tidak ada prompt sistem untuk worker maupun reviewer (hanya Lead yang punya, `src/agent/prompts/lead.md`); protokol penyelesaian
+     (JSON `summary`/`status`) tidak pernah dijelaskan ke model.
+   - Hasil tool tidak dikembalikan ke model: `tool_message` hanya berisi `{"succeeded":…}`, bukan isi file/diff/hasil pencarian.
+   - `worker.failed` tidak menyimpan sebab (tidak ada payload event/log), sehingga kegagalan seperti ini sulit didiagnosis.
+   Seluruh suite E2E lulus karena fake provider tidak memeriksa skema tool, tidak membutuhkan prompt, dan tidak memakai hasil tool.
+   Artinya E2E membuktikan orkestrasi, bukan kemampuan agent dengan model sungguhan.
+
+Konsekuensi: kriteria rilis token ≥ 50% dan ≥ 80% tanpa intervensi tidak dapat dinilai sebelum protokol worker/reviewer untuk model
+nyata dibuat (skema tool lengkap, prompt sistem worker dan reviewer, pengembalian hasil tool, penyimpanan sebab kegagalan) dan
+diuji terhadap model nyata, bukan hanya fake provider.
 
 ## Kegagalan target
 

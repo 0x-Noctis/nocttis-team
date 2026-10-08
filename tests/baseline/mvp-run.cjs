@@ -23,6 +23,7 @@ const fs = require('node:fs');
 const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
+const { normalize } = require('./sse-normalize.cjs');
 
 const fixtureDir = path.join(__dirname, '..', 'fixtures', 'sample-project');
 const env = (name, fallback) => process.env[name] ?? fallback;
@@ -33,7 +34,10 @@ const PROXY_PORT = 7420;
 // Scheduler memilih model dari konfigurasi backend (NOCTIS__PROVIDER__MODEL); ID ini HARUS sama dengan nilai itu.
 const MODEL_ID = env('NOCTIS_BENCH_MODEL_ID', 'bench-model');
 
-/** Proxy penghitung: meneruskan request apa adanya (termasuk Authorization) dan mengakumulasi usage respons. */
+/**
+ * Proxy penghitung: meneruskan request apa adanya (termasuk Authorization), menghitung usage dari respons ASLI,
+ * lalu menormalkan respons provider yang tidak mematuhi kontrak OpenAI (lihat sse-normalize.cjs) sebelum diberikan ke backend.
+ */
 function startProxy(upstream) {
   const totals = { input: 0, cached: 0, output: 0, requests: 0 };
   const target = new URL(upstream);
@@ -41,18 +45,32 @@ function startProxy(upstream) {
     const chunks = [];
     req.on('data', (chunk) => chunks.push(chunk));
     req.on('end', () => {
+      const requestBody = Buffer.concat(chunks);
+      let wantsStream = false;
+      try { wantsStream = JSON.parse(requestBody.toString('utf8')).stream === true; } catch { /* bukan JSON: teruskan apa adanya */ }
       const headers = { ...req.headers, host: target.host };
       const upstreamReq = (target.protocol === 'https:' ? require('node:https') : http).request(
         { hostname: target.hostname, port: target.port, path: target.pathname.replace(/\/$/, '') + req.url.replace(/^\/v1/, ''), method: req.method, headers },
         (upstreamRes) => {
           const body = [];
-          res.writeHead(upstreamRes.statusCode, upstreamRes.headers);
-          upstreamRes.on('data', (chunk) => { body.push(chunk); res.write(chunk); });
-          upstreamRes.on('end', () => { res.end(); addUsage(totals, Buffer.concat(body).toString('utf8')); });
+          upstreamRes.on('data', (chunk) => body.push(chunk));
+          upstreamRes.on('end', () => {
+            const text = Buffer.concat(body).toString('utf8');
+            addUsage(totals, text);
+            // Diagnosis (opsional): NOCTIS_BENCH_DUMP=<berkas> menambahkan request/respons (dipotong). Header tidak pernah dicatat.
+            if (process.env.NOCTIS_BENCH_DUMP) {
+              fs.appendFileSync(process.env.NOCTIS_BENCH_DUMP, `${JSON.stringify({ status: upstreamRes.statusCode, request: requestBody.toString('utf8').slice(0, 12000), response: text.slice(0, 6000) })}\n`);
+            }
+            // Hanya respons sukses yang dinormalkan; error provider diteruskan apa adanya.
+            const ok = upstreamRes.statusCode >= 200 && upstreamRes.statusCode < 300;
+            const out = ok ? normalize(wantsStream, upstreamRes.headers['content-type'], text) : { contentType: upstreamRes.headers['content-type'], body: text };
+            res.writeHead(upstreamRes.statusCode, { ...(out.contentType ? { 'content-type': out.contentType } : {}), 'content-length': Buffer.byteLength(out.body) });
+            res.end(out.body);
+          });
         }
       );
       upstreamReq.on('error', () => res.writeHead(502).end());
-      upstreamReq.end(Buffer.concat(chunks));
+      upstreamReq.end(requestBody);
     });
   });
   return new Promise((resolve) => server.listen(PROXY_PORT, '127.0.0.1', () => resolve({ server, totals })));
