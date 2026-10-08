@@ -782,7 +782,15 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
     - terbukti dengan run nyata (4 dari 5 skenario fixture selesai `DONE` dengan test lulus).
   - Verify: test regresi per temuan (mutation check untuk giliran tool dan serialisasi), `cargo test --no-fail-fast` 448 lulus, E2E 60 lulus, benchmark nyata `tests/baseline/mvp-results.json`.
 
-- [ ] **M5-012 — MVP release gate** · Integrator _(gate otomatis lulus dan worker kini berfungsi dengan model nyata; rilis DITAHAN karena median input token hanya turun 47,0% (< 50%) — lihat docs/release-notes.md)_
+- [x] **M5-014 — Optimasi token worker dan Lead** · Lane B
+  - Depends On: M5-013
+  - Parallel With: —
+  - Allowed Paths: `src/agent/**`, `src/context/mod.rs`, `tests/**`, `docs/**`
+  - Output: median input token turun ≥ 50% dari baseline pada benchmark nyata.
+  - Acceptance: isi file literal di `allowed_paths` ikut pesan pertama worker (satu giliran model lebih sedikit); prompt Lead memakai sesedikit mungkin task dan tidak membuat scope tumpang tindih; terukur ulang dengan model nyata.
+  - Verify: `cargo test --no-fail-fast` 450 lulus, E2E 60 lulus, `node tests/baseline/compare.cjs` pada `mvp-results.json` dan `mvp-results.run2.json` (−57,4% di kedua run).
+
+- [ ] **M5-012 — MVP release gate** · Integrator _(gate otomatis lulus; gate token tercapai (−57,4%) tetapi gate tanpa intervensi tidak stabil (80% lalu 60%) dan keputusan keamanan terbuka — rilis DITAHAN, lihat docs/release-notes.md)_
   - Depends On: M5-009, M5-010, M5-011
   - Parallel With: —
   - Allowed Paths: seluruh repository hanya untuk fix blocker terverifikasi dan release notes
@@ -951,3 +959,5 @@ Tambahkan satu baris saat task selesai atau diblokir.
 | 2026-10-08 | M5-013 | Protokol worker/reviewer untuk model nyata diselesaikan | fmt, clippy `-D warnings`; `cargo test --no-fail-fast -- --test-threads=1` = 448 lulus/0 gagal/51 binary; `npm run e2e` = 60 lulus; run nyata (router lokal, model baseline) menyelesaikan 4 dari 5 skenario sampai `DONE` dengan test lulus tanpa intervensi; mutation check: giliran assistant tanpa `tool_calls`, argumen kosong di serialisasi, dan syarat `NOT EXISTS` pada penutupan run masing-masing membuat test gagal | Satu run per skenario; `retries` dan `conflicts` 0 di semua run nyata |
 | 2026-10-08 | M5-010 | Benchmark nyata selesai | `node tests/baseline/mvp-run.cjs` lalu `compare.cjs`: median input token 61.118 → 32.402 (turun 47,0%, target 50% GAGAL); 4/5 selesai tanpa intervensi (80,0%, lulus tepat di ambang); `file-conflict` gagal karena Lead merencanakan scope tumpang tindih. Run pertama (38,9%) ditolak karena token probe ikut terhitung dan diulang | Overhead router ±4.939 token/panggilan menyumbang ≥ ±61% input MVP, jadi perbandingan peka jumlah panggilan; penjelasan lengkap di docs/benchmark.md |
 | 2026-10-08 | M5-012 | Rilis tetap DITAHAN: gate token 47,0% < 50% (aturan RANCANGAN §23) | lihat baris M5-010 dan docs/release-notes.md | Human | Putuskan: terima/rendahkan target, atau kerjakan optimasi token (konteks file di pesan pertama worker, ringkasan hasil tool, Lead untuk task tunggal) lalu ukur ulang; ukur juga di provider tanpa overhead; putuskan blocker keamanan |
+| 2026-10-08 | M5-014 | Optimasi token selesai; diukur ulang dua kali dengan model nyata | `cargo test --no-fail-fast -- --test-threads=1` = 450 lulus/0 gagal/51 binary; fmt, clippy `-D warnings`; `npm run e2e` = 60 lulus; mutation check (preload dimatikan) membuat test gagal; benchmark: median input token 61.118 → 26.059 (run 1) dan 26.019 (run 2) = turun 57,4% (gate ≥ 50% TERCAPAI, stabil) | Gate tanpa intervensi tidak stabil: 4/5 (80%) lalu 3/5 (60%), gabungan 7/10 = 70% (< 80%); `file-conflict` selalu gagal (acceptance tak dapat dipenuhi satu worker, worker meminta manusia); `test-failure` gagal di run 2 (diff kosong ditolak reviewer, tanpa percobaan ulang karena `max_attempts=1`) |
+| 2026-10-08 | M5-012 | Rilis tetap DITAHAN | Gate token lulus (57,4%), gate tanpa intervensi tidak andal (70% gabungan), blocker keamanan belum disepakati | Human | Pilih: (a) tetapkan eskalasi aman untuk `file-conflict` sebagai bukan kegagalan dengan alasan tertulis, (b) naikkan `max_attempts` bawaan Lead jadi 2 lalu ukur ulang, (c) ukur ≥ 3 run per skenario; putuskan blocker keamanan; push terblokir oleh fixture token Slack palsu di `tests/security.rs:53` (commit `b24ed78`) — buka URL unblock GitHub atau tulis ulang riwayat lokal |

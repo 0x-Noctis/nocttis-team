@@ -8,12 +8,12 @@ pada **lima skenario fixture yang sama** (`tests/fixtures/sample-project/scenari
 | Bagian | Status |
 |---|---|
 | Harness yang bisa diulang (`mvp-run.cjs`, `compare.cjs`) | selesai dan teruji |
-| Pengukuran MVP dengan model nyata (`mvp-results.json`) | **selesai (2026-10-08)**: satu run per skenario, model sama dengan baseline |
-| Gate: median input token turun ≥ 50% | **TIDAK TERCAPAI**: turun 47,0% (61.118 → 32.402) |
-| Gate: ≥ 80% skenario selesai tanpa intervensi | **tercapai tepat di ambang**: 4 dari 5 (80,0%) |
+| Pengukuran MVP dengan model nyata | **selesai**: sebelum optimasi (M5-013) dan dua run setelah optimasi token (M5-014), model sama dengan baseline |
+| Gate: median input token turun ≥ 50% | **TERCAPAI setelah optimasi**: turun 57,4% di kedua run (sebelumnya 47,0%) |
+| Gate: ≥ 80% skenario selesai tanpa intervensi | **TIDAK STABIL**: 4/5 (80%) di run 1 tetapi 3/5 (60%) di run 2; gabungan 7/10 = 70% |
 
-Keputusan rilis: aturan "median input token turun minimal 50% atau release ditahan" belum terpenuhi, jadi rilis **ditahan**
-(lihat release-notes.md). Penjelasan kegagalan target ada di bagian "Hasil pengukuran nyata".
+Keputusan rilis: gate token terpenuhi, tetapi gate "tanpa intervensi" tidak terpenuhi secara andal pada pengukuran ulang, jadi rilis
+tetap **ditahan** (lihat release-notes.md). Rincian di bagian "Setelah optimasi token (M5-014)".
 
 ## Cara menjalankan
 
@@ -172,10 +172,51 @@ Percobaan pertama dengan model nyata tidak dapat berjalan sama sekali. Penyebabn
 | Status run tidak pernah `DONE` | scheduler menutup run yang semua task-nya `DONE` |
 | `worker.failed` tanpa sebab | sebab (jenis, tanpa isi) dicatat di log terstruktur |
 
+## Setelah optimasi token (M5-014)
+
+Perubahan (semua dengan test): isi file literal di `allowed_paths` ikut pesan pertama worker (menghilangkan satu giliran
+`read_file`, sehingga 2 panggilan model per task, bukan 3); prompt Lead memakai sesedikit mungkin task dan tidak membuat scope
+tumpang tindih. Pengukuran: dua run penuh berturut-turut, model, router, dan fixture sama seperti sebelumnya, token probe tidak
+dihitung. Data mentah: `tests/baseline/mvp-results.json` (run 1), `mvp-results.run2.json` (run 2), dan
+`mvp-results.before-optimization.json` (sebelum optimasi, 47,0%). Batas tunggu per skenario: 900 s (run 1), 300 s (run 2).
+
+| Scenario | Baseline | Sebelum optimasi | Run 1 | Run 2 |
+|---|---:|---:|---:|---:|
+| backend-only | 43.706 · ok | 32.402 · ok | 26.059 · ok | 26.019 · ok |
+| frontend-only | 62.833 · ok | 32.489 · ok | 26.061 · ok | 26.128 · ok |
+| cross-stack | 61.118 · ok | 41.718 · ok | 27.086 · ok | 27.171 · ok |
+| test-failure | 58.846 · ok | 31.581 · ok | 25.073 · ok | 18.545 · **gagal** |
+| file-conflict | 76.461 · ok | 5.843 · **gagal** | 12.435 · **gagal** | 12.474 · **gagal** |
+| **Median input token** | **61.118** | 32.402 (−47,0%) | **26.059 (−57,4%)** | **26.019 (−57,4%)** |
+| **Tanpa intervensi** | 5/5 | 4/5 | 4/5 (80%) | 3/5 (60%) |
+
+(Angka = token input total skenario, "ok" = selesai `DONE` dengan test lulus tanpa intervensi.)
+
+**Token:** gate tercapai dan stabil (−57,4% di kedua run). Penghematan datang dari berkurangnya jumlah panggilan model (satu giliran
+tool hilang per task); karena router menambah ±4.939 token per panggilan, penghematan per panggilan itu besar. Ketergantungan
+pada overhead router tetap berlaku: ukuran penghematan di provider tanpa overhead belum diuji.
+
+**Tanpa intervensi — tidak stabil:**
+- `file-conflict` gagal di semua run, dan itu wajar: acceptance-nya ("satu task mengubah harga ke 25, task lain ke 26, penggabungan
+  melaporkan konflik Git") tidak dapat dipenuhi satu worker. Setelah perbaikan prompt Lead plan kini valid (satu task), lalu worker
+  memanggil `request_human` (perilaku aman, tetapi dihitung sebagai butuh manusia). Sebelumnya Lead membuat dua task tumpang tindih
+  dan plan ditolak.
+- `test-failure` selesai di run 1 tetapi gagal di run 2: worker menyatakan selesai tanpa mengubah apa pun (diff kosong), reviewer
+  nyata menolaknya (`review.changes_requested`), dan `max_attempts=1` dari Lead membuat tidak ada percobaan ulang. Ini variasi
+  perilaku model, bukan bug yang terisolasi.
+- Gabungan kedua run: 7/10 = 70% < 80%. Dengan satu run per skenario dan keluaran yang tidak deterministik, gate ini tidak dapat
+  dinyatakan terpenuhi secara andal.
+
+**Opsi untuk pemilik** (tidak diputuskan di sini): (a) menetapkan hasil aman yang diharapkan untuk `file-conflict` (eskalasi ke manusia
+tanpa merusak branch dasar) sebagai bukan kegagalan, dengan alasan tertulis; (b) menaikkan `max_attempts` bawaan Lead menjadi 2
+agar penolakan reviewer memicu satu percobaan ulang (menambah token, perlu diukur ulang); (c) menjalankan ≥ 3 run per skenario dan
+memakai median/persentase gabungan sebagai bukti.
+
 ## Kegagalan target
 
-Satu gate gagal: median input token turun 47,0% (target 50%). Penjelasannya ada di "Kenapa target token tidak tercapai". Gate
-tanpa intervensi lulus tepat di ambang (80,0%), tanpa margin: satu skenario lagi yang gagal akan menjatuhkannya.
+Sebelum optimasi: median input token turun 47,0% (target 50%); penjelasannya di "Kenapa target token tidak tercapai" dan diperbaiki
+lewat M5-014. Setelah optimasi gate token terpenuhi (57,4%), tetapi gate tanpa intervensi tidak stabil (80% lalu 60%); lihat
+"Setelah optimasi token (M5-014)".
 
 ## Berkas
 
@@ -183,6 +224,7 @@ tanpa intervensi lulus tepat di ambang (80,0%), tanpa margin: satu skenario lagi
 |---|---|
 | `tests/baseline/results.json`, `*.jsonl` | data mentah baseline M0-004 |
 | `tests/baseline/mvp-run.cjs` | kolektor MVP (proxy penghitung + run + query DB) |
-| `tests/baseline/mvp-results.json` | data mentah MVP (run nyata 2026-10-08) |
+| `tests/baseline/mvp-results.json`, `mvp-results.run2.json` | data mentah MVP setelah optimasi (run 1 dan run 2, 2026-10-08) |
+| `tests/baseline/mvp-results.before-optimization.json` | data mentah MVP sebelum optimasi (47,0%) |
 | `tests/baseline/compare.cjs` | tabel perbandingan dan gate |
 | `tests/baseline/compare.test.cjs`, `mvp-run.test.cjs` | test harness (data sintetis) |

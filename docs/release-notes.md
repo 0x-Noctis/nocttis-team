@@ -1,9 +1,9 @@
 # Catatan Rilis MVP — Release Candidate
 
-**Status: DITAHAN.** Seluruh gate otomatis lulus dan, setelah M5-013, worker/reviewer berfungsi dengan model nyata (4 dari 5
-skenario fixture selesai `DONE` tanpa intervensi). Tetapi pengukuran nyata menunjukkan **median input token hanya turun 47,0%**
-dari baseline (target RANCANGAN §23: ≥ 50%), sehingga aturan rilis ("median input token turun minimal 50% dari baseline atau
-release ditahan") belum terpenuhi. Rincian dan penjelasan: [benchmark.md](benchmark.md).
+**Status: DITAHAN.** Seluruh gate otomatis lulus, worker/reviewer berfungsi dengan model nyata, dan setelah optimasi token (M5-014)
+**median input token turun 57,4%** dari baseline di dua run berturut-turut (target ≥ 50% tercapai). Namun gate "≥ 80% skenario tanpa
+intervensi" tidak stabil: 4/5 (80%) di run 1 tetapi 3/5 (60%) di run 2, gabungan 7/10 = 70%. Karena itu rilis belum dapat
+dinyatakan layak. Rincian dan opsi: [benchmark.md](benchmark.md).
 
 Basis: cabang `agent-1/m5-013-real-model` di atas `main` lokal, dijalankan 2026-10-08.
 
@@ -13,21 +13,21 @@ Basis: cabang `agent-1/m5-013-real-model` di atas `main` lokal, dijalankan 2026-
 |---|---|---|
 | Format | `cargo fmt --check` | lulus |
 | Lint | `cargo clippy --all-targets --all-features -- -D warnings` | lulus |
-| Unit + integrasi Rust | `cargo test --no-fail-fast -- --test-threads=1` dengan PostgreSQL 16 (lihat docs/development.md) | **448 lulus, 0 gagal**, 51 binary, 0 dilewati |
+| Unit + integrasi Rust | `cargo test --no-fail-fast -- --test-threads=1` dengan PostgreSQL 16 (lihat docs/development.md) | **450 lulus, 0 gagal**, 51 binary, 0 dilewati |
 | Security suite | `tests/security.rs`, `tests/tool_policy.rs`, `tests/process_runner.rs`, `tests/context_builder.rs` (bagian dari baris di atas) | lulus |
 | Backup/restore drill | `tests/backup` (database nyata) | 4 test lulus, benar-benar berjalan (bukan dilewati) |
 | WebApp | `cd web && npm run check` dan `npm run build` | 0 error, build sukses |
 | Compose | `PRIMARY_API_KEY=dummy docker compose config --quiet` | lulus (tanpa variable itu gagal; dokumen diperbaiki) |
 | E2E matrix + audit rilis | `cd web && NOCTIS_E2E_API_KEY=… npm run e2e` | **60 lulus** (2,7 menit); sebelumnya 5× berturut-turut lulus pada M5-009 |
 | Fresh install dari dokumen | README/operations.md di clone bersih (M5-011) | `health/ready` 200, UI dan API terlayani, container non-root read-only |
-| Benchmark vs baseline (model nyata) | `node tests/baseline/mvp-run.cjs` lalu `compare.cjs` | **median token −47,0% (GAGAL, target ≥ 50%)**; tanpa intervensi 4/5 = 80,0% (lulus tepat di ambang) |
+| Benchmark vs baseline (model nyata, setelah M5-014) | `node tests/baseline/mvp-run.cjs` lalu `compare.cjs` | **median token −57,4% di 2 run (lulus)**; tanpa intervensi 4/5 lalu 3/5 (gabungan 70%, **tidak stabil**) |
 
 ## Kriteria acceptance M5-012
 
 | Kriteria | Status | Bukti |
 |---|---|---|
-| Median input token turun ≥ 50% dari baseline | **TIDAK TERPENUHI (47,0%)** | median 61.118 → 32.402 token (target ≤ 30.559); `tests/baseline/mvp-results.json`; docs/benchmark.md |
-| ≥ 80% task fixture selesai tanpa intervensi manual | terpenuhi tepat di ambang (4/5 = 80,0%) | run nyata; `file-conflict` gagal karena Lead merencanakan scope tumpang tindih. Tanpa margin dan satu run per skenario |
+| Median input token turun ≥ 50% dari baseline | **terpenuhi (57,4%, dua run)** | median 61.118 → 26.059 / 26.019 token (target ≤ 30.559); sebelum optimasi 47,0%; `tests/baseline/mvp-results*.json`; docs/benchmark.md |
+| ≥ 80% task fixture selesai tanpa intervensi manual | **tidak stabil**: 80% lalu 60% (gabungan 70%) | `file-conflict` selalu gagal (acceptance tak dapat dipenuhi satu worker); `test-failure` gagal di run 2 (diff kosong ditolak reviewer, tanpa percobaan ulang). Satu run per skenario |
 | Tidak ada edit di luar allowed paths | terpenuhi (diuji) | `patches_outside_the_allowed_paths_are_rejected_without_touching_git` (`tests/integrator.rs`), allowlist `ToolPolicy` (`tests/tool_policy.rs`, `tests/security.rs`) |
 | Semua task `DONE` punya review, verification, patch, event, usage | terpenuhi (diuji) | `tests/e2e/zz-release-audit.spec.cjs`: 21 task `DONE` hasil orkestrasi, semuanya lengkap; 4 `DONE` lain adalah seeding fixture UI tanpa event dan dilaporkan terpisah. Audit gagal bila bukti dihapus (mutation check) |
 | Restart tidak kehilangan status | terpenuhi (diuji) | E2E `[matrix:restart-recovery]` (SIGKILL lalu pulih), `tests/recovery.rs`, `tests/scheduler_parallel.rs` |
@@ -36,18 +36,16 @@ Basis: cabang `agent-1/m5-013-real-model` di atas `main` lokal, dijalankan 2026-
 
 ## Yang menahan rilis
 
-1. **Gate token tidak tercapai: 47,0% < 50%.** Penyebab terukur: router menyisipkan ±4.939 token pada setiap panggilan dan MVP melakukan
-   minimal 4 panggilan per skenario (≥ ±61% input adalah overhead router); biaya tetap Lead dan reviewer pada task kecil.
-   Pilihan pemilik: (a) menerima hasil dan menurunkan target dengan alasan tertulis, (b) mengerjakan optimasi token (isi file
-   allowed_paths pada pesan pertama worker, hasil tool lebih ringkas, Lead untuk task tunggal) lalu mengukur ulang, dan/atau
-   (c) mengukur di provider tanpa overhead. Hanya satu run per skenario; angka dapat bergeser antar run.
-2. **Putuskan blocker keamanan yang belum disepakati** (bukan cacat tersembunyi; semuanya terdokumentasi):
-   - API/UI tanpa autentikasi dan tanpa TLS (mitigasi: port hanya `127.0.0.1`).
-   - Pemeriksaan anti-SSRF provider hanya pada probe, bukan pada panggilan Lead/worker saat run.
-   Untuk MVP satu operator di mesin sendiri keduanya dapat diterima; untuk penggunaan lain keduanya menjadi blocker.
+1. **Gate "tanpa intervensi" tidak andal** (70% gabungan dua run). Pilihan pemilik: (a) menetapkan eskalasi aman ke manusia untuk
+   `file-conflict` (acceptance yang tak dapat dipenuhi satu worker) sebagai bukan kegagalan, dengan alasan tertulis; (b) menaikkan
+   `max_attempts` bawaan Lead menjadi 2 agar penolakan reviewer memicu satu percobaan ulang (menambah token, perlu diukur ulang);
+   (c) mengukur ≥ 3 run per skenario dan memakai persentase gabungan sebagai bukti.
+2. **Putuskan blocker keamanan yang belum disepakati** (terdokumentasi, bukan cacat tersembunyi): API/UI tanpa autentikasi dan TLS
+   (otentikasi ditunda atas permintaan pemilik; mitigasi: port hanya `127.0.0.1`), dan pemeriksaan anti-SSRF provider hanya pada probe.
+3. **Push ke GitHub terblokir** oleh fixture token Slack palsu di `tests/security.rs:53` (commit `b24ed78`): gunakan URL unblock GitHub
+   (tokennya palsu) atau tulis ulang riwayat lokal yang belum dipush.
 
-Sudah teratasi sepanjang 2026-10-08 (M5-013): worker/reviewer tidak berfungsi dengan model nyata, status run tidak pernah `DONE`,
-dan beberapa celah protokol lain; daftar lengkap di benchmark.md.
+Sudah teratasi (M5-013, M5-014): worker/reviewer tidak berfungsi dengan model nyata, status run tidak pernah `DONE`, dan gate token.
 
 ## Known limitations
 

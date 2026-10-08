@@ -12,6 +12,7 @@
 //   NOCTIS_BENCH_API             URL backend            (default http://127.0.0.1:7410)
 //   NOCTIS_BENCH_POSTGRES        nama container Postgres untuk psql (default noctis-agent-3-e2e-postgres)
 //   NOCTIS_BENCH_SCENARIOS       daftar id skenario dipisah koma (default semua); hasil parsial TIDAK boleh dilaporkan sebagai benchmark penuh
+//   NOCTIS_BENCH_OUT             berkas keluaran (default tests/baseline/mvp-results.json)
 //   NOCTIS_BENCH_TIMEOUT_SECONDS batas tunggu per skenario (default 900)
 //   NOCTIS_BENCH_OBJECTIVE_PREFIX awalan objective (hanya untuk validasi harness dengan fake provider)
 //
@@ -248,7 +249,7 @@ async function main() {
   } finally {
     proxy.server.close();
   }
-  const out = path.join(__dirname, 'mvp-results.json');
+  const out = process.env.NOCTIS_BENCH_OUT ?? path.join(__dirname, 'mvp-results.json');
   fs.writeFileSync(out, `${JSON.stringify({
     task_id: 'M5-010',
     date: new Date().toISOString().slice(0, 10),
