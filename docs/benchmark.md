@@ -7,13 +7,15 @@ pada **lima skenario fixture yang sama** (`tests/fixtures/sample-project/scenari
 
 | Bagian | Status |
 |---|---|
-| Harness yang bisa diulang (`mvp-run.cjs`, `compare.cjs`) | selesai dan teruji |
-| Pengukuran MVP dengan model nyata | **selesai**: sebelum optimasi (M5-013) dan dua run setelah optimasi token (M5-014), model sama dengan baseline |
-| Gate: median input token turun ≥ 50% | **TERCAPAI setelah optimasi**: turun 57,4% di kedua run (sebelumnya 47,0%) |
-| Gate: ≥ 80% skenario selesai tanpa intervensi | **TIDAK STABIL**: 4/5 (80%) di run 1 tetapi 3/5 (60%) di run 2; gabungan 7/10 = 70% |
+| Harness yang bisa diulang (`mvp-run.cjs`, `compare.cjs`) | selesai dan teruji; mendukung banyak putaran dan metrik terpisah normal/konflik |
+| Pengukuran MVP dengan model nyata | **3 putaran × 5 skenario (2026-10-08)**, model dan router sama dengan baseline |
+| Normal: ≥ 80% selesai otomatis | **tercapai: 12/12 (100%)** |
+| Token: median turun ≥ 50% | **tercapai: turun 56,2%** (59.982 → 26.281) |
+| Konflik: 100% berhenti aman, minta manusia | **tercapai: 3/3** |
+| Branch dasar utuh di semua run | **tercapai: 15/15** |
 
-Keputusan rilis: gate token terpenuhi, tetapi gate "tanpa intervensi" tidak terpenuhi secara andal pada pengukuran ulang, jadi rilis
-tetap **ditahan** (lihat release-notes.md). Rincian di bagian "Setelah optimasi token (M5-014)".
+Rincian di bagian "Benchmark rilis: 3 putaran (M5-017)". Riwayat pengukuran sebelumnya (47,0% lalu 57,4% dengan gate intervensi
+yang tidak stabil) dipertahankan di bawah sebagai konteks.
 
 ## Cara menjalankan
 
@@ -172,6 +174,53 @@ Percobaan pertama dengan model nyata tidak dapat berjalan sama sekali. Penyebabn
 | Status run tidak pernah `DONE` | scheduler menutup run yang semua task-nya `DONE` |
 | `worker.failed` tanpa sebab | sebab (jenis, tanpa isi) dicatat di log terstruktur |
 
+## Benchmark rilis: 3 putaran (M5-017)
+
+**Aturan penilaian (ditetapkan pemilik, diterapkan di `compare.cjs`):** metrik normal dan konflik dipisah.
+- *Skenario normal* (`backend-only`, `frontend-only`, `cross-stack`, `test-failure`): wajib selesai otomatis (sukses, tanpa intervensi) ≥ 80% dari seluruh run.
+- *Skenario konflik* (`file-conflict`): bukan target selesai otomatis. Wajib **100%** berhenti aman: tidak selesai, task menunggu keputusan manusia (`NEEDS_HUMAN`/`CONFLICT`), dan branch dasar utuh. Tidak pernah disebut berhasil otomatis, dan tidak dicampur dengan kegagalan worker biasa.
+- *Token*: median input token run normal MVP vs median skenario normal baseline (59.982), turun ≥ 50%.
+- *Branch dasar*: `main` repository tetap di commit awal dan bersih pada SEMUA run.
+- Sukses = run `DONE` dan seluruh suite fixture lulus di cabang integrasi (bukan pola nama test per skenario, yang dapat cocok dengan 0 test).
+
+**Perubahan produk sebelum pengukuran ini** (semua dengan test dan mutation check): `max_attempts` bawaan Lead 2 (percobaan kedua hanya setelah
+penolakan reviewer atau verifikasi gagal, dengan umpan balik ke worker); kehabisan percobaan atau `request_human` berujung `NEEDS_HUMAN`
+(terlihat di Approvals, bukan diam di `READY`/`FAILED`); artifact verifikasi percobaan ke-2 punya scope sendiri; anti-SSRF di setiap
+panggilan provider; server menolak bind non-loopback.
+
+Data mentah: `tests/baseline/mvp-results.json` (15 run, 2026-10-08, `round` 1–3). Router lokal `http://localhost:20128/v1`, model
+`td/cx/gpt-5.6-sol-review`, `NOCTIS_RUNNER_IMAGE=node:22-bookworm-slim`, batas tunggu 600 s per skenario.
+Perintah: `NOCTIS_BENCH_ROUNDS=3 node tests/baseline/mvp-run.cjs`, lalu `node tests/baseline/compare.cjs tests/baseline/results.json tests/baseline/mvp-results.json`.
+
+| Scenario | Jenis | Input token (baseline → median MVP) | Hasil MVP (3 putaran) |
+|---|---|---:|---|
+| backend-only | normal | 43.706 → 26.195 | 3/3 otomatis |
+| frontend-only | normal | 62.833 → 26.330 | 3/3 otomatis |
+| cross-stack | normal | 61.118 → 27.360 | 3/3 otomatis |
+| test-failure | normal | 58.846 → 25.594 | 3/3 otomatis |
+| file-conflict | konflik | 76.461 → 39.811 | 3/3 berhenti aman |
+
+| Gate | Hasil | Syarat |
+|---|---:|---:|
+| Normal selesai otomatis | 12/12 = **100%** | ≥ 80% |
+| Median input token normal | 59.982 → 26.281 = **turun 56,2%** | ≥ 50% |
+| Konflik berhenti aman | 3/3 = **100%** | 100% |
+| Branch dasar utuh | 15/15 = **100%** | 100% |
+
+Cara `file-conflict` berhenti (tiga putaran, tiga jalur): putaran 1 percobaan ke-2 juga ditolak lalu habis → `NEEDS_HUMAN` (tanpa pesan
+manusia); putaran 2 percobaan ke-2 lalu worker memanggil `request_human`; putaran 3 worker langsung `request_human` pada percobaan pertama.
+Semuanya berakhir `NEEDS_HUMAN` dengan branch dasar utuh dan tanpa penggabungan ke cabang integrasi.
+
+**Batas klaim ini (baca sebelum mengandalkannya):**
+- Tiga putaran, satu model dan satu router. Keluaran model tidak deterministik; pengukuran sebelum perbaikan eskalasi sempat 80% lalu 60% pada gate intervensi.
+- Penghematan token sangat dipengaruhi router yang menambah ±4.939 token per panggilan (hanya mengurangi jumlah panggilan yang menghemat); di provider tanpa overhead rasionya belum diuji.
+- Jalur percobaan ulang pada skenario normal tidak teramati di run nyata (`retries` = 0 di 12 run normal); ia hanya terbukti oleh test dan E2E, dan oleh jalur konflik (putaran 1 dan 2).
+- Latensi tidak menjadi gate: skenario `test-failure` putaran 1 membutuhkan 102 s (baseline 25 s).
+- Biaya: N/A (router tidak melaporkan tarif).
+- Definisi "skenario konflik" (hanya `file-conflict`) adalah keputusan pemilik; mengubahnya mengubah hasil gate.
+
+## Riwayat pengukuran sebelumnya
+
 ## Setelah optimasi token (M5-014)
 
 Perubahan (semua dengan test): isi file literal di `allowed_paths` ikut pesan pertama worker (menghilangkan satu giliran
@@ -224,7 +273,8 @@ lewat M5-014. Setelah optimasi gate token terpenuhi (57,4%), tetapi gate tanpa i
 |---|---|
 | `tests/baseline/results.json`, `*.jsonl` | data mentah baseline M0-004 |
 | `tests/baseline/mvp-run.cjs` | kolektor MVP (proxy penghitung + run + query DB) |
-| `tests/baseline/mvp-results.json`, `mvp-results.run2.json` | data mentah MVP setelah optimasi (run 1 dan run 2, 2026-10-08) |
-| `tests/baseline/mvp-results.before-optimization.json` | data mentah MVP sebelum optimasi (47,0%) |
+| `tests/baseline/mvp-results.json` | data mentah benchmark rilis, 3 putaran (M5-017) |
+| `tests/baseline/mvp-results.m5-014-run1.json`, `…run2.json` | data historis setelah optimasi token (satu run per skenario) |
+| `tests/baseline/mvp-results.before-optimization.json` | data historis sebelum optimasi (47,0%) |
 | `tests/baseline/compare.cjs` | tabel perbandingan dan gate |
 | `tests/baseline/compare.test.cjs`, `mvp-run.test.cjs` | test harness (data sintetis) |

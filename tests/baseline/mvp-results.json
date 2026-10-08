@@ -1,0 +1,452 @@
+{
+  "task_id": "M5-010",
+  "date": "2026-10-08",
+  "command": "node tests/baseline/mvp-run.cjs",
+  "model": "td/cx/gpt-5.6-sol-review",
+  "fixture_commit": "74aa0aba861490f841519ab4c0559c2c4fa40f12",
+  "pricing": null,
+  "rounds": 3,
+  "runs": [
+    {
+      "round": 1,
+      "scenario": "backend-only",
+      "kind": "normal",
+      "success": true,
+      "escalated_safely": false,
+      "base_intact": true,
+      "human_requested_events": 0,
+      "task_statuses": [
+        "DONE"
+      ],
+      "run_status": "DONE",
+      "input_tokens": 26195,
+      "cached_input_tokens": 2688,
+      "output_tokens": 782,
+      "db_input_tokens": 20266,
+      "lead_input_tokens": 5929,
+      "latency_seconds": 31,
+      "retries": 0,
+      "conflicts": 0,
+      "tests_passed": 4,
+      "tests_failed": 0,
+      "plan_approvals": 1,
+      "human_interventions": 0,
+      "changed_paths": [
+        "src/backend.js",
+        "test/project.test.js"
+      ],
+      "run_id": "fccb598b-4281-4fd8-9375-245bad390c21"
+    },
+    {
+      "round": 1,
+      "scenario": "frontend-only",
+      "kind": "normal",
+      "success": true,
+      "escalated_safely": false,
+      "base_intact": true,
+      "human_requested_events": 0,
+      "task_statuses": [
+        "DONE"
+      ],
+      "run_status": "DONE",
+      "input_tokens": 26330,
+      "cached_input_tokens": 2688,
+      "output_tokens": 665,
+      "db_input_tokens": 20394,
+      "lead_input_tokens": 5936,
+      "latency_seconds": 23,
+      "retries": 0,
+      "conflicts": 0,
+      "tests_passed": 3,
+      "tests_failed": 0,
+      "plan_approvals": 1,
+      "human_interventions": 0,
+      "changed_paths": [
+        "src/frontend.js",
+        "test/project.test.js"
+      ],
+      "run_id": "07dcb9a0-578e-4f31-8293-bc444f027e20"
+    },
+    {
+      "round": 1,
+      "scenario": "cross-stack",
+      "kind": "normal",
+      "success": true,
+      "escalated_safely": false,
+      "base_intact": true,
+      "human_requested_events": 0,
+      "task_statuses": [
+        "DONE"
+      ],
+      "run_status": "DONE",
+      "input_tokens": 27373,
+      "cached_input_tokens": 2816,
+      "output_tokens": 1287,
+      "db_input_tokens": 21438,
+      "lead_input_tokens": 5935,
+      "latency_seconds": 37,
+      "retries": 0,
+      "conflicts": 0,
+      "tests_passed": 3,
+      "tests_failed": 0,
+      "plan_approvals": 1,
+      "human_interventions": 0,
+      "changed_paths": [
+        "src/frontend.js",
+        "src/products.js",
+        "test/project.test.js"
+      ],
+      "run_id": "26e90d31-901f-4149-8b6b-d5f9716a02d6"
+    },
+    {
+      "round": 1,
+      "scenario": "test-failure",
+      "kind": "normal",
+      "success": true,
+      "escalated_safely": false,
+      "base_intact": true,
+      "human_requested_events": 0,
+      "task_statuses": [
+        "DONE"
+      ],
+      "run_status": "DONE",
+      "input_tokens": 39599,
+      "cached_input_tokens": 7808,
+      "output_tokens": 3074,
+      "db_input_tokens": 33669,
+      "lead_input_tokens": 5930,
+      "latency_seconds": 102,
+      "retries": 0,
+      "conflicts": 0,
+      "tests_passed": 3,
+      "tests_failed": 0,
+      "plan_approvals": 1,
+      "human_interventions": 0,
+      "changed_paths": [
+        "src/frontend.js"
+      ],
+      "run_id": "99efb7d3-add2-4af4-aeaa-9fa8063b7b4a"
+    },
+    {
+      "round": 1,
+      "scenario": "file-conflict",
+      "kind": "conflict",
+      "success": false,
+      "escalated_safely": true,
+      "base_intact": true,
+      "human_requested_events": 0,
+      "task_statuses": [
+        "NEEDS_HUMAN"
+      ],
+      "run_status": "RUNNING",
+      "input_tokens": 53235,
+      "cached_input_tokens": 8448,
+      "output_tokens": 1752,
+      "db_input_tokens": 47300,
+      "lead_input_tokens": 5935,
+      "latency_seconds": 64,
+      "retries": 1,
+      "conflicts": 0,
+      "tests_passed": 0,
+      "tests_failed": 0,
+      "plan_approvals": 1,
+      "human_interventions": 0,
+      "changed_paths": [],
+      "run_id": "8e655f20-2831-4759-9c5f-a67baaa724f0"
+    },
+    {
+      "round": 2,
+      "scenario": "backend-only",
+      "kind": "normal",
+      "success": true,
+      "escalated_safely": false,
+      "base_intact": true,
+      "human_requested_events": 0,
+      "task_statuses": [
+        "DONE"
+      ],
+      "run_status": "DONE",
+      "input_tokens": 26210,
+      "cached_input_tokens": 2688,
+      "output_tokens": 799,
+      "db_input_tokens": 20274,
+      "lead_input_tokens": 5936,
+      "latency_seconds": 28,
+      "retries": 0,
+      "conflicts": 0,
+      "tests_passed": 4,
+      "tests_failed": 0,
+      "plan_approvals": 1,
+      "human_interventions": 0,
+      "changed_paths": [
+        "src/backend.js",
+        "test/project.test.js"
+      ],
+      "run_id": "f22ce64a-6e77-4e7e-872e-0d74edf1556d"
+    },
+    {
+      "round": 2,
+      "scenario": "frontend-only",
+      "kind": "normal",
+      "success": true,
+      "escalated_safely": false,
+      "base_intact": true,
+      "human_requested_events": 0,
+      "task_statuses": [
+        "DONE"
+      ],
+      "run_status": "DONE",
+      "input_tokens": 26432,
+      "cached_input_tokens": 2688,
+      "output_tokens": 814,
+      "db_input_tokens": 20495,
+      "lead_input_tokens": 5937,
+      "latency_seconds": 30,
+      "retries": 0,
+      "conflicts": 0,
+      "tests_passed": 3,
+      "tests_failed": 0,
+      "plan_approvals": 1,
+      "human_interventions": 0,
+      "changed_paths": [
+        "src/frontend.js",
+        "test/project.test.js"
+      ],
+      "run_id": "5d8abf6e-886e-40e4-8025-c16b43feda55"
+    },
+    {
+      "round": 2,
+      "scenario": "cross-stack",
+      "kind": "normal",
+      "success": true,
+      "escalated_safely": false,
+      "base_intact": true,
+      "human_requested_events": 0,
+      "task_statuses": [
+        "DONE"
+      ],
+      "run_status": "DONE",
+      "input_tokens": 27360,
+      "cached_input_tokens": 0,
+      "output_tokens": 1584,
+      "db_input_tokens": 21422,
+      "lead_input_tokens": 5938,
+      "latency_seconds": 43,
+      "retries": 0,
+      "conflicts": 0,
+      "tests_passed": 3,
+      "tests_failed": 0,
+      "plan_approvals": 1,
+      "human_interventions": 0,
+      "changed_paths": [
+        "src/frontend.js",
+        "src/products.js",
+        "test/project.test.js"
+      ],
+      "run_id": "90a0b7f8-0cc5-4876-b85a-51f72abc07d0"
+    },
+    {
+      "round": 2,
+      "scenario": "test-failure",
+      "kind": "normal",
+      "success": true,
+      "escalated_safely": false,
+      "base_intact": true,
+      "human_requested_events": 0,
+      "task_statuses": [
+        "DONE"
+      ],
+      "run_status": "DONE",
+      "input_tokens": 25594,
+      "cached_input_tokens": 4608,
+      "output_tokens": 1443,
+      "db_input_tokens": 19673,
+      "lead_input_tokens": 5921,
+      "latency_seconds": 46,
+      "retries": 0,
+      "conflicts": 0,
+      "tests_passed": 3,
+      "tests_failed": 0,
+      "plan_approvals": 1,
+      "human_interventions": 0,
+      "changed_paths": [
+        "src/frontend.js"
+      ],
+      "run_id": "22411796-9ecd-4803-b8ae-ab04e064e0f6"
+    },
+    {
+      "round": 2,
+      "scenario": "file-conflict",
+      "kind": "conflict",
+      "success": false,
+      "escalated_safely": true,
+      "base_intact": true,
+      "human_requested_events": 1,
+      "task_statuses": [
+        "NEEDS_HUMAN"
+      ],
+      "run_status": "RUNNING",
+      "input_tokens": 39811,
+      "cached_input_tokens": 9728,
+      "output_tokens": 1958,
+      "db_input_tokens": 33875,
+      "lead_input_tokens": 5936,
+      "latency_seconds": 49,
+      "retries": 1,
+      "conflicts": 0,
+      "tests_passed": 0,
+      "tests_failed": 0,
+      "plan_approvals": 1,
+      "human_interventions": 0,
+      "changed_paths": [],
+      "run_id": "ec490d6f-ab93-48b1-8196-57f01522c898"
+    },
+    {
+      "round": 3,
+      "scenario": "backend-only",
+      "kind": "normal",
+      "success": true,
+      "escalated_safely": false,
+      "base_intact": true,
+      "human_requested_events": 0,
+      "task_statuses": [
+        "DONE"
+      ],
+      "run_status": "DONE",
+      "input_tokens": 26182,
+      "cached_input_tokens": 2176,
+      "output_tokens": 863,
+      "db_input_tokens": 20249,
+      "lead_input_tokens": 5933,
+      "latency_seconds": 27,
+      "retries": 0,
+      "conflicts": 0,
+      "tests_passed": 4,
+      "tests_failed": 0,
+      "plan_approvals": 1,
+      "human_interventions": 0,
+      "changed_paths": [
+        "src/backend.js",
+        "test/project.test.js"
+      ],
+      "run_id": "98a0a563-8a28-400b-ac68-96a4fdf32b6f"
+    },
+    {
+      "round": 3,
+      "scenario": "frontend-only",
+      "kind": "normal",
+      "success": true,
+      "escalated_safely": false,
+      "base_intact": true,
+      "human_requested_events": 0,
+      "task_statuses": [
+        "DONE"
+      ],
+      "run_status": "DONE",
+      "input_tokens": 26231,
+      "cached_input_tokens": 2688,
+      "output_tokens": 646,
+      "db_input_tokens": 20296,
+      "lead_input_tokens": 5935,
+      "latency_seconds": 26,
+      "retries": 0,
+      "conflicts": 0,
+      "tests_passed": 3,
+      "tests_failed": 0,
+      "plan_approvals": 1,
+      "human_interventions": 0,
+      "changed_paths": [
+        "src/frontend.js",
+        "test/project.test.js"
+      ],
+      "run_id": "1bbafe0d-7b51-46ae-9413-909f50dbe948"
+    },
+    {
+      "round": 3,
+      "scenario": "cross-stack",
+      "kind": "normal",
+      "success": true,
+      "escalated_safely": false,
+      "base_intact": true,
+      "human_requested_events": 0,
+      "task_statuses": [
+        "DONE"
+      ],
+      "run_status": "DONE",
+      "input_tokens": 27289,
+      "cached_input_tokens": 4992,
+      "output_tokens": 1427,
+      "db_input_tokens": 21357,
+      "lead_input_tokens": 5932,
+      "latency_seconds": 45,
+      "retries": 0,
+      "conflicts": 0,
+      "tests_passed": 3,
+      "tests_failed": 0,
+      "plan_approvals": 1,
+      "human_interventions": 0,
+      "changed_paths": [
+        "src/frontend.js",
+        "src/products.js",
+        "test/project.test.js"
+      ],
+      "run_id": "8cd066b3-3da0-42c4-b46c-f5d314546071"
+    },
+    {
+      "round": 3,
+      "scenario": "test-failure",
+      "kind": "normal",
+      "success": true,
+      "escalated_safely": false,
+      "base_intact": true,
+      "human_requested_events": 0,
+      "task_statuses": [
+        "DONE"
+      ],
+      "run_status": "DONE",
+      "input_tokens": 25549,
+      "cached_input_tokens": 2176,
+      "output_tokens": 1101,
+      "db_input_tokens": 19619,
+      "lead_input_tokens": 5930,
+      "latency_seconds": 40,
+      "retries": 0,
+      "conflicts": 0,
+      "tests_passed": 3,
+      "tests_failed": 0,
+      "plan_approvals": 1,
+      "human_interventions": 0,
+      "changed_paths": [
+        "src/frontend.js"
+      ],
+      "run_id": "00b97e80-0c64-4e17-9968-932c0c6fb1fd"
+    },
+    {
+      "round": 3,
+      "scenario": "file-conflict",
+      "kind": "conflict",
+      "success": false,
+      "escalated_safely": true,
+      "base_intact": true,
+      "human_requested_events": 1,
+      "task_statuses": [
+        "NEEDS_HUMAN"
+      ],
+      "run_status": "RUNNING",
+      "input_tokens": 12563,
+      "cached_input_tokens": 0,
+      "output_tokens": 965,
+      "db_input_tokens": 6622,
+      "lead_input_tokens": 5941,
+      "latency_seconds": 22,
+      "retries": 0,
+      "conflicts": 0,
+      "tests_passed": 0,
+      "tests_failed": 0,
+      "plan_approvals": 1,
+      "human_interventions": 0,
+      "changed_paths": [],
+      "run_id": "c1118c72-c4b9-4d72-9610-5f2cba7bf696"
+    }
+  ]
+}

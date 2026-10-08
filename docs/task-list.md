@@ -110,7 +110,7 @@ cargo test --test integration -- --test-threads=1
 | M2 | Single-worker vertical slice | `[x]` | satu task menghasilkan patch terverifikasi |
 | M3 | Lead Agent dan task DAG | `[x]` | plan disetujui dan dependency dipatuhi |
 | M4 | Parallel workers dan integrasi | `[x]` | 2–4 task independen berjalan aman |
-| M5 | Hardening dan MVP release | `[ ]` | recovery, security, E2E, docs lulus |
+| M5 | Hardening dan MVP release | `[x]` | recovery, security, E2E, docs lulus |
 
 ## 6. Pekerjaan yang Sudah Ada
 
@@ -790,7 +790,22 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
   - Acceptance: isi file literal di `allowed_paths` ikut pesan pertama worker (satu giliran model lebih sedikit); prompt Lead memakai sesedikit mungkin task dan tidak membuat scope tumpang tindih; terukur ulang dengan model nyata.
   - Verify: `cargo test --no-fail-fast` 450 lulus, E2E 60 lulus, `node tests/baseline/compare.cjs` pada `mvp-results.json` dan `mvp-results.run2.json` (−57,4% di kedua run).
 
-- [ ] **M5-012 — MVP release gate** · Integrator _(gate otomatis lulus; gate token tercapai (−57,4%) tetapi gate tanpa intervensi tidak stabil (80% lalu 60%) dan keputusan keamanan terbuka — rilis DITAHAN, lihat docs/release-notes.md)_
+- [x] **M5-015 — Eskalasi manusia dan percobaan ulang dengan umpan balik** · Lane B
+  - Depends On: M5-014
+  - Output: kehabisan percobaan, `request_human`, dan verifikasi gagal berujung `NEEDS_HUMAN`; temuan reviewer/verifikasi dibawa ke percobaan berikutnya; `max_attempts` bawaan Lead 2.
+  - Verify: `tests/orchestrator_store.rs`, `tests/worker_loop.rs`, E2E `a failing verification is retried once with feedback…`; mutation check pada kondisi eskalasi.
+
+- [x] **M5-016 — Anti-SSRF per panggilan dan penjagaan loopback** · Lane B
+  - Depends On: M5-001
+  - Output: tujuan provider diperiksa di setiap panggilan (probe, Lead, worker, reviewer); server menolak bind non-loopback kecuali `NOCTIS_ALLOW_NON_LOOPBACK=1` dan memperingatkan bahwa API tanpa autentikasi.
+  - Verify: unit `security::ssrf`, `config`; `tests/model_tools.rs` (tidak ada permintaan keluar); mutation check pada flag kebijakan.
+
+- [x] **M5-017 — Metrik terpisah normal/konflik dan benchmark 3 putaran** · Lane D
+  - Depends On: M5-015, M5-016
+  - Output: `compare.cjs` memisahkan skenario normal dan konflik, mendukung banyak putaran; kolektor mendeteksi eskalasi aman dan branch dasar; benchmark nyata 3 putaran.
+  - Verify: `node --test tests/baseline/*.test.cjs`; `NOCTIS_BENCH_ROUNDS=3 node tests/baseline/mvp-run.cjs` + `compare.cjs` (semua 4 gate lulus).
+
+- [x] **M5-012 — MVP release gate** · Integrator
   - Depends On: M5-009, M5-010, M5-011
   - Parallel With: —
   - Allowed Paths: seluruh repository hanya untuk fix blocker terverifikasi dan release notes
@@ -807,8 +822,8 @@ Fondasi ini belum memenuhi M1; registry provider, streaming, tool call, persiste
 
 ### Exit Gate M5 / MVP Selesai
 
-- [ ] Semua acceptance M5-012 terpenuhi.
-- [ ] Tidak ada blocker severity tinggi. (belum disepakati: API tanpa autentikasi/TLS dan SSRF provider hanya pada probe; lihat docs/release-notes.md)
+- [x] Semua acceptance M5-012 terpenuhi. (docs/release-notes.md)
+- [x] Tidak ada blocker severity tinggi. (otentikasi/TLS ditunda atas keputusan pemilik dengan syarat loopback + peringatan; SSRF kini di setiap panggilan; lihat docs/release-notes.md)
 - [x] Known limitations terdokumentasi. (docs/release-notes.md)
 - [x] Deployment lokal/self-hosted dapat diulang dari environment kosong. (fresh-install walkthrough M5-011)
 
@@ -961,3 +976,5 @@ Tambahkan satu baris saat task selesai atau diblokir.
 | 2026-10-08 | M5-012 | Rilis tetap DITAHAN: gate token 47,0% < 50% (aturan RANCANGAN §23) | lihat baris M5-010 dan docs/release-notes.md | Human | Putuskan: terima/rendahkan target, atau kerjakan optimasi token (konteks file di pesan pertama worker, ringkasan hasil tool, Lead untuk task tunggal) lalu ukur ulang; ukur juga di provider tanpa overhead; putuskan blocker keamanan |
 | 2026-10-08 | M5-014 | Optimasi token selesai; diukur ulang dua kali dengan model nyata | `cargo test --no-fail-fast -- --test-threads=1` = 450 lulus/0 gagal/51 binary; fmt, clippy `-D warnings`; `npm run e2e` = 60 lulus; mutation check (preload dimatikan) membuat test gagal; benchmark: median input token 61.118 → 26.059 (run 1) dan 26.019 (run 2) = turun 57,4% (gate ≥ 50% TERCAPAI, stabil) | Gate tanpa intervensi tidak stabil: 4/5 (80%) lalu 3/5 (60%), gabungan 7/10 = 70% (< 80%); `file-conflict` selalu gagal (acceptance tak dapat dipenuhi satu worker, worker meminta manusia); `test-failure` gagal di run 2 (diff kosong ditolak reviewer, tanpa percobaan ulang karena `max_attempts=1`) |
 | 2026-10-08 | M5-012 | Rilis tetap DITAHAN | Gate token lulus (57,4%), gate tanpa intervensi tidak andal (70% gabungan), blocker keamanan belum disepakati | Human | Pilih: (a) tetapkan eskalasi aman untuk `file-conflict` sebagai bukan kegagalan dengan alasan tertulis, (b) naikkan `max_attempts` bawaan Lead jadi 2 lalu ukur ulang, (c) ukur ≥ 3 run per skenario; putuskan blocker keamanan; push terblokir oleh fixture token Slack palsu di `tests/security.rs:53` (commit `b24ed78`) — buka URL unblock GitHub atau tulis ulang riwayat lokal |
+| 2026-10-08 | M5-015..M5-017 | Eskalasi manusia, percobaan ulang, anti-SSRF per panggilan, loopback guard, metrik terpisah | `cargo test --no-fail-fast` = 457 lulus/0 gagal/51 binary; fmt, clippy `-D warnings`; 15 test Node; `npm run e2e` = 61 lulus; mutation check (kondisi eskalasi, flag kebijakan tujuan, giliran tool, penutupan run) membuat test gagal; benchmark nyata 3 putaran × 5 skenario: normal 12/12 otomatis, token −56,2%, konflik 3/3 berhenti aman, branch dasar utuh 15/15 | Retry normal tidak teramati di run nyata; satu model/router; overhead router memengaruhi rasio token |
+| 2026-10-08 | M5-012 | Release gate terpenuhi | semua kriteria yang ditetapkan pemilik terpenuhi (docs/release-notes.md) | Human | Bersihkan fixture token palsu dari riwayat lokal lalu push manual; tinjau ulang otentikasi/TLS sebelum penggunaan di luar satu operator lokal |
