@@ -101,6 +101,7 @@ fn request(tools: bool) -> ModelRequest {
             role: MessageRole::User,
             content: "hi".into(),
             tool_call_id: None,
+            tool_calls: Vec::new(),
         }],
         tools: if tools {
             vec![ToolDefinition {

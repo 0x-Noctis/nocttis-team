@@ -22,6 +22,7 @@ fn request(tools: bool) -> ModelRequest {
             role: MessageRole::User,
             content: "respond".into(),
             tool_call_id: None,
+            tool_calls: Vec::new(),
         }],
         tools: tools
             .then(|| ToolDefinition {

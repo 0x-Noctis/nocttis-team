@@ -536,6 +536,21 @@ impl<R: SlotRunner> ParallelScheduler<R> {
         Ok(recovered.len())
     }
 
+    /// Tandai `DONE` run yang berstatus `RUNNING` dan seluruh task-nya sudah `DONE`. Sebelumnya tidak ada kode yang
+    /// menutup run, jadi run tetap `RUNNING` selamanya di UI dan API walau pekerjaannya selesai. Run kosong (belum ada
+    /// task), run dijeda, dan run dengan task yang belum `DONE` tidak disentuh. Idempoten.
+    pub async fn complete_finished_runs(&self) -> Result<u64, SchedulerError> {
+        let done = sqlx::query(
+            "UPDATE project_runs r SET status='DONE',updated_at=now()
+             WHERE r.status='RUNNING'
+               AND EXISTS (SELECT 1 FROM tasks t WHERE t.project_run_id=r.id)
+               AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.project_run_id=r.id AND t.status<>'DONE')",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(done.rows_affected())
+    }
+
     /// Loop utama sampai `shutdown()`: isi slot, pulihkan claim stale, tidur dengan backoff (atau sampai
     /// `wake()`), lalu menguras slot yang masih berjalan.
     pub async fn run(self: Arc<Self>) {
@@ -548,6 +563,9 @@ impl<R: SlotRunner> ParallelScheduler<R> {
                     tracing::error!(%error, "recovery claim stale gagal");
                 }
                 last_recover = Some(Instant::now());
+            }
+            if let Err(error) = self.complete_finished_runs().await {
+                tracing::error!(%error, "penutupan run selesai gagal");
             }
             let started = match self.step().await {
                 Ok(report) => report.started.len(),

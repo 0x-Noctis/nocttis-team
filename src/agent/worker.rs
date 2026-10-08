@@ -18,8 +18,12 @@ use crate::{
         Message, MessageRole, ModelError, ModelErrorKind, ModelLimits, ModelRequest, ModelResponse,
         ToolCall, ToolDefinition,
     },
-    runner::tools::{StructuredTools, ToolErrorCode, ToolRequest, ToolResult},
+    runner::tools::{StructuredTools, ToolError, ToolErrorCode, ToolRequest, ToolResult},
 };
+
+const INSTRUCTIONS: &str = include_str!("prompts/worker.md");
+/// Batas isi satu hasil tool yang dikembalikan ke model; selebihnya dipotong supaya konteks tidak meledak.
+const MAX_TOOL_OUTPUT_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -242,7 +246,12 @@ impl<'a, M: WorkerModel, C: CheckpointStore> Worker<'a, M, C> {
         let deadline = self.config.deadline.min(Duration::from_secs(
             self.contract.limits.timeout_seconds.get() as u64,
         ));
-        let mut messages = Vec::new();
+        let mut messages = vec![Message {
+            role: MessageRole::System,
+            content: INSTRUCTIONS.to_owned(),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        }];
         let mut usage = TokenUsage::default();
         let mut artifacts = BTreeSet::new();
         let mut changed_paths = BTreeSet::new();
@@ -366,16 +375,19 @@ impl<'a, M: WorkerModel, C: CheckpointStore> Worker<'a, M, C> {
                     );
                 }
             }
-            if let Some(text) = response
+            // Giliran assistant disimpan utuh, termasuk tool_calls: provider menolak pesan `tool` yang tidak didahului
+            // pesan assistant yang memintanya.
+            let text = response
                 .content
                 .as_deref()
                 .map(str::trim)
-                .filter(|text| !text.is_empty())
-            {
+                .filter(|text| !text.is_empty());
+            if text.is_some() || !response.tool_calls.is_empty() {
                 messages.push(Message {
                     role: MessageRole::Assistant,
-                    content: text.to_owned(),
+                    content: text.unwrap_or_default().to_owned(),
                     tool_call_id: None,
+                    tool_calls: response.tool_calls.clone(),
                 });
             }
             if response.tool_calls.is_empty() {
@@ -444,16 +456,18 @@ impl<'a, M: WorkerModel, C: CheckpointStore> Worker<'a, M, C> {
                 }
                 let request = match parse_tool_call(&call) {
                     Ok(request) => request,
-                    Err(error) => {
-                        return self.finish(
-                            summary,
-                            None,
-                            usage,
-                            artifacts,
-                            changed_paths,
-                            StopReason::ToolError,
-                            Some(error),
-                        );
+                    Err(_) => {
+                        // Argumen salah atau tool tidak dikenal adalah kesalahan model yang bisa diperbaiki: kembalikan
+                        // sebagai hasil tool. Tetap dihitung ke batas panggilan supaya loop pasti berhenti.
+                        usage.tool_calls = usage.tool_calls.saturating_add(1);
+                        messages.push(tool_message(
+                            &call.id,
+                            format!(
+                                "error: tool `{}` tidak dikenal atau argumennya tidak sesuai skema; periksa nama tool dan semua argumen wajib",
+                                call.name
+                            ),
+                        ));
+                        continue;
                     }
                 };
                 match self
@@ -464,11 +478,10 @@ impl<'a, M: WorkerModel, C: CheckpointStore> Worker<'a, M, C> {
                     Ok(CheckpointReservation::Completed(checkpoint)) => {
                         messages.push(tool_message(
                             &call.id,
-                            checkpoint.outcome == CheckpointOutcome::Succeeded,
                             match checkpoint.outcome {
-                                CheckpointOutcome::Succeeded => None,
-                                CheckpointOutcome::Failed => Some(ToolErrorCode::OperationFailed),
-                                CheckpointOutcome::TimedOut => Some(ToolErrorCode::Timeout),
+                                CheckpointOutcome::Succeeded => "panggilan ini sudah berhasil dijalankan sebelumnya; hasilnya tidak diputar ulang".to_owned(),
+                                CheckpointOutcome::Failed => "panggilan ini sudah dijalankan sebelumnya dan gagal".to_owned(),
+                                CheckpointOutcome::TimedOut => "panggilan ini sudah dijalankan sebelumnya dan melewati batas waktu".to_owned(),
                             },
                         ));
                         continue;
@@ -564,12 +577,15 @@ impl<'a, M: WorkerModel, C: CheckpointStore> Worker<'a, M, C> {
                         collect_result(result, &mut artifacts, &mut changed_paths);
                     }
                 }
+                // Isi hasil tool dikembalikan ke model (terpotong); sebelumnya hanya flag sukses sehingga model tidak
+                // pernah melihat isi file, diff, atau alasan kegagalan.
                 messages.push(tool_message(
                     &call.id,
-                    checkpoint.outcome == CheckpointOutcome::Succeeded,
-                    execution.result.as_ref().err().map(|error| error.code),
+                    match &execution.result {
+                        Ok(result) => render_result(result),
+                        Err(error) => render_error(error),
+                    },
                 ));
-                context_dirty = true;
                 match execution.result {
                     Ok(ToolResult::HumanRequested { message }) => {
                         return self.finish(
@@ -582,7 +598,9 @@ impl<'a, M: WorkerModel, C: CheckpointStore> Worker<'a, M, C> {
                             None,
                         );
                     }
-                    Err(error_value) => {
+                    // Hanya timeout yang fatal. Error lain (path ditolak, file tidak ada, patch gagal) dikembalikan ke model
+                    // lewat pesan tool di atas supaya bisa diperbaiki; panggilan tool tetap dibatasi `max_tool_calls`.
+                    Err(error_value) if error_value.code == ToolErrorCode::Timeout => {
                         return self.finish(
                             summary,
                             None,
@@ -666,8 +684,10 @@ enum HandoffStatus {
 }
 
 fn parse_completion(content: Option<&str>) -> Result<Completion, WorkerError> {
-    serde_json::from_str(content.ok_or(WorkerError::InvalidModelResponse)?)
-        .map_err(|_| WorkerError::InvalidModelResponse)
+    serde_json::from_str(ai_team::agent::json_text::extract(
+        content.ok_or(WorkerError::InvalidModelResponse)?,
+    ))
+    .map_err(|_| WorkerError::InvalidModelResponse)
 }
 
 fn context_message(context: &BuiltContext) -> Message {
@@ -680,6 +700,7 @@ fn context_message(context: &BuiltContext) -> Message {
             .collect::<Vec<_>>()
             .join("\n\n"),
         tool_call_id: None,
+        tool_calls: Vec::new(),
     }
 }
 
@@ -704,22 +725,84 @@ fn model_request(
     }
 }
 
+/// Definisi tool lengkap dengan skema argumen. Tanpa skema, model nyata tidak tahu argumen apa yang harus diisi
+/// dan memanggil tool dengan `{}`.
 fn tool_definitions() -> Vec<ToolDefinition> {
+    let object = |description: &str, properties: Value, required: &[&str]| {
+        (
+            description.to_owned(),
+            json!({"type":"object","properties":properties,"required":required,"additionalProperties":false}),
+        )
+    };
+    let path = |what: &str| json!({"type":"string","description":what});
     [
-        "list_files",
-        "search_code",
-        "read_file",
-        "apply_patch",
-        "git_diff",
-        "git_status",
-        "submit_artifact",
-        "request_human",
+        (
+            "list_files",
+            object(
+                "Daftar file di bawah satu direktori (rekursif). Path harus berada dalam allowed_paths.",
+                json!({"path": path("direktori relatif terhadap root repository")}),
+                &["path"],
+            ),
+        ),
+        (
+            "search_code",
+            object(
+                "Cari teks literal pada file di bawah path. Mengembalikan baris `path:nomor: isi`.",
+                json!({"path": path("direktori atau file relatif root repository"), "query": {"type":"string","description":"teks yang dicari (literal, tidak diawali '-')"}}),
+                &["path", "query"],
+            ),
+        ),
+        (
+            "read_file",
+            object(
+                "Baca isi satu file teks. Path harus berada dalam allowed_paths.",
+                json!({"path": path("file relatif terhadap root repository, mis. src/backend.js")}),
+                &["path"],
+            ),
+        ),
+        (
+            "apply_patch",
+            object(
+                "Terapkan unified diff gaya git (`diff --git a/<path> b/<path>`, `---`, `+++`, hunk `@@`). Semua path harus dalam allowed_paths. Tanpa patch biner.",
+                json!({"patch": {"type":"string","description":"teks diff utuh, diakhiri baris baru"}}),
+                &["patch"],
+            ),
+        ),
+        (
+            "git_diff",
+            object("Tampilkan perubahan yang sudah Anda buat di worktree.", json!({}), &[]),
+        ),
+        (
+            "git_status",
+            object("Tampilkan status file yang berubah di worktree.", json!({}), &[]),
+        ),
+        (
+            "submit_artifact",
+            object(
+                "Simpan satu file sebagai artifact bukti kerja (jarang diperlukan).",
+                json!({
+                    "path": path("file relatif root repository"),
+                    "artifact_id": {"type":"string","description":"UUID baru untuk artifact"},
+                    "logical_name": {"type":"string","description":"nama logis artifact"},
+                    "media_type": {"type":"string","description":"mis. text/plain"}
+                }),
+                &["path", "artifact_id", "logical_name", "media_type"],
+            ),
+        ),
+        (
+            "request_human",
+            object(
+                "Minta keputusan manusia bila tidak mungkin melanjutkan; mengakhiri pekerjaan Anda.",
+                json!({"message": {"type":"string","description":"penjelasan singkat apa yang dibutuhkan"}}),
+                &["message"],
+            ),
+        ),
     ]
     .into_iter()
-    .map(|name| ToolDefinition {
+    .map(|(name, (description, input_schema))| ToolDefinition {
         name: name.to_owned(),
-        description: format!("Structured {name} tool"),
-        input_schema: json!({"type":"object"}),
+        description,
+        input_schema,
     })
     .collect()
 }
@@ -832,15 +915,58 @@ fn parse_tool_call(call: &ToolCall) -> Result<ToolRequest, WorkerError> {
     }
 }
 
-fn tool_message(call_id: &str, succeeded: bool, code: Option<ToolErrorCode>) -> Message {
+fn tool_message(call_id: &str, content: String) -> Message {
     Message {
         role: MessageRole::Tool,
-        content: serde_json::to_string(
-            &json!({"succeeded": succeeded, "error_code": code.map(|value| format!("{value:?}"))}),
-        )
-        .unwrap_or_else(|_| "{}".to_owned()),
+        content: truncate_output(content),
         tool_call_id: Some(call_id.to_owned()),
+        tool_calls: Vec::new(),
     }
+}
+
+/// Potong keluaran tool pada batas karakter yang valid, dengan penanda agar model tahu isinya tidak utuh.
+fn truncate_output(mut text: String) -> String {
+    if text.len() > MAX_TOOL_OUTPUT_BYTES {
+        let mut end = MAX_TOOL_OUTPUT_BYTES;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push_str("\n[... keluaran dipotong ...]");
+    }
+    text
+}
+
+/// Teks hasil tool untuk model. Isi biner tidak ditampilkan mentah.
+fn render_result(result: &ToolResult) -> String {
+    let lossy = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
+    match result {
+        ToolResult::Files(files) if files.is_empty() => "(tidak ada file)".to_owned(),
+        ToolResult::Files(files) => files.join("\n"),
+        ToolResult::SearchMatches(matches) if matches.is_empty() => {
+            "(tidak ada kecocokan)".to_owned()
+        }
+        ToolResult::SearchMatches(matches) => matches
+            .iter()
+            .map(|found| format!("{}:{}: {}", found.path, found.line, found.text))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        ToolResult::File(bytes) => lossy(bytes),
+        ToolResult::PatchApplied => "patch berhasil diterapkan".to_owned(),
+        ToolResult::Diff(bytes) if bytes.is_empty() => "(belum ada perubahan)".to_owned(),
+        ToolResult::Diff(bytes) => lossy(bytes),
+        ToolResult::Status(status) if status.trim().is_empty() => "(bersih)".to_owned(),
+        ToolResult::Status(status) => status.clone(),
+        ToolResult::Artifact(metadata) => format!(
+            "artifact tersimpan: id={} nama={} ukuran={}",
+            metadata.artifact_id, metadata.logical_name, metadata.size
+        ),
+        ToolResult::HumanRequested { .. } => "permintaan bantuan manusia dicatat".to_owned(),
+    }
+}
+
+fn render_error(error: &ToolError) -> String {
+    format!("error ({:?}): {}", error.code, error.message)
 }
 
 fn collect_result(

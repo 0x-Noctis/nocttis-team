@@ -20,6 +20,10 @@ pub struct Message {
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Hanya untuk pesan `assistant` yang meminta tool. Provider OpenAI menolak pesan `tool` yang tidak didahului pesan
+    /// assistant berisi `tool_calls`, jadi giliran tool harus disimpan utuh di riwayat percakapan.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

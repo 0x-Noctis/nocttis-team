@@ -18,7 +18,8 @@ use std::{
 };
 
 use model::{
-    FinishReason, Message, MessageRole, ModelErrorKind, ModelLimits, ModelRequest, ToolDefinition,
+    FinishReason, Message, MessageRole, ModelErrorKind, ModelLimits, ModelRequest, ToolCall,
+    ToolDefinition,
 };
 use openai::tools::{OpenAiToolsClient, ToolProbeResult};
 use serde_json::json;
@@ -33,6 +34,7 @@ fn request() -> ModelRequest {
             role: MessageRole::User,
             content: "check weather".to_owned(),
             tool_call_id: None,
+            tool_calls: Vec::new(),
         }],
         tools: vec![ToolDefinition {
             name: "weather".to_owned(),
@@ -224,4 +226,59 @@ async fn probe_rejects_wrong_payloads_as_unsupported() {
 
         assert_eq!(result, ToolProbeResult::Unsupported, "accepted {arguments}");
     }
+}
+
+/// Regresi (benchmark M5-010): giliran tool harus dikirim sesuai kontrak OpenAI. Pesan `tool` tanpa pesan assistant
+/// berisi `tool_calls` ditolak provider sungguhan, dan argumen harus berupa STRING JSON, bukan objek.
+#[tokio::test]
+async fn tool_turns_are_sent_in_openai_shape() {
+    let body = r#"{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}"#;
+    let (base_url, received, handle) = mock_server(body);
+    let message = |role, content: &str| Message {
+        role,
+        content: content.to_owned(),
+        tool_call_id: None,
+        tool_calls: Vec::new(),
+    };
+    let mut request = request();
+    request.messages = vec![
+        message(MessageRole::System, "sys"),
+        message(MessageRole::User, "task"),
+        Message {
+            tool_calls: vec![ToolCall {
+                id: "call-1".to_owned(),
+                name: "read_file".to_owned(),
+                arguments: json!({"path": "src/a.js"}),
+            }],
+            ..message(MessageRole::Assistant, "")
+        },
+        Message {
+            tool_call_id: Some("call-1".to_owned()),
+            ..message(MessageRole::Tool, "isi file")
+        },
+    ];
+
+    client(&base_url).complete(&request).await.unwrap();
+    let sent = received.recv().unwrap();
+    handle.join().unwrap();
+
+    let body: serde_json::Value =
+        serde_json::from_str(sent.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 4);
+    assert!(messages[0].get("tool_calls").is_none());
+    assert_eq!(messages[2]["role"], "assistant");
+    assert_eq!(messages[2]["tool_calls"][0]["id"], "call-1");
+    assert_eq!(messages[2]["tool_calls"][0]["type"], "function");
+    assert_eq!(
+        messages[2]["tool_calls"][0]["function"]["name"],
+        "read_file"
+    );
+    assert_eq!(
+        messages[2]["tool_calls"][0]["function"]["arguments"],
+        r#"{"path":"src/a.js"}"#
+    );
+    assert_eq!(messages[3]["role"], "tool");
+    assert_eq!(messages[3]["tool_call_id"], "call-1");
+    assert_eq!(messages[3]["content"], "isi file");
 }

@@ -230,8 +230,12 @@ async fn valid_approval_is_read_only_and_moves_to_verify() {
     );
     let request = run.model.request.unwrap();
     assert!(request.tools.is_empty());
-    assert!(request.messages[0].content.contains("all tests passed"));
-    assert!(request.messages[0].content.contains("checksum"));
+    // Prompt sistem reviewer ada di awal; data review berada di pesan pengguna.
+    assert!(request.messages[0].content.contains("Reviewer Agent"));
+    assert!(request.messages[1].content.contains("all tests passed"));
+    assert!(request.messages[1].content.contains("checksum"));
+    // Isi perubahan ikut dikirim; sebelumnya reviewer hanya menerima ukuran dan checksum diff.
+    assert!(request.messages[1].content.contains("diff_content"));
 }
 
 #[tokio::test]
@@ -500,4 +504,15 @@ async fn reviewer_run_preserves_usage_losslessly() {
     assert_eq!(run.usage.tool_calls, 0);
     assert_eq!(run.usage.latency_ms, 17);
     assert!(run.usage.estimated);
+}
+
+/// Model nyata sering membungkus JSON dengan pagar Markdown atau kalimat pengantar; putusan tetap divalidasi ketat.
+#[tokio::test]
+async fn fenced_json_decision_is_accepted() {
+    let fixture = Fixture::new();
+    let run = fixture
+        .review("Hasil review:\n```json\n{\"decision\":\"approved\",\"findings\":[]}\n```")
+        .await;
+    assert_eq!(run.error, None);
+    assert_eq!(run.outcome.unwrap().decision, ReviewDecision::Approved);
 }

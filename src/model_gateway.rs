@@ -47,6 +47,7 @@ impl OpenAiClient {
                     role: MessageRole::User,
                     content: "Reply with exactly: OK".to_owned(),
                     tool_call_id: None,
+                    tool_calls: Vec::new(),
                 }],
                 tools: Vec::new(),
                 limits: ModelLimits {

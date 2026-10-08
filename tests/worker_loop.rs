@@ -18,7 +18,8 @@ use ai_team::{
         TaskStatus,
     },
     model::{
-        FinishReason, ModelError, ModelErrorKind, ModelRequest, ModelResponse, ToolCall, Usage,
+        FinishReason, MessageRole, ModelError, ModelErrorKind, ModelRequest, ModelResponse,
+        ToolCall, Usage,
     },
     runner::{
         git::{GitWorktreeManager, Worktree},
@@ -49,11 +50,13 @@ struct ScriptedModel {
     advances: VecDeque<Duration>,
     clock: Option<TestClock>,
     calls: usize,
+    requests: Vec<ModelRequest>,
 }
 
 impl WorkerModel for ScriptedModel {
-    async fn complete(&mut self, _: &ModelRequest) -> Result<ModelResponse, ModelError> {
+    async fn complete(&mut self, request: &ModelRequest) -> Result<ModelResponse, ModelError> {
         self.calls += 1;
+        self.requests.push(request.clone());
         if let (Some(clock), Some(duration)) = (&self.clock, self.advances.pop_front()) {
             clock.advance(duration);
         }
@@ -253,6 +256,7 @@ fn model(responses: Vec<Result<ModelResponse, ModelError>>) -> ScriptedModel {
         advances: VecDeque::new(),
         clock: None,
         calls: 0,
+        requests: Vec::new(),
     }
 }
 
@@ -266,6 +270,7 @@ fn timed_model(
         advances: advances.into(),
         clock: Some(clock),
         calls: 0,
+        requests: Vec::new(),
     }
 }
 
@@ -517,22 +522,38 @@ async fn timeout_model_tool_and_human_stops_are_typed() {
         assert_eq!(unrecoverable.model.calls, 1, "{kind:?} tidak boleh diulang");
     }
 
-    let tool_error = run(
+    // Error tool yang bisa diperbaiki (di sini: path ditolak) dikembalikan ke model, bukan mengakhiri worker.
+    let denied = run(
         &fixture,
         &task,
-        model(vec![Ok(response(
-            None,
-            vec![call("bad", "read_file", json!({"path":"denied.txt"}))],
-            1,
-            1,
-        ))]),
+        model(vec![
+            Ok(response(
+                None,
+                vec![call("bad", "read_file", json!({"path":"denied.txt"}))],
+                1,
+                1,
+            )),
+            Ok(response(
+                Some(r#"{"summary":"gave up","status":"self_check"}"#),
+                Vec::new(),
+                1,
+                1,
+            )),
+        ]),
         MemoryCheckpoints::default(),
-        2,
+        3,
         Duration::from_secs(5),
     )
     .await;
-    assert_eq!(tool_error.handoff.stop_reason, StopReason::ToolError);
-    assert!(matches!(tool_error.error, Some(WorkerError::Tool(_))));
+    assert_eq!(denied.handoff.stop_reason, StopReason::Completed);
+    assert_eq!(denied.model.calls, 2);
+    let reply = denied.model.requests[1].messages.last().unwrap();
+    assert_eq!(reply.tool_call_id.as_deref(), Some("bad"));
+    assert!(
+        reply.content.starts_with("error (Denied)"),
+        "{}",
+        reply.content
+    );
 
     let human = run(
         &fixture,
@@ -1025,4 +1046,128 @@ async fn usage_overflow_stops_typed() {
 
     assert_eq!(result.handoff.stop_reason, StopReason::UsageOverflow);
     assert_eq!(result.error, Some(WorkerError::UsageOverflow));
+}
+
+/// Regresi (benchmark M5-010): worker harus bisa dipakai model nyata. Skema tool lengkap, prompt sistem, giliran
+/// assistant dengan tool_calls tersimpan, isi hasil tool dikembalikan, konteks tidak diulang tiap giliran, dan JSON
+/// penyelesaian berpagar Markdown tetap diterima.
+#[tokio::test]
+async fn real_model_contract_schemas_prompt_and_tool_results() {
+    let fixture = Fixture::new();
+    let patch = "diff --git a/src/file.txt b/src/file.txt\n--- a/src/file.txt\n+++ b/src/file.txt\n@@ -1 +1 @@\n-old\n+new\n";
+    let result = run(
+        &fixture,
+        &contract(100, 100, 10),
+        model(vec![
+            Ok(response(
+                None,
+                vec![call("read-1", "read_file", json!({"path":"src/file.txt"}))],
+                10,
+                5,
+            )),
+            Ok(response(
+                None,
+                vec![call("patch-1", "apply_patch", json!({"patch": patch}))],
+                10,
+                5,
+            )),
+            Ok(response(
+                Some("```json\n{\"summary\":\"edited\",\"status\":\"self_check\"}\n```"),
+                Vec::new(),
+                10,
+                5,
+            )),
+        ]),
+        MemoryCheckpoints::default(),
+        5,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(result.handoff.stop_reason, StopReason::Completed);
+    assert_eq!(result.handoff.summary, "edited");
+
+    let requests = &result.model.requests;
+    assert_eq!(requests.len(), 3);
+    // Prompt sistem ada di awal dan konteks task hanya satu kali.
+    assert_eq!(requests[2].messages[0].role, MessageRole::System);
+    assert!(requests[2].messages[0].content.contains("Worker Agent"));
+    assert_eq!(
+        requests[2]
+            .messages
+            .iter()
+            .filter(|message| message.role == MessageRole::User)
+            .count(),
+        1
+    );
+    // Setiap tool punya skema objek dengan properti; argumen wajib sesuai parser.
+    let required = |name: &str| -> Vec<String> {
+        let tool = requests[0]
+            .tools
+            .iter()
+            .find(|tool| tool.name == name)
+            .unwrap();
+        assert_eq!(tool.input_schema["type"], "object", "{name}");
+        assert!(tool.input_schema["properties"].is_object(), "{name}");
+        assert_eq!(tool.input_schema["additionalProperties"], false, "{name}");
+        serde_json::from_value(tool.input_schema["required"].clone()).unwrap()
+    };
+    assert_eq!(required("read_file"), ["path"]);
+    assert_eq!(required("list_files"), ["path"]);
+    assert_eq!(required("search_code"), ["path", "query"]);
+    assert_eq!(required("apply_patch"), ["patch"]);
+    assert_eq!(required("request_human"), ["message"]);
+    assert!(required("git_diff").is_empty() && required("git_status").is_empty());
+    assert_eq!(
+        required("submit_artifact"),
+        ["path", "artifact_id", "logical_name", "media_type"]
+    );
+    assert_eq!(requests[0].tools.len(), 8);
+    // Giliran assistant dengan tool_calls diikuti pesan tool yang berisi ISI hasil, bukan sekadar flag sukses.
+    let history = &requests[1].messages;
+    let assistant = &history[history.len() - 2];
+    assert_eq!(assistant.role, MessageRole::Assistant);
+    assert_eq!(assistant.tool_calls[0].id, "read-1");
+    let tool = history.last().unwrap();
+    assert_eq!(tool.role, MessageRole::Tool);
+    assert_eq!(tool.tool_call_id.as_deref(), Some("read-1"));
+    assert_eq!(tool.content, "old\n");
+    assert_eq!(
+        requests[2].messages.last().unwrap().content,
+        "patch berhasil diterapkan"
+    );
+}
+
+#[tokio::test]
+async fn invalid_tool_arguments_are_returned_to_the_model_and_still_count() {
+    let fixture = Fixture::new();
+    let result = run(
+        &fixture,
+        &contract(100, 100, 10),
+        model(vec![
+            Ok(response(
+                None,
+                vec![call("bad-1", "read_file", json!({}))],
+                1,
+                1,
+            )),
+            Ok(response(
+                Some(r#"{"summary":"fixed","status":"self_check"}"#),
+                Vec::new(),
+                1,
+                1,
+            )),
+        ]),
+        MemoryCheckpoints::default(),
+        3,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(result.handoff.stop_reason, StopReason::Completed);
+    assert_eq!(result.handoff.token_usage.tool_calls, 1);
+    let reply = result.model.requests[1].messages.last().unwrap();
+    assert!(
+        reply.content.contains("tidak sesuai skema"),
+        "{}",
+        reply.content
+    );
 }

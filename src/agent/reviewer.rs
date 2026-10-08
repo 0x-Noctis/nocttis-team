@@ -23,6 +23,7 @@ use crate::{
     store::artifact::ArtifactStore,
 };
 
+const INSTRUCTIONS: &str = include_str!("prompts/reviewer.md");
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_FINDINGS: usize = 64;
 const MAX_MESSAGE_BYTES: usize = 1_024;
@@ -309,6 +310,8 @@ impl<'a, M: ReviewerModel> Reviewer<'a, M> {
             "task": self.contract,
             "worker_handoff": self.handoff,
             "diff": metadata,
+            // Isi perubahan itu sendiri (terpotong). Tanpa ini reviewer hanya melihat ukuran dan checksum diff.
+            "diff_content": bounded_text(&snapshot.diff, MAX_SOURCE_BYTES),
             "source_excerpts": sources.iter().map(|source| json!({
                 "path": source.path,
                 "start_line": source.start_line,
@@ -329,11 +332,20 @@ impl<'a, M: ReviewerModel> Reviewer<'a, M> {
             task_id: self.contract.id.as_str().to_owned(),
             agent_run_id: self.agent_run_id.clone(),
             model_class: self.model_class.clone(),
-            messages: vec![Message {
-                role: MessageRole::User,
-                content,
-                tool_call_id: None,
-            }],
+            messages: vec![
+                Message {
+                    role: MessageRole::System,
+                    content: INSTRUCTIONS.to_owned(),
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                },
+                Message {
+                    role: MessageRole::User,
+                    content,
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                },
+            ],
             tools: Vec::new(),
             limits: ModelLimits {
                 max_input_tokens: self
@@ -362,8 +374,8 @@ impl<'a, M: ReviewerModel> Reviewer<'a, M> {
         if body.len() > MAX_RESPONSE_BYTES {
             return Err(ReviewerError::ResponseTooLarge);
         }
-        let raw: RawDecision =
-            serde_json::from_str(&body).map_err(|_| ReviewerError::InvalidResponse)?;
+        let raw: RawDecision = serde_json::from_str(ai_team::agent::json_text::extract(&body))
+            .map_err(|_| ReviewerError::InvalidResponse)?;
         match raw.decision {
             RawDecisionKind::Approved => {
                 if !raw.findings.is_empty() {
@@ -590,6 +602,26 @@ fn safe_untracked_path(root: &Path, relative: &str) -> Result<PathBuf, ReviewerE
         return Err(ReviewerError::MutationInspection);
     }
     Ok(canonical)
+}
+
+/// Teks diff untuk model, dipotong pada batas karakter yang valid dengan penanda; diff biner tidak ditampilkan.
+fn bounded_text(bytes: &[u8], maximum: usize) -> String {
+    if bytes
+        .windows(b"GIT binary patch".len())
+        .any(|w| w == b"GIT binary patch")
+    {
+        return "[diff biner tidak ditampilkan]".to_owned();
+    }
+    let mut text = String::from_utf8_lossy(bytes).into_owned();
+    if text.len() > maximum {
+        let mut end = maximum;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push_str("\n[... diff dipotong ...]");
+    }
+    text
 }
 
 fn validate_path(contract: &TaskContract, value: &str) -> Result<(), ReviewerError> {

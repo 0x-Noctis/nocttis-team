@@ -576,6 +576,7 @@ fn probe_request() -> ModelRequest {
             role: MessageRole::User,
             content: "Reply with exactly: OK".into(),
             tool_call_id: None,
+            tool_calls: Vec::new(),
         }],
         tools: Vec::new(),
         limits: ModelLimits {

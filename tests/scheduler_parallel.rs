@@ -760,3 +760,44 @@ async fn invalid_configuration_is_rejected(pool: PgPool) {
     ));
     assert!(build(|_| {}).is_none());
 }
+
+/// Regresi (benchmark M5-010 dengan model nyata): run tidak pernah berpindah ke DONE walau semua task-nya DONE.
+#[sqlx::test(migrations = "./migrations")]
+async fn run_is_completed_only_when_every_task_is_done(pool: PgPool) {
+    let finished = new_run(&pool, 1_000_000).await;
+    ready(&pool, "f1", finished, 1, &["src/f1/**"], &[]).await;
+    ready(&pool, "f2", finished, 1, &["src/f2/**"], &[]).await;
+    let partial = new_run(&pool, 1_000_000).await;
+    ready(&pool, "p1", partial, 1, &["src/p1/**"], &[]).await;
+    ready(&pool, "p2", partial, 1, &["src/p2/**"], &[]).await;
+    let paused = new_run(&pool, 1_000_000).await;
+    ready(&pool, "x1", paused, 1, &["src/x1/**"], &[]).await;
+    let empty = new_run(&pool, 1_000_000).await;
+    sqlx::query("UPDATE tasks SET status='DONE' WHERE id IN ('f1','f2','p1','x1')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE project_runs SET status='PAUSED' WHERE id=$1")
+        .bind(paused.1)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let sched = scheduler(&pool, &FakeRunner::new(pool.clone()), 1);
+    assert_eq!(sched.complete_finished_runs().await.unwrap(), 1);
+    assert_eq!(sched.complete_finished_runs().await.unwrap(), 0);
+    let run_status = |run: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>("SELECT status FROM project_runs WHERE id=$1")
+                .bind(run)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(run_status(finished.1).await, "DONE");
+    assert_eq!(run_status(partial.1).await, "RUNNING");
+    assert_eq!(run_status(paused.1).await, "PAUSED");
+    assert_eq!(run_status(empty.1).await, "RUNNING");
+}

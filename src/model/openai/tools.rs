@@ -59,14 +59,8 @@ impl OpenAiToolsClient {
         let started = Instant::now();
         let tools: Vec<_> = request.tools.iter().map(ProviderTool::from).collect();
         // Redaksi rahasia tepat sebelum keluar ke provider (satu choke point untuk Lead, worker, dan reviewer).
-        let messages: Vec<Message> = request
-            .messages
-            .iter()
-            .map(|message| Message {
-                content: ai_team::security::redact::redact(&message.content).into_owned(),
-                ..message.clone()
-            })
-            .collect();
+        let messages: Vec<OutgoingMessage> =
+            request.messages.iter().map(OutgoingMessage::from).collect();
         let response = self
             .http
             .post(self.endpoint.clone())
@@ -125,6 +119,7 @@ impl OpenAiToolsClient {
                         "Call {PROBE_TOOL_NAME} with enabled=true. Do not answer in text."
                     ),
                     tool_call_id: None,
+                    tool_calls: Vec::new(),
                 }],
                 tools: vec![ToolDefinition {
                     name: PROBE_TOOL_NAME.to_owned(),
@@ -154,9 +149,57 @@ impl OpenAiToolsClient {
 #[derive(Serialize)]
 struct ProviderRequest<'a> {
     model: &'a str,
-    messages: &'a [Message],
+    messages: &'a [OutgoingMessage],
     tools: &'a [ProviderTool<'a>],
     max_tokens: u64,
+}
+
+/// Bentuk pesan sesuai kontrak OpenAI: giliran assistant yang memanggil tool membawa `tool_calls` (argumen sebagai STRING
+/// JSON), dan pesan `tool` merujuk `tool_call_id` tersebut. Isi diredaksi di sini, termasuk argumen (mis. isi patch).
+#[derive(Serialize)]
+struct OutgoingMessage {
+    role: MessageRole,
+    content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tool_calls: Vec<ProviderOutgoingCall>,
+}
+
+#[derive(Serialize)]
+struct ProviderOutgoingCall {
+    id: String,
+    r#type: &'static str,
+    function: ProviderOutgoingFunction,
+}
+
+#[derive(Serialize)]
+struct ProviderOutgoingFunction {
+    name: String,
+    arguments: String,
+}
+
+impl From<&Message> for OutgoingMessage {
+    fn from(message: &Message) -> Self {
+        let redact = |text: &str| ai_team::security::redact::redact(text).into_owned();
+        Self {
+            role: message.role,
+            content: redact(&message.content),
+            tool_call_id: message.tool_call_id.clone(),
+            tool_calls: message
+                .tool_calls
+                .iter()
+                .map(|call| ProviderOutgoingCall {
+                    id: call.id.clone(),
+                    r#type: "function",
+                    function: ProviderOutgoingFunction {
+                        name: call.name.clone(),
+                        arguments: redact(&call.arguments.to_string()),
+                    },
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Serialize)]

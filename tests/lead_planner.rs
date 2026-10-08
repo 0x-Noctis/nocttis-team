@@ -187,3 +187,26 @@ async fn over_budget_including_attempts_is_rejected() {
         lead::LeadError::BudgetExceeded
     );
 }
+
+/// Model nyata sering membungkus JSON plan dengan pagar Markdown; plan tetap divalidasi ketat setelah diekstrak.
+#[tokio::test]
+async fn fenced_json_plan_is_accepted() {
+    let body = format!("Berikut plan:\n```json\n{}\n```", plan());
+    let mut model = FakeModel {
+        body,
+        request: None,
+    };
+    let plan = lead::propose(
+        &mut model,
+        &run(),
+        &discovery(),
+        "lead-run",
+        ModelLimits {
+            max_input_tokens: 12_000,
+            max_output_tokens: 8_000,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(plan.tasks.len(), 2);
+}

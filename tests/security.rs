@@ -180,6 +180,7 @@ async fn model_client_never_sends_secrets_to_the_provider() {
             role: MessageRole::User,
             content,
             tool_call_id: None,
+            tool_calls: Vec::new(),
         }],
         tools: Vec::new(),
         limits: ModelLimits {

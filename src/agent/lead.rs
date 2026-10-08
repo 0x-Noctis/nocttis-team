@@ -101,11 +101,13 @@ pub async fn propose<M: LeadModel>(
                     role: MessageRole::System,
                     content: INSTRUCTIONS.to_owned(),
                     tool_call_id: None,
+                    tool_calls: Vec::new(),
                 },
                 Message {
                     role: MessageRole::User,
                     content,
                     tool_call_id: None,
+                    tool_calls: Vec::new(),
                 },
             ],
             tools: Vec::new(),
@@ -129,7 +131,8 @@ fn parse_plan(
         return Err(LeadError::InvalidResponse);
     }
     let mut input: ProposedPlanInput =
-        serde_json::from_str(&body).map_err(|_| LeadError::InvalidResponse)?;
+        serde_json::from_str(ai_team::agent::json_text::extract(&body))
+            .map_err(|_| LeadError::InvalidResponse)?;
     // `context_refs` hanya boleh berisi `artifact://<id>`; model nyata sering mengisinya dengan path file, yang membuat
     // setiap dispatch gagal (`orchestrator.context`) SETELAH manusia menyetujui plan. Akses file tidak berasal dari sini
     // (itu `allowed_paths`), jadi referensi lain dibuang saat parse, bukan dibiarkan merusak eksekusi.

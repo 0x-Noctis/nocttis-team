@@ -646,6 +646,13 @@ impl Orchestrator {
         self.record_usage(attempt.id, "worker", run.handoff.token_usage)
             .await?;
         if run.error.is_some() || run.handoff.next_status != Some(TaskStatus::SelfCheck) {
+            // Sebab kegagalan hanya berupa jenis (tanpa isi prompt/respons/hasil tool), aman untuk log.
+            tracing::warn!(
+                attempt_id = %attempt.id,
+                stop_reason = ?run.handoff.stop_reason,
+                error = ?run.error,
+                "worker gagal"
+            );
             return self.fail_attempt(attempt.id, "worker.failed").await;
         }
         let current = self
