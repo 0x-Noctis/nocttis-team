@@ -128,8 +128,15 @@ fn parse_plan(
     if body.len() > MAX_RESPONSE_BYTES {
         return Err(LeadError::InvalidResponse);
     }
-    let input: ProposedPlanInput =
+    let mut input: ProposedPlanInput =
         serde_json::from_str(&body).map_err(|_| LeadError::InvalidResponse)?;
+    // `context_refs` hanya boleh berisi `artifact://<id>`; model nyata sering mengisinya dengan path file, yang membuat
+    // setiap dispatch gagal (`orchestrator.context`) SETELAH manusia menyetujui plan. Akses file tidak berasal dari sini
+    // (itu `allowed_paths`), jadi referensi lain dibuang saat parse, bukan dibiarkan merusak eksekusi.
+    for task in &mut input.tasks {
+        task.context_refs
+            .retain(|reference| reference.starts_with("artifact://"));
+    }
     let plan = ProposedPlan::try_from(input).map_err(LeadError::InvalidPlan)?;
     if plan.project_run_id != run.id
         || plan

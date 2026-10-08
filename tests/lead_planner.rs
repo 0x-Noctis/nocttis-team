@@ -105,6 +105,30 @@ async fn valid_plan_is_proposed_only() {
     assert_eq!(plan.tasks.len(), 2);
 }
 
+/// Regresi (benchmark M5-010): model nyata mengisi `context_refs` dengan PATH FILE, padahal ContextBuilder hanya menerima
+/// `artifact://<id>`; plan itu lolos validasi lalu setiap dispatch gagal `orchestrator.context`. Referensi yang bukan
+/// artifact dibuang saat plan diparse (akses file tetap hanya lewat `allowed_paths`), referensi artifact dipertahankan.
+#[tokio::test]
+async fn non_artifact_context_refs_are_dropped_but_artifact_refs_survive() {
+    let mut value = plan();
+    value["tasks"][0]["context_refs"] = json!([
+        "src/a.rs",
+        "artifact://0b3f9c2e-1111-4222-8333-444455556666",
+        "test/a.test.js"
+    ]);
+    value["tasks"][1]["context_refs"] = json!(["src/b.rs"]);
+    let plan = check(value).await.unwrap();
+    let refs = |i: usize| {
+        plan.tasks[i]
+            .context_refs
+            .iter()
+            .map(|r| r.as_str().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(refs(0), ["artifact://0b3f9c2e-1111-4222-8333-444455556666"]);
+    assert!(refs(1).is_empty());
+}
+
 #[tokio::test]
 async fn malformed_or_unverified_plan_is_rejected() {
     let mut missing = plan();
