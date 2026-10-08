@@ -204,7 +204,9 @@ async function runScenario(scenario, proxy) {
     const [[dbInput = '0'] = []] = sql(`SELECT coalesce(sum(u.input_tokens),0) FROM model_usage u JOIN agent_runs a ON a.id=u.agent_run_id JOIN tasks t ON t.id=a.task_id WHERE t.project_run_id='${runId}'`);
     const [[retries = '0'] = []] = sql(`SELECT count(*) FROM agent_runs a JOIN tasks t ON t.id=a.task_id WHERE t.project_run_id='${runId}' AND a.attempt>1`);
     const [[conflicts = '0'] = []] = sql(`SELECT count(*) FROM tasks WHERE project_run_id='${runId}' AND status='CONFLICT'`);
-    const tests = verifyIntegration(repository, runId, scenario.verify);
+    // Sukses = seluruh suite fixture lulus pada cabang integrasi. Pola nama test per skenario (`scenario.verify`) sengaja TIDAK
+    // dipakai: worker bebas menamai test-nya, sehingga pola dapat cocok dengan 0 test dan menolak pekerjaan yang benar.
+    const tests = verifyIntegration(repository, runId, 'node --test');
     const statuses = taskStatuses(runId);
     const [[humanEvents = '0'] = []] = sql(`SELECT count(*) FROM events e JOIN tasks t ON t.id=e.task_id WHERE t.project_run_id='${runId}' AND e.event_type='human_requested'`);
     const success = status === 'DONE' && tests.ran && tests.failed === 0 && tests.passed > 0;
