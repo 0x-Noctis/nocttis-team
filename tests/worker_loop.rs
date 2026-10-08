@@ -1230,7 +1230,7 @@ async fn previous_review_feedback_is_appended_to_the_first_message() {
     assert_eq!(result.handoff.stop_reason, StopReason::Completed);
     let first = &result.model.requests[0].messages[1];
     assert!(
-        first.content.contains("Umpan balik reviewer"),
+        first.content.contains("Umpan balik percobaan sebelumnya"),
         "{}",
         first.content
     );

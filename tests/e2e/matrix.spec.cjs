@@ -205,8 +205,28 @@ test.describe('verification and human decisions', () => {
       await until(() => taskStatuses(run)[ids.good] === 'DONE' && attempts(run).some((a) => a.task === ids.bad && a.finished > 0), 'both finished');
       const bad = attempts(run).find((a) => a.task === ids.bad);
       expect([bad.status, bad.error]).toEqual(['failed', 'verification.failed']);
-      expect(taskStatuses(run)[ids.bad]).not.toBe('DONE');
+      // Percobaan habis (max_attempts=1): bukan berhenti diam-diam di FAILED, tetapi menunggu keputusan manusia.
+      await until(() => taskStatuses(run)[ids.bad] === 'NEEDS_HUMAN', 'bad escalated');
       expect(integrationSubjects(repository, run)).toEqual([`integrate ${ids.good}`]);
+      baseIntact(repository);
+    } finally {
+      await dispose();
+    }
+  });
+
+  test('a failing verification is retried once with feedback, then escalates to a person without touching the base', async ({ request }) => {
+    const dispose = await withModel(request);
+    try {
+      const { run, ids, statements } = createRun('verifyretry', [{ id: 'bad', file: 'a.txt', to: 'bad-done', verify: 'grep -q impossible a.txt', maxAttempts: 2 }]);
+      sql(statements);
+      await until(() => taskStatuses(run)[ids.bad] === 'NEEDS_HUMAN', 'retried then escalated');
+      expect(attempts(run).map((a) => [a.status, a.error])).toEqual([
+        ['failed', 'verification.failed'],
+        ['failed', 'verification.failed']
+      ]);
+      // Umpan balik verifikasi tersimpan sebagai event untuk percobaan berikutnya.
+      expect(sql(`SELECT count(*) FROM events WHERE task_id='${ids.bad}' AND event_type='review_findings'`)).toBe('2');
+      expect(integrationSubjects(repository, run)).toEqual([]);
       baseIntact(repository);
     } finally {
       await dispose();

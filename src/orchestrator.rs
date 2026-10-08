@@ -761,7 +761,15 @@ impl Orchestrator {
         if remaining.is_zero() {
             return Err(OrchestratorError::Deadline);
         }
-        let report = self.run_verification(&current, worktree.path(), remaining, "")?;
+        // ID artifact verifikasi deterministik per task+perintah; percobaan ulang (attempt > 1) butuh scope sendiri supaya
+        // artifact percobaan sebelumnya tidak bentrok. Percobaan pertama tetap memakai scope kosong (ID tidak berubah).
+        let verification_scope = if attempt.attempt > 1 {
+            format!("attempt-{}", attempt.attempt)
+        } else {
+            String::new()
+        };
+        let report =
+            self.run_verification(&current, worktree.path(), remaining, &verification_scope)?;
         for (index, result) in report.results.iter().enumerate() {
             self.tasks
                 .record_event_once(
@@ -781,12 +789,35 @@ impl Orchestrator {
                 .await
                 .map_err(store_error)?;
         }
-        self.transition(&current, report.proposed_status, Actor::Verifier)
+        let after_verify = self
+            .transition(&current, report.proposed_status, Actor::Verifier)
             .await?;
         if deadline <= Instant::now() {
             return Err(OrchestratorError::Deadline);
         }
         if report.verdict == VerificationVerdict::Failed {
+            // Kegagalan verifikasi adalah kesalahan yang bisa diperbaiki: ringkasan hasilnya dibawa ke percobaan berikutnya.
+            // Tanpa percobaan tersisa task masuk NEEDS_HUMAN (tidak berhenti diam-diam di FAILED).
+            let feedback = self.verification_feedback(&report);
+            self.tasks
+                .record_event_once(
+                    attempt.task_id.as_str(),
+                    &format!("{}-verification-feedback", attempt.id),
+                    &DurableEvent::ReviewFindings { findings: feedback },
+                )
+                .await
+                .map_err(store_error)?;
+            let exhausted = self
+                .tasks
+                .attempts_exhausted(attempt.task_id.as_str())
+                .await
+                .map_err(store_error)?;
+            let next = if exhausted {
+                TaskStatus::NeedsHuman
+            } else {
+                TaskStatus::Ready
+            };
+            self.transition(&after_verify, next, Actor::System).await?;
             return self
                 .close_failed_attempt(attempt.id, "verification.failed")
                 .await;
@@ -1148,6 +1179,45 @@ impl Orchestrator {
             let _ = self.artifacts.remove(&artifact_id.to_string());
         }
         result.map_err(store_error)
+    }
+
+    /// Ringkasan verifikasi yang gagal untuk worker berikutnya: perintah, kode keluar, dan ekor keluaran (diredaksi, dibatasi).
+    fn verification_feedback(&self, report: &VerificationReport) -> String {
+        const TAIL_BYTES: usize = 1500;
+        let tail = |artifact_id: &str| -> String {
+            let Ok(bytes) = self.artifacts.read_bounded(artifact_id, 64 * 1024) else {
+                return String::new();
+            };
+            let text = String::from_utf8_lossy(&bytes);
+            let mut start = text.len().saturating_sub(TAIL_BYTES);
+            while !text.is_char_boundary(start) {
+                start += 1;
+            }
+            ai_team::security::redact::redact(text[start..].trim()).into_owned()
+        };
+        let mut lines = vec!["Verifikasi gagal pada percobaan sebelumnya:".to_owned()];
+        for result in report.results.iter().filter(|result| !result.passed) {
+            lines.push(format!(
+                "- perintah `{}` {} (kode keluar {:?})",
+                result.command,
+                if result.timed_out {
+                    "melewati batas waktu"
+                } else {
+                    "gagal"
+                },
+                result.exit_code
+            ));
+            for (label, id) in [
+                ("stdout", &result.stdout_artifact_id),
+                ("stderr", &result.stderr_artifact_id),
+            ] {
+                let output = tail(id);
+                if !output.is_empty() {
+                    lines.push(format!("  {label}:\n{output}"));
+                }
+            }
+        }
+        lines.join("\n").chars().take(4000).collect()
     }
 
     async fn fail_attempt(

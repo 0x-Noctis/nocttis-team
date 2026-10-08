@@ -295,7 +295,7 @@ impl<'a, M: WorkerModel, C: CheckpointStore> Worker<'a, M, C> {
                         let mut message = context_message(&context);
                         if let Some(feedback) = &self.feedback {
                             message.content.push_str(&format!(
-                                "\n\n### Umpan balik reviewer pada percobaan sebelumnya (perbaiki ini)\n{feedback}"
+                                "\n\n### Umpan balik percobaan sebelumnya: reviewer atau verifikasi (perbaiki ini)\n{feedback}"
                             ));
                         }
                         messages.push(message);

@@ -59,6 +59,8 @@ pub const VALID_TRANSITIONS: &[(TaskStatus, TaskStatus, Actor)] = &[
     (TaskStatus::Verify, TaskStatus::Failed, Actor::Verifier),
     (TaskStatus::Verify, TaskStatus::Integrate, Actor::Verifier),
     (TaskStatus::Failed, TaskStatus::Ready, Actor::System),
+    // Verifikasi gagal pada percobaan terakhir: tidak ada percobaan ulang, jadi manusia yang memutuskan.
+    (TaskStatus::Failed, TaskStatus::NeedsHuman, Actor::System),
     (TaskStatus::Integrate, TaskStatus::Done, Actor::Integrator),
     (
         TaskStatus::Integrate,
