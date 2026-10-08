@@ -12,6 +12,7 @@
 //   NOCTIS_BENCH_API             URL backend            (default http://127.0.0.1:7410)
 //   NOCTIS_BENCH_POSTGRES        nama container Postgres untuk psql (default noctis-agent-3-e2e-postgres)
 //   NOCTIS_BENCH_SCENARIOS       daftar id skenario dipisah koma (default semua); hasil parsial TIDAK boleh dilaporkan sebagai benchmark penuh
+//   NOCTIS_BENCH_ROUNDS          jumlah putaran penuh (default 1; rilis menuntut >= 3)
 //   NOCTIS_BENCH_OUT             berkas keluaran (default tests/baseline/mvp-results.json)
 //   NOCTIS_BENCH_TIMEOUT_SECONDS batas tunggu per skenario (default 900)
 //   NOCTIS_BENCH_OBJECTIVE_PREFIX awalan objective (hanya untuk validasi harness dengan fake provider)
@@ -33,6 +34,10 @@ const API = env('NOCTIS_BENCH_API', 'http://127.0.0.1:7410');
 const POSTGRES = env('NOCTIS_BENCH_POSTGRES', 'noctis-agent-3-e2e-postgres');
 const TIMEOUT_MS = Number(env('NOCTIS_BENCH_TIMEOUT_SECONDS', '900')) * 1000;
 const PROXY_PORT = 7420;
+/** Skenario yang tujuannya berhenti aman (meminta keputusan manusia), bukan selesai otomatis. Lihat compare.cjs. */
+const CONFLICT_SCENARIOS = new Set(['file-conflict']);
+/** Status task yang tidak akan berubah sendiri: selesai, atau menunggu manusia/dibatalkan. */
+const SETTLED = new Set(['DONE', 'NEEDS_HUMAN', 'CONFLICT', 'FAILED_FINAL', 'CANCELLED']);
 // Scheduler memilih model dari konfigurasi backend (NOCTIS__PROVIDER__MODEL); ID ini HARUS sama dengan nilai itu.
 const MODEL_ID = env('NOCTIS_BENCH_MODEL_ID', 'bench-model');
 
@@ -112,6 +117,15 @@ function sql(statement) {
   return result.stdout.trim().split('\n').filter(Boolean).map((line) => line.split('|'));
 }
 
+const taskStatuses = (runId) => sql(`SELECT status FROM tasks WHERE project_run_id='${runId}'`).map(([status]) => status);
+
+/** Branch dasar utuh = `main` masih di commit awal dan working tree-nya bersih (hasil kerja hanya di cabang integrasi). */
+function baseIntact(repository, baseCommit) {
+  const head = spawnSync('git', ['-C', repository, 'rev-parse', 'main'], { encoding: 'utf8' });
+  const status = spawnSync('git', ['-C', repository, 'status', '--porcelain'], { encoding: 'utf8' });
+  return head.status === 0 && head.stdout.trim() === baseCommit && status.status === 0 && status.stdout.trim() === '';
+}
+
 /** Salin fixture ke repository sementara (reset.sh membuat commit deterministik di .fixture-repo). */
 function freshRepository() {
   const reset = spawnSync('sh', [path.join(fixtureDir, 'reset.sh')], { encoding: 'utf8' });
@@ -153,6 +167,8 @@ async function registerModel(providerId, upstreamBase) {
 
 async function runScenario(scenario, proxy) {
   const repository = freshRepository();
+  const baseCommit = spawnSync('git', ['-C', repository, 'rev-parse', 'main'], { encoding: 'utf8' }).stdout.trim();
+  const kind = CONFLICT_SCENARIOS.has(scenario.id) ? 'conflict' : 'normal';
   const providerId = `bench-${crypto.randomUUID().slice(0, 8)}`;
   const projectId = crypto.randomUUID();
   const runId = crypto.randomUUID();
@@ -173,6 +189,9 @@ async function runScenario(scenario, proxy) {
     while (Date.now() - started < TIMEOUT_MS) {
       status = (await api('GET', `/api/v1/runs/${runId}`)).run.status;
       if (['DONE', 'FAILED', 'CANCELLED'].includes(status)) break;
+      // Berhenti menunggu bila semua task sudah mapan (selesai atau menunggu manusia): tidak perlu menghabiskan timeout.
+      const statuses = taskStatuses(runId);
+      if (statuses.length && statuses.every((value) => SETTLED.has(value))) break;
       await new Promise((resolve) => setTimeout(resolve, 2000));
     }
     const latency = Math.round((Date.now() - started) / 1000);
@@ -186,9 +205,18 @@ async function runScenario(scenario, proxy) {
     const [[retries = '0'] = []] = sql(`SELECT count(*) FROM agent_runs a JOIN tasks t ON t.id=a.task_id WHERE t.project_run_id='${runId}' AND a.attempt>1`);
     const [[conflicts = '0'] = []] = sql(`SELECT count(*) FROM tasks WHERE project_run_id='${runId}' AND status='CONFLICT'`);
     const tests = verifyIntegration(repository, runId, scenario.verify);
+    const statuses = taskStatuses(runId);
+    const [[humanEvents = '0'] = []] = sql(`SELECT count(*) FROM events e JOIN tasks t ON t.id=e.task_id WHERE t.project_run_id='${runId}' AND e.event_type='human_requested'`);
+    const success = status === 'DONE' && tests.ran && tests.failed === 0 && tests.passed > 0;
     return {
       scenario: scenario.id,
-      success: status === 'DONE' && tests.ran && tests.failed === 0 && tests.passed > 0,
+      kind,
+      success,
+      // Berhenti aman: tidak selesai, ada task yang menunggu keputusan manusia (NEEDS_HUMAN/CONFLICT), dan sistem mencatatnya.
+      escalated_safely: !success && statuses.some((value) => value === 'NEEDS_HUMAN' || value === 'CONFLICT'),
+      base_intact: baseIntact(repository, baseCommit),
+      human_requested_events: Number(humanEvents),
+      task_statuses: statuses,
       run_status: status,
       ...used,
       db_input_tokens: Number(dbInput),
@@ -208,7 +236,12 @@ async function runScenario(scenario, proxy) {
     // Tanpa intervensi: kolektor tidak mengulang permintaan Lead atau memperbaiki apa pun secara manual.
     return {
       scenario: scenario.id,
+      kind,
       success: false,
+      escalated_safely: false,
+      base_intact: baseIntact(repository, baseCommit),
+      human_requested_events: 0,
+      task_statuses: [],
       run_status: 'ERROR',
       error: String(error.message).slice(0, 400),
       input_tokens: proxy.totals.input - before.input,
@@ -240,11 +273,14 @@ async function main() {
   const scenarios = JSON.parse(fs.readFileSync(path.join(fixtureDir, 'scenarios', 'tasks.json'), 'utf8')).filter((scenario) => !only || only.includes(scenario.id));
   if (!scenarios.length) throw new Error('NOCTIS_BENCH_SCENARIOS tidak cocok dengan skenario mana pun');
   const proxy = await startProxy(process.env.NOCTIS_BENCH_UPSTREAM);
+  const rounds = Math.max(1, Number(env('NOCTIS_BENCH_ROUNDS', '1')));
   const runs = [];
   try {
-    for (const scenario of scenarios) {
-      console.error(`skenario ${scenario.id}…`);
-      runs.push(await runScenario(scenario, proxy));
+    for (let round = 1; round <= rounds; round += 1) {
+      for (const scenario of scenarios) {
+        console.error(`putaran ${round}/${rounds} skenario ${scenario.id}…`);
+        runs.push({ round, ...(await runScenario(scenario, proxy)) });
+      }
     }
   } finally {
     proxy.server.close();
@@ -257,6 +293,7 @@ async function main() {
     model: process.env.NOCTIS_BENCH_MODEL,
     fixture_commit: spawnSync('git', ['-C', path.join(fixtureDir, '.fixture-repo'), 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim(),
     pricing: null,
+    rounds,
     runs
   }, null, 2)}\n`);
   console.error(`tulis ${out}`);
