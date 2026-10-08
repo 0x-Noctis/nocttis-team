@@ -791,6 +791,51 @@ impl TaskRepository {
     }
 
     pub async fn fail_runtime(&self, attempt_id: Uuid, error_code: &str) -> Result<(), StoreError> {
+        self.fail_runtime_with(attempt_id, error_code, false).await
+    }
+
+    /// Seperti `fail_runtime`, tetapi task SELALU masuk `NEEDS_HUMAN` (tanpa percobaan ulang): dipakai saat worker
+    /// meminta keputusan manusia.
+    pub async fn fail_runtime_escalating(
+        &self,
+        attempt_id: Uuid,
+        error_code: &str,
+    ) -> Result<(), StoreError> {
+        self.fail_runtime_with(attempt_id, error_code, true).await
+    }
+
+    /// True bila jumlah attempt task sudah mencapai `max_attempts` (tidak ada percobaan ulang tersisa).
+    pub async fn attempts_exhausted(&self, task_id: &str) -> Result<bool, StoreError> {
+        sqlx::query_scalar(
+            "SELECT (SELECT count(*) FROM agent_runs WHERE task_id=t.id) >= t.max_attempts FROM tasks t WHERE t.id=$1",
+        )
+        .bind(task_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::Database)?
+        .ok_or(StoreError::NotFound)
+    }
+
+    /// Umpan balik reviewer terbaru untuk task (kosong bila belum pernah ditolak).
+    pub async fn latest_review_feedback(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        sqlx::query_scalar(
+            "SELECT payload->>'findings' FROM events WHERE task_id=$1 AND event_type='review_findings' ORDER BY id DESC LIMIT 1",
+        )
+        .bind(task_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::Database)
+    }
+
+    async fn fail_runtime_with(
+        &self,
+        attempt_id: Uuid,
+        error_code: &str,
+        escalate: bool,
+    ) -> Result<(), StoreError> {
         validate_error_code(Some(error_code))?;
         let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
         let row = sqlx::query(
@@ -829,7 +874,20 @@ impl TaskRepository {
                 .await
                 .map_err(StoreError::Database)?;
             let stored = task_from_row(&task)?;
-            let to = recovery_transition(&stored.contract, stored.status, ambiguous)?;
+            // Tanpa percobaan tersisa (atau worker minta manusia) task tidak boleh kembali READY diam-diam: ia masuk
+            // NEEDS_HUMAN supaya terlihat di antrean Approvals.
+            let exhausted: bool = sqlx::query_scalar(
+                "SELECT (SELECT count(*) FROM agent_runs WHERE task_id=$1) >= max_attempts FROM tasks WHERE id=$1",
+            )
+            .bind(&task_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(StoreError::Database)?;
+            let to = recovery_transition(
+                &stored.contract,
+                stored.status,
+                ambiguous || escalate || exhausted,
+            )?;
             sqlx::query(
                 "UPDATE tasks SET status=$2,version=version+1,updated_at=now() WHERE id=$1",
             )

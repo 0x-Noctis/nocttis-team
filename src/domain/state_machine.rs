@@ -71,6 +71,12 @@ pub const VALID_TRANSITIONS: &[(TaskStatus, TaskStatus, Actor)] = &[
         TaskStatus::NeedsHuman,
         Actor::Integrator,
     ),
+    // Penolakan reviewer pada attempt terakhir: tidak ada percobaan ulang, jadi manusia yang memutuskan.
+    (
+        TaskStatus::ChangesRequested,
+        TaskStatus::NeedsHuman,
+        Actor::System,
+    ),
     (TaskStatus::NeedsHuman, TaskStatus::Ready, Actor::Human),
 ];
 

@@ -264,6 +264,10 @@ pub enum DurableEvent {
         command_index: usize,
         artifact_ids: [String; 2],
     },
+    /// Ringkasan temuan reviewer saat menolak perubahan; dibawa ke percobaan berikutnya sebagai umpan balik.
+    ReviewFindings { findings: String },
+    /// Worker meminta keputusan manusia (`request_human`); task dihentikan dan masuk antrean Approvals.
+    HumanRequested { message: String },
 }
 
 impl DurableEvent {
@@ -271,6 +275,8 @@ impl DurableEvent {
         match self {
             Self::Usage { .. } => "usage",
             Self::Verification { .. } => "verification",
+            Self::ReviewFindings { .. } => "review_findings",
+            Self::HumanRequested { .. } => "human_requested",
         }
     }
 }

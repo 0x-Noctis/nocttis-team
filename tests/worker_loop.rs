@@ -1202,3 +1202,37 @@ async fn allowed_file_contents_are_preloaded_into_the_first_message() {
         first.content
     );
 }
+
+/// Percobaan ulang (M5-015): temuan reviewer dari percobaan sebelumnya ditambahkan ke pesan pertama worker.
+#[tokio::test]
+async fn previous_review_feedback_is_appended_to_the_first_message() {
+    let fixture = Fixture::new();
+    let task = contract(100, 100, 10);
+    let context = fixture.context();
+    let tools = fixture.tools();
+    let result = Worker::new(
+        &task,
+        TaskStatus::Running,
+        &context,
+        &tools,
+        model(vec![Ok(response(
+            Some(r#"{"summary":"fixed","status":"self_check"}"#),
+            Vec::new(),
+            1,
+            1,
+        ))]),
+        MemoryCheckpoints::default(),
+        config(2, Duration::from_secs(5)),
+    )
+    .with_feedback(Some("- [High] EMPTY_DIFF: tidak ada perubahan".to_owned()))
+    .run()
+    .await;
+    assert_eq!(result.handoff.stop_reason, StopReason::Completed);
+    let first = &result.model.requests[0].messages[1];
+    assert!(
+        first.content.contains("Umpan balik reviewer"),
+        "{}",
+        first.content
+    );
+    assert!(first.content.contains("EMPTY_DIFF"));
+}

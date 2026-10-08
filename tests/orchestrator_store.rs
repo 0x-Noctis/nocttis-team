@@ -1720,3 +1720,109 @@ async fn verifier_failure_and_changes_requested_close_attempt_legally(pool: PgPo
         );
     }
 }
+
+/// Eskalasi (M5-015): task yang kehabisan percobaan atau diminta manusia oleh worker masuk NEEDS_HUMAN, tidak kembali
+/// READY diam-diam. Percobaan masih tersisa + kegagalan biasa tetap READY (percobaan ulang).
+#[sqlx::test(migrations = "./migrations")]
+async fn exhausted_or_human_requested_attempts_escalate_to_needs_human(pool: PgPool) {
+    let (project_id, run_id) = ownership(&pool).await;
+    let repository = TaskRepository::new(pool.clone());
+
+    // Tersisa percobaan: gagal biasa -> READY; belum habis.
+    let retry = contract("esc-retry", project_id, run_id, 2);
+    ready(&repository, &retry).await;
+    let attempt = repository
+        .claim_ready(2, &claim("esc-retry"))
+        .await
+        .unwrap();
+    start(&repository, attempt.id).await;
+    assert!(!repository.attempts_exhausted("esc-retry").await.unwrap());
+    repository
+        .fail_runtime(attempt.id, "worker.failed")
+        .await
+        .unwrap();
+    assert_eq!(
+        repository.get("esc-retry").await.unwrap().status,
+        TaskStatus::Ready
+    );
+
+    // Percobaan terakhir gagal -> NEEDS_HUMAN.
+    let exhausted = contract("esc-exhausted", project_id, run_id, 1);
+    ready(&repository, &exhausted).await;
+    let attempt = repository
+        .claim_ready(2, &claim("esc-exhausted"))
+        .await
+        .unwrap();
+    start(&repository, attempt.id).await;
+    assert!(
+        repository
+            .attempts_exhausted("esc-exhausted")
+            .await
+            .unwrap()
+    );
+    repository
+        .fail_runtime(attempt.id, "worker.failed")
+        .await
+        .unwrap();
+    assert_eq!(
+        repository.get("esc-exhausted").await.unwrap().status,
+        TaskStatus::NeedsHuman
+    );
+
+    // Worker minta manusia: NEEDS_HUMAN walau percobaan masih tersisa.
+    let human = contract("esc-human", project_id, run_id, 3);
+    ready(&repository, &human).await;
+    let attempt = repository
+        .claim_ready(2, &claim("esc-human"))
+        .await
+        .unwrap();
+    start(&repository, attempt.id).await;
+    assert!(!repository.attempts_exhausted("esc-human").await.unwrap());
+    repository
+        .fail_runtime_escalating(attempt.id, "worker.human_requested")
+        .await
+        .unwrap();
+    assert_eq!(
+        repository.get("esc-human").await.unwrap().status,
+        TaskStatus::NeedsHuman
+    );
+}
+
+/// Umpan balik reviewer disimpan sebagai event dan hanya yang terbaru dikembalikan.
+#[sqlx::test(migrations = "./migrations")]
+async fn latest_review_feedback_returns_the_newest_findings(pool: PgPool) {
+    let (project_id, run_id) = ownership(&pool).await;
+    let repository = TaskRepository::new(pool.clone());
+    let task = contract("feedback-task", project_id, run_id, 2);
+    ready(&repository, &task).await;
+    assert_eq!(
+        repository
+            .latest_review_feedback("feedback-task")
+            .await
+            .unwrap(),
+        None
+    );
+    for (key, text) in [
+        ("a", "- [High] EMPTY_DIFF: tidak ada perubahan"),
+        ("b", "- [Low] STYLE: nama"),
+    ] {
+        repository
+            .record_event_once(
+                "feedback-task",
+                key,
+                &DurableEvent::ReviewFindings {
+                    findings: text.to_owned(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        repository
+            .latest_review_feedback("feedback-task")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("- [Low] STYLE: nama")
+    );
+}

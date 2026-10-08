@@ -13,6 +13,10 @@ export function explainError(code: string | null): string {
       return 'The worker stopped while integrating its patch. The patch may be partly applied, so a person must check it.';
     case 'recovery.worktree_unverified':
       return 'The worker’s working copy is missing or could not be verified, so its progress cannot be trusted.';
+    case 'worker.human_requested':
+      return 'The worker stopped and asked for a human decision. Read its message in the task history, then retry or cancel.';
+    case 'review.changes_requested':
+      return 'The reviewer rejected the change and no attempts are left, so a person must decide.';
     case 'recovery.stale':
       return 'The worker stopped reporting and was recovered.';
     default:

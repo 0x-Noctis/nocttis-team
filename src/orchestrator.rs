@@ -20,7 +20,7 @@ use crate::{
         },
         reviewer::{ReviewDecision, Reviewer, SourceExcerpt, VerificationEvidence},
         verifier::{ProductionExecutor, VerificationReport, VerificationVerdict, Verifier},
-        worker::{TokenUsage, Worker, WorkerConfig},
+        worker::{StopReason, TokenUsage, Worker, WorkerConfig},
     },
     context::{ContextBuilder, ContextLimits, ContextRequest},
     domain::{
@@ -543,7 +543,9 @@ impl Orchestrator {
             model.remote_name.as_str(),
             Duration::from_secs(provider.request_timeout_seconds.get() as u64),
         )
-        .map_err(|_| OrchestratorError::Model)?;
+        .map_err(|_| OrchestratorError::Model)?
+        // Anti-SSRF pada setiap panggilan worker/reviewer, bukan hanya saat probe.
+        .enforce_destination_policy();
         // Retry terbatas + gerbang budget/efek samping untuk model yang dipilih task. Fallback ke model/provider lain
         // sengaja tidak diaktifkan: itu mengirim kode repository ke pihak lain yang tidak dipilih operator, jadi
         // butuh konfigurasi eksplisit (daftar kandidat tetap kosong sampai ada).
@@ -627,6 +629,11 @@ impl Orchestrator {
             .get(attempt.task_id.as_str())
             .await
             .map_err(store_error)?;
+        let feedback = self
+            .tasks
+            .latest_review_feedback(attempt.task_id.as_str())
+            .await
+            .map_err(store_error)?;
         let run = Worker::new(
             &task.contract,
             TaskStatus::Running,
@@ -641,10 +648,32 @@ impl Orchestrator {
                 deadline: deadline.saturating_duration_since(Instant::now()),
             },
         )
+        .with_feedback(feedback)
         .run()
         .await;
         self.record_usage(attempt.id, "worker", run.handoff.token_usage)
             .await?;
+        if run.handoff.stop_reason == StopReason::HumanRequested {
+            // Worker meminta keputusan manusia: simpan pesannya (diredaksi, dibatasi) dan hentikan task di NEEDS_HUMAN
+            // tanpa percobaan ulang, supaya muncul di antrean Approvals.
+            let message: String = ai_team::security::redact::redact(&run.handoff.summary)
+                .chars()
+                .take(1000)
+                .collect();
+            self.tasks
+                .record_event_once(
+                    attempt.task_id.as_str(),
+                    &format!("{}-human-requested", attempt.id),
+                    &DurableEvent::HumanRequested { message },
+                )
+                .await
+                .map_err(store_error)?;
+            return self
+                .tasks
+                .fail_runtime_escalating(attempt.id, "worker.human_requested")
+                .await
+                .map_err(store_error);
+        }
         if run.error.is_some() || run.handoff.next_status != Some(TaskStatus::SelfCheck) {
             // Sebab kegagalan hanya berupa jenis (tanpa isi prompt/respons/hasil tool), aman untuk log.
             tracing::warn!(
@@ -683,10 +712,47 @@ impl Orchestrator {
         let current = self
             .transition(&current, outcome.next_status, Actor::Reviewer)
             .await?;
-        if matches!(outcome.decision, ReviewDecision::ChangesRequested { .. }) {
-            let _ = self
-                .transition(&current, TaskStatus::Ready, Actor::System)
-                .await?;
+        if let ReviewDecision::ChangesRequested { findings } = &outcome.decision {
+            // Temuan dibawa ke percobaan berikutnya. Tanpa percobaan tersisa, manusia yang memutuskan (bukan READY diam-diam).
+            let summary: String = findings
+                .iter()
+                .map(|finding| {
+                    format!(
+                        "- [{:?}] {}: {}{}",
+                        finding.severity,
+                        finding.code,
+                        finding.message,
+                        finding
+                            .path
+                            .as_deref()
+                            .map(|path| format!(" ({path})"))
+                            .unwrap_or_default()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                .chars()
+                .take(4000)
+                .collect();
+            self.tasks
+                .record_event_once(
+                    attempt.task_id.as_str(),
+                    &format!("{}-review-findings", attempt.id),
+                    &DurableEvent::ReviewFindings { findings: summary },
+                )
+                .await
+                .map_err(store_error)?;
+            let exhausted = self
+                .tasks
+                .attempts_exhausted(attempt.task_id.as_str())
+                .await
+                .map_err(store_error)?;
+            let next = if exhausted {
+                TaskStatus::NeedsHuman
+            } else {
+                TaskStatus::Ready
+            };
+            let _ = self.transition(&current, next, Actor::System).await?;
             return self
                 .close_failed_attempt(attempt.id, "review.changes_requested")
                 .await;

@@ -197,6 +197,8 @@ pub struct Worker<'a, M, C> {
     checkpoints: C,
     config: WorkerConfig,
     clock: Box<dyn WorkerClock + 'a>,
+    /// Temuan reviewer dari percobaan sebelumnya (bila ada), ditambahkan ke pesan pertama.
+    feedback: Option<String>,
 }
 
 impl<'a, M: WorkerModel, C: CheckpointStore> Worker<'a, M, C> {
@@ -241,7 +243,14 @@ impl<'a, M: WorkerModel, C: CheckpointStore> Worker<'a, M, C> {
             checkpoints,
             config,
             clock: Box::new(clock),
+            feedback: None,
         }
+    }
+
+    /// Sertakan temuan reviewer dari percobaan sebelumnya supaya percobaan ulang tidak mengulang kesalahan yang sama.
+    pub fn with_feedback(mut self, feedback: Option<String>) -> Self {
+        self.feedback = feedback;
+        self
     }
 
     pub async fn run(mut self) -> WorkerRun<M, C> {
@@ -282,7 +291,15 @@ impl<'a, M: WorkerModel, C: CheckpointStore> Worker<'a, M, C> {
                     search_terms: Vec::new(),
                 };
                 match self.context.build(self.contract, &request) {
-                    Ok(context) => messages.push(context_message(&context)),
+                    Ok(context) => {
+                        let mut message = context_message(&context);
+                        if let Some(feedback) = &self.feedback {
+                            message.content.push_str(&format!(
+                                "\n\n### Umpan balik reviewer pada percobaan sebelumnya (perbaiki ini)\n{feedback}"
+                            ));
+                        }
+                        messages.push(message);
+                    }
                     Err(_) => {
                         return self.finish(
                             summary,
